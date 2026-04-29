@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import time
 
-from llm import generate_sql
 from db import run_query, get_schema
 from guardrails import is_safe_sql
 from openai import OpenAI
@@ -29,14 +28,22 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ---------------- HEADER ---------------- #
-st.markdown("# 📊 GenAI SQL Assistant")
-st.caption("🚀 AI-powered Data Analyst")
+st.markdown("""
+# 📊 GenAI SQL Assistant  
+### Turn natural language into SQL + insights instantly
+""")
+
 st.divider()
+st.markdown("<br>", unsafe_allow_html=True)
 
 # ---------------- SIDEBAR ---------------- #
 with st.sidebar:
     st.title("⚙️ Settings")
 
+    if st.button("🧹 Clear Chat"):
+        st.session_state.messages = []
+        st.session_state.history = []
+        st.rerun()
     st.markdown("### 💡 Sample Queries")
     st.markdown("""
     - List all customers  
@@ -75,14 +82,14 @@ st.markdown("### 💡 Try these:")
 
 c1, c2, c3 = st.columns(3)
 
-if c1.button("Top customers"):
-    user_input = "Top customers by spending"
+if c1.button("📌 Top Customers"):
+    user_input = "Top 10 customers by invoices"
 
-if c2.button("Invoices summary"):
-    user_input = "Show total invoices by country"
+if c2.button("📊 Revenue by Country"):
+    user_input = "Revenue by country"
 
-if c3.button("Track analysis"):
-    user_input = "Top tracks by sales"
+if c3.button("🎵 Top Tracks"):
+    user_input = "Top 10 tracks"
 # ---------------- SAFE RUN ---------------- #
 def safe_run(sql, question, schema):
     try:
@@ -159,13 +166,18 @@ if user_input:
 
         sql = response.choices[0].message.content.strip()
         sql = sql.replace("```sql", "").replace("```", "").strip()
+        
+        if not is_safe_sql(sql):
+                st.error("🚫 Unsafe query blocked (Only SELECT queries allowed)")
+                st.stop()
 
     # Stage 2
     with st.spinner("🗄️ Running query..."):
 
         # ✅ USE CSV IF UPLOADED
         if "uploaded_df" in st.session_state:
-            df = st.session_state.uploaded_df.query(sql)
+            st.warning("⚠️ CSV mode: showing raw data (SQL not applied)")
+            df = st.session_state.uploaded_df
             cols = df.columns
             rows = df.values
         else:
@@ -177,29 +189,19 @@ if user_input:
 
     # ✅ AFTER SPINNER (EXACT PLACE)
     st.success(f"✅ Query returned {len(df)} rows")
-    st.session_state.messages.append({
-    "role": "assistant",
-    "content": f"📊 Found {len(df)} rows. Check dashboard for insights."
-    })
+    st.info(f"📊 Found {len(df)} rows...")
 
     st.divider()
-    st.subheader("📊 Quick Visualization")
-
+    st.subheader("📊 Quick Insights")
     if not df.empty:
         numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
         cat_cols = df.select_dtypes(include=["object", "string"]).columns.tolist()
 
         if numeric_cols and cat_cols:
             chart_df = df[[cat_cols[0], numeric_cols[0]]].dropna().set_index(cat_cols[0])
-            st.bar_chart(chart_df)
+            st.bar_chart(chart_df, height=400)        
         else:
             st.info("No suitable columns for visualization")
-
-    # ✅ safety check OUTSIDE
-    if not is_safe_sql(sql):
-        st.error("Unsafe query blocked")
-
-    # ✅ NOW TRY BLOCK (correct position)
     try:
             exec_time = time.time() - start
             st.session_state.messages.append({
@@ -225,10 +227,10 @@ if user_input:
 
                     # ✅ FIX 3 + 4: Handle empty data safely
                     if df.empty:
-                        st.warning("⚠️ Query returned no data")
+                        st.warning("⚠️ No data found for this query")
                     else:
-                        st.dataframe(df, width="stretch")
-
+                        st.dataframe(df, use_container_width=True)
+                        st.caption(f"Showing {len(df)} rows")
                 # KPI CARDS
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Rows", len(df))
@@ -241,6 +243,7 @@ if user_input:
                 cat_cols = df.select_dtypes(include=["object", "string"]).columns
 
                 if not df.empty:
+
                     # ✅ KEEP SELECTION STATE
                     if "x_col" not in st.session_state:
                         st.session_state.x_col = None

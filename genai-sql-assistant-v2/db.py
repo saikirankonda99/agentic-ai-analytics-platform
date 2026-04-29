@@ -6,7 +6,8 @@ DB_PATH = "data/chinook.db"
 
 # ---------------- RUN QUERY ---------------- #
 @st.cache_data(show_spinner=False)
-def run_query(sql: str):
+@st.cache_data(ttl=600)
+def run_query(sql):
     try:
         with sqlite3.connect(DB_PATH) as conn:
             cursor = conn.cursor()
