@@ -16,8 +16,28 @@ st.set_page_config(
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 # ---------------- STYLE ---------------- #
+# ---------------- STYLE ---------------- #
 st.markdown("""
 <style>
+.block-container {
+    padding-top: 2rem;
+    padding-bottom: 2rem;
+}
+
+.stButton > button {
+    border-radius: 10px;
+    padding: 0.6rem 1rem;
+    font-weight: 500;
+}
+
+.stTextInput > div > div > input {
+    border-radius: 10px;
+}
+
+[data-testid="stMetricValue"] {
+    font-size: 28px;
+}
+
 .stMetric {
     background-color: #0e1117;
     padding: 12px;
@@ -38,7 +58,7 @@ st.markdown("<br>", unsafe_allow_html=True)
 
 # ---------------- SIDEBAR ---------------- #
 with st.sidebar:
-    st.title("⚙️ Settings")
+    st.markdown("## ⚙️ Settings")
 
     if st.button("🧹 Clear Chat"):
         st.session_state.messages = []
@@ -76,19 +96,22 @@ if "history" not in st.session_state:
 tab1, tab2, tab3 = st.tabs(["💬 Chat", "📊 Dashboard", "🧠 History"])
 
 # ---------------- INPUT ---------------- #
-user_input = st.chat_input("Ask your data question...")
-# ✅ ADD HERE (EXACT)
+col1, col2, col3 = st.columns([1,2,1])
+
+with col2:
+    user_input = st.chat_input("Ask your data question...")
+
 st.markdown("### 💡 Try these:")
 
 c1, c2, c3 = st.columns(3)
 
-if c1.button("📌 Top Customers"):
+if c1.button("📌 Top Customers", use_container_width=True):
     user_input = "Top 10 customers by invoices"
 
-if c2.button("📊 Revenue by Country"):
+if c2.button("📊 Revenue by Country", use_container_width=True):
     user_input = "Revenue by country"
 
-if c3.button("🎵 Top Tracks"):
+if c3.button("🎵 Top Tracks", use_container_width=True):
     user_input = "Top 10 tracks"
 # ---------------- SAFE RUN ---------------- #
 def safe_run(sql, question, schema):
@@ -197,16 +220,10 @@ if user_input:
 
             df = pd.DataFrame(rows, columns=cols)
 
-    # ✅ Stage 3: Prepare Data
-    with st.spinner("📊 Preparing results..."):
-        df = pd.DataFrame(rows, columns=cols)
-
-    # ✅ AFTER SPINNER (EXACT PLACE)
-    st.success(f"✅ Query returned {len(df)} rows")
-    st.info(f"📊 Found {len(df)} rows...")
+    st.success(f"📊 Found {len(df)} rows")
 
     st.divider()
-    st.subheader("📊 Quick Insights")
+    st.markdown("### 📊 Insights Dashboard")
     if not df.empty:
         numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
         cat_cols = df.select_dtypes(include=["object", "string"]).columns.tolist()
@@ -333,7 +350,7 @@ if user_input:
                             st.caption(f"Using: {x_col} vs {y_col}")
 
                             if chart_type == "Bar":
-                                st.bar_chart(chart_df)
+                                st.bar_chart(chart_df, height=400)
                             elif chart_type == "Line":
                                 st.line_chart(chart_df)
                             else:
@@ -394,3 +411,12 @@ with tab3:
 - **SQL:** `{h['sql']}`  
 - Rows: {h['rows']}
 """)
+
+st.markdown("---")
+
+st.markdown("""
+<div style='text-align:center; color:gray; font-size:14px;'>
+Built with ❤️ using Streamlit + OpenAI <br>
+GenAI SQL Assistant • 2026
+</div>
+""", unsafe_allow_html=True)
