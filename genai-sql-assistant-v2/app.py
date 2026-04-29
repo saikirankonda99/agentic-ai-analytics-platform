@@ -94,8 +94,10 @@ if c3.button("🎵 Top Tracks"):
 def safe_run(sql, question, schema):
     try:
         return run_query(sql)
+
     except Exception as e:
-        fix_prompt = f"""
+        try:
+            fix_prompt = f"""
 Fix this SQL query.
 
 Schema:
@@ -109,17 +111,23 @@ Error:
 
 Return ONLY corrected SQL.
 """
-        response = client.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=[{"role": "user", "content": fix_prompt}],
-            temperature=0
-        )
 
-        fixed_sql = response.choices[0].message.content.strip()
-        fixed_sql = fixed_sql.replace("```sql", "").replace("```", "").strip()
+            response = client.chat.completions.create(
+                model="gpt-4.1-mini",
+                messages=[{"role": "user", "content": fix_prompt}],
+                temperature=0
+            )
 
-        return run_query(fixed_sql)
+            fixed_sql = response.choices[0].message.content.strip()
+            fixed_sql = fixed_sql.replace("```sql", "").replace("```", "").strip()
 
+            return run_query(fixed_sql)
+
+        except Exception as e2:
+            st.error("❌ Query failed even after fixing.")
+            st.code(sql, language="sql")
+            st.error(str(e2))
+            return [], []
 # ---------------- CHAT TAB ---------------- #
 with tab1:
     st.subheader("💬 Chat")
@@ -182,6 +190,12 @@ if user_input:
             rows = df.values
         else:
             cols, rows = safe_run(sql, question, schema)
+
+            if not cols or not rows:
+                st.warning("⚠️ No data or query failed")
+                st.stop()
+
+            df = pd.DataFrame(rows, columns=cols)
 
     # ✅ Stage 3: Prepare Data
     with st.spinner("📊 Preparing results..."):
