@@ -158,7 +158,7 @@ if user_input:
         )
 
         sql = response.choices[0].message.content.strip()
-        sql = sql.replace("```sql", "").replace("```", "").strip()        sql = sql.replace("```sql", "").replace("```", "").strip()
+        sql = sql.replace("```sql", "").replace("```", "").strip()
 
     # Stage 2
     with st.spinner("🗄️ Running query..."):
@@ -240,7 +240,7 @@ if user_input:
                 numeric_cols = df.select_dtypes(include=["number"]).columns
                 cat_cols = df.select_dtypes(include=["object", "string"]).columns
 
-                if not df.empty ():
+                if not df.empty:
                     # ✅ KEEP SELECTION STATE
                     if "x_col" not in st.session_state:
                         st.session_state.x_col = None
