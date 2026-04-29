@@ -4,10 +4,8 @@
 ## 🌐 Live Demo
 👉 **Streamlit App:**
 https://genai-sql-assistant-g2pwvuzvexzedzysr4vezo.streamlit.app
-
 👉 **GitHub Repository:**
 https://github.com/saikirankonda99/genai-sql-assistant
-
 👉 **LinkedIn Profile:**
 https://www.linkedin.com/in/sai-kiran-konda/
 ---
