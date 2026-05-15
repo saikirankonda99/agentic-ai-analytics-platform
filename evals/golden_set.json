@@ -1,0 +1,122 @@
+[
+  {
+    "id": "001",
+    "category": "simple_aggregate",
+    "question": "How many customers do we have in total?",
+    "expected_sql": "SELECT COUNT(*) AS total_customers FROM customers LIMIT 1000"
+  },
+  {
+    "id": "002",
+    "category": "top_n",
+    "question": "List the top 10 customers by total spending",
+    "expected_sql": "SELECT c.FirstName, c.LastName, SUM(i.Total) AS total_spent FROM customers c JOIN invoices i ON c.CustomerId = i.CustomerId GROUP BY c.CustomerId ORDER BY total_spent DESC LIMIT 10"
+  },
+  {
+    "id": "003",
+    "category": "group_by",
+    "question": "What is the total revenue by country?",
+    "expected_sql": "SELECT c.Country, SUM(i.Total) AS total_revenue FROM invoices i JOIN customers c ON i.CustomerId = c.CustomerId GROUP BY c.Country ORDER BY total_revenue DESC LIMIT 1000"
+  },
+  {
+    "id": "004",
+    "category": "join",
+    "question": "Show me all tracks with their album and artist names",
+    "expected_sql": "SELECT t.Name AS track, al.Title AS album, ar.Name AS artist FROM tracks t JOIN albums al ON t.AlbumId = al.AlbumId JOIN artists ar ON al.ArtistId = ar.ArtistId LIMIT 1000"
+  },
+  {
+    "id": "005",
+    "category": "filter",
+    "question": "Find all customers from the United States",
+    "expected_sql": "SELECT * FROM customers WHERE Country = 'USA' LIMIT 1000"
+  },
+  {
+    "id": "006",
+    "category": "date_filter",
+    "question": "What were the total sales in 2022?",
+    "expected_sql": "SELECT SUM(Total) AS total_sales FROM invoices WHERE strftime('%Y', InvoiceDate) = '2022' LIMIT 1"
+  },
+  {
+    "id": "007",
+    "category": "window_function",
+    "question": "Rank artists by number of tracks they have",
+    "expected_sql": "SELECT ar.Name, COUNT(t.TrackId) AS track_count, RANK() OVER (ORDER BY COUNT(t.TrackId) DESC) AS artist_rank FROM artists ar JOIN albums al ON ar.ArtistId = al.ArtistId JOIN tracks t ON al.AlbumId = t.AlbumId GROUP BY ar.ArtistId LIMIT 1000"
+  },
+  {
+    "id": "008",
+    "category": "subquery",
+    "question": "Which customers have spent more than the average customer?",
+    "expected_sql": "SELECT c.FirstName, c.LastName, SUM(i.Total) AS total_spent FROM customers c JOIN invoices i ON c.CustomerId = i.CustomerId GROUP BY c.CustomerId HAVING total_spent > (SELECT AVG(customer_total) FROM (SELECT SUM(Total) AS customer_total FROM invoices GROUP BY CustomerId)) LIMIT 1000"
+  },
+  {
+    "id": "009",
+    "category": "count_distinct",
+    "question": "How many unique countries are our customers from?",
+    "expected_sql": "SELECT COUNT(DISTINCT Country) AS unique_countries FROM customers LIMIT 1"
+  },
+  {
+    "id": "010",
+    "category": "join_aggregate",
+    "question": "What is the average track length by genre?",
+    "expected_sql": "SELECT g.Name AS genre, AVG(t.Milliseconds) / 60000.0 AS avg_minutes FROM tracks t JOIN genres g ON t.GenreId = g.GenreId GROUP BY g.GenreId ORDER BY avg_minutes DESC LIMIT 1000"
+  },
+  {
+    "id": "011",
+    "category": "top_n_with_join",
+    "question": "Which albums have the most tracks?",
+    "expected_sql": "SELECT al.Title, ar.Name AS artist, COUNT(t.TrackId) AS track_count FROM albums al JOIN artists ar ON al.ArtistId = ar.ArtistId JOIN tracks t ON al.AlbumId = t.AlbumId GROUP BY al.AlbumId ORDER BY track_count DESC LIMIT 10"
+  },
+  {
+    "id": "012",
+    "category": "revenue_trend",
+    "question": "Show monthly revenue for the last 12 months",
+    "expected_sql": "SELECT strftime('%Y-%m', InvoiceDate) AS month, SUM(Total) AS revenue FROM invoices GROUP BY month ORDER BY month DESC LIMIT 12"
+  },
+  {
+    "id": "013",
+    "category": "employee",
+    "question": "List all employees and their managers",
+    "expected_sql": "SELECT e.FirstName || ' ' || e.LastName AS employee, m.FirstName || ' ' || m.LastName AS manager FROM employees e LEFT JOIN employees m ON e.ReportsTo = m.EmployeeId LIMIT 1000"
+  },
+  {
+    "id": "014",
+    "category": "invoice_items",
+    "question": "What is the most popular track by number of purchases?",
+    "expected_sql": "SELECT t.Name AS track, COUNT(ii.InvoiceLineId) AS purchase_count FROM invoice_items ii JOIN tracks t ON ii.TrackId = t.TrackId GROUP BY ii.TrackId ORDER BY purchase_count DESC LIMIT 1"
+  },
+  {
+    "id": "015",
+    "category": "percentage",
+    "question": "What percentage of total revenue comes from each country?",
+    "expected_sql": "SELECT c.Country, SUM(i.Total) AS revenue, ROUND(SUM(i.Total) * 100.0 / (SELECT SUM(Total) FROM invoices), 2) AS pct FROM invoices i JOIN customers c ON i.CustomerId = c.CustomerId GROUP BY c.Country ORDER BY revenue DESC LIMIT 1000"
+  },
+  {
+    "id": "016",
+    "category": "media_type",
+    "question": "How many tracks are in each media type format?",
+    "expected_sql": "SELECT mt.Name AS media_type, COUNT(t.TrackId) AS track_count FROM tracks t JOIN media_types mt ON t.MediaTypeId = mt.MediaTypeId GROUP BY mt.MediaTypeId ORDER BY track_count DESC LIMIT 1000"
+  },
+  {
+    "id": "017",
+    "category": "playlist",
+    "question": "Which playlists have more than 50 tracks?",
+    "expected_sql": "SELECT p.Name AS playlist, COUNT(pt.TrackId) AS track_count FROM playlists p JOIN playlist_track pt ON p.PlaylistId = pt.PlaylistId GROUP BY p.PlaylistId HAVING track_count > 50 ORDER BY track_count DESC LIMIT 1000"
+  },
+  {
+    "id": "018",
+    "category": "date_math",
+    "question": "Which customers haven't made a purchase in the last 2 years?",
+    "expected_sql": "SELECT c.FirstName, c.LastName, MAX(i.InvoiceDate) AS last_purchase FROM customers c LEFT JOIN invoices i ON c.CustomerId = i.CustomerId GROUP BY c.CustomerId HAVING last_purchase < date('now', '-2 years') OR last_purchase IS NULL LIMIT 1000"
+  },
+  {
+    "id": "019",
+    "category": "cumulative",
+    "question": "Show cumulative revenue over time by month",
+    "expected_sql": "SELECT strftime('%Y-%m', InvoiceDate) AS month, SUM(Total) AS monthly_revenue, SUM(SUM(Total)) OVER (ORDER BY strftime('%Y-%m', InvoiceDate)) AS cumulative_revenue FROM invoices GROUP BY month ORDER BY month LIMIT 1000"
+  },
+  {
+    "id": "020",
+    "category": "search",
+    "question": "Find all tracks with 'love' in the title",
+    "expected_sql": "SELECT t.Name AS track, al.Title AS album, ar.Name AS artist FROM tracks t JOIN albums al ON t.AlbumId = al.AlbumId JOIN artists ar ON al.ArtistId = ar.ArtistId WHERE LOWER(t.Name) LIKE '%love%' ORDER BY t.Name LIMIT 1000"
+  }
+]
