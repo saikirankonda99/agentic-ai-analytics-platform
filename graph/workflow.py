@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, TypedDict
 
 from db import get_schema, run_query
+from graph.history_store import retrieve_similar_queries, save_query_to_history
 from guardrails import is_safe_sql
 from llm import generate_sql
 
@@ -29,6 +30,7 @@ class WorkflowState(TypedDict, total=False):
     question: str
     plan: dict[str, Any]
     schema: str
+    memory_examples: list[dict[str, str]]
     sql: str
     columns: list[str]
     rows: list[Any]
@@ -87,8 +89,37 @@ def schema_node(state: WorkflowState) -> WorkflowState:
         }
 
 
+def memory_node(state: WorkflowState) -> WorkflowState:
+    examples = retrieve_similar_queries(state["question"], top_k=3)
+    if examples:
+        detail = f"Retrieved {len(examples)} similar example(s)."
+    else:
+        detail = "No similar examples found."
+
+    return {
+        "memory_examples": examples,
+        "trace": _append_trace(
+            state,
+            "memory retrieval",
+            "success",
+            detail,
+        ),
+    }
+
+
 def _build_generation_prompt(state: WorkflowState) -> str:
     question = state["question"]
+    memory_examples = state.get("memory_examples", [])
+    memory_block = ""
+    if memory_examples:
+        formatted_examples = "\n\n".join(
+            [
+                f"Example question: {item.get('question', '')}\nExample SQL: {item.get('sql', '')}"
+                for item in memory_examples
+            ]
+        )
+        memory_block = f"\n\nSimilar successful examples:\n{formatted_examples}"
+
     if state.get("last_error") and state.get("last_failed_sql"):
         return f"""{question}
 
@@ -98,8 +129,8 @@ Previous SQL failed:
 Database error:
 {state['last_error']}
 
-Generate a corrected read-only SQL query."""
-    return question
+Generate a corrected read-only SQL query.{memory_block}"""
+    return f"{question}{memory_block}"
 
 
 def sql_generation_node(state: WorkflowState) -> WorkflowState:
@@ -164,6 +195,11 @@ def validation_node(state: WorkflowState) -> WorkflowState:
 def execution_node(state: WorkflowState) -> WorkflowState:
     try:
         columns, rows = run_query(state["sql"])
+        save_query_to_history(
+            question=state["question"],
+            sql=state["sql"],
+            success=True,
+        )
         return {
             "columns": columns,
             "rows": rows,
@@ -223,6 +259,7 @@ def build_workflow():
     graph = StateGraph(WorkflowState)
     graph.add_node("planner", planner_node)
     graph.add_node("schema", schema_node)
+    graph.add_node("memory", memory_node)
     graph.add_node("sql_generation", sql_generation_node)
     graph.add_node("validation", validation_node)
     graph.add_node("execution", execution_node)
@@ -230,7 +267,8 @@ def build_workflow():
 
     graph.set_entry_point("planner")
     graph.add_edge("planner", "schema")
-    graph.add_edge("schema", "sql_generation")
+    graph.add_edge("schema", "memory")
+    graph.add_edge("memory", "sql_generation")
     graph.add_edge("sql_generation", "validation")
     graph.add_conditional_edges(
         "validation",
@@ -275,6 +313,10 @@ def _run_linear(question: str) -> WorkflowState:
     if state.get("error"):
         return state
 
+    state.update(memory_node(state))
+    if state.get("error"):
+        return state
+
     while True:
         state.update(sql_generation_node(state))
         if state.get("error"):
@@ -301,6 +343,7 @@ def run_workflow(question: str) -> WorkflowState:
         "retry_count": 0,
         "last_error": None,
         "last_failed_sql": "",
+        "memory_examples": [],
         "trace": [],
     }
 

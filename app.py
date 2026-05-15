@@ -105,6 +105,7 @@ def render_workflow_trace():
         ordered_steps = [
             "planner",
             "schema retrieval",
+            "memory retrieval",
             "sql generation",
             "validation",
             "execution",
