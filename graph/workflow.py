@@ -17,7 +17,7 @@ except ImportError:
     LANGGRAPH_AVAILABLE = False
 
 
-MAX_RETRIES = 1
+MAX_RETRIES = 2
 
 
 class WorkflowTrace(TypedDict):
@@ -37,6 +37,7 @@ class WorkflowState(TypedDict, total=False):
     error: str | None
     retry_count: int
     last_error: str | None
+    last_error_source: str | None
     last_failed_sql: str
     trace: list[WorkflowTrace]
 
@@ -133,6 +134,38 @@ Generate a corrected read-only SQL query.{memory_block}"""
     return f"{question}{memory_block}"
 
 
+def _build_reflection_prompt(state: WorkflowState) -> str:
+    memory_examples = state.get("memory_examples", [])
+    memory_block = ""
+    if memory_examples:
+        formatted_examples = "\n\n".join(
+            [
+                f"Example question: {item.get('question', '')}\nExample SQL: {item.get('sql', '')}"
+                for item in memory_examples
+            ]
+        )
+        memory_block = f"\n\nSimilar successful examples:\n{formatted_examples}"
+
+    return f"""You are fixing a failed SQL query for a SQLite database.
+
+User question:
+{state['question']}
+
+Database schema:
+{state['schema']}
+
+Failed SQL:
+{state.get('last_failed_sql', '')}
+
+Database/runtime error:
+{state.get('last_error', '')}
+
+Error source:
+{state.get('last_error_source', 'unknown')}
+
+Return ONLY corrected read-only SQL. Do not explain anything.{memory_block}"""
+
+
 def sql_generation_node(state: WorkflowState) -> WorkflowState:
     if state.get("error") and state.get("retry_count", 0) > MAX_RETRIES:
         return {}
@@ -152,6 +185,7 @@ def sql_generation_node(state: WorkflowState) -> WorkflowState:
     return {
         "sql": sql,
         "error": None,
+        "last_error_source": None,
         "trace": _append_trace(
             state,
             "sql generation",
@@ -168,6 +202,7 @@ def validation_node(state: WorkflowState) -> WorkflowState:
         return {
             "error": error,
             "last_error": error,
+            "last_error_source": "validation",
             "last_failed_sql": "",
             "trace": _append_trace(state, "validation", "error", error),
         }
@@ -177,17 +212,49 @@ def validation_node(state: WorkflowState) -> WorkflowState:
         return {
             "error": error,
             "last_error": error,
+            "last_error_source": "validation",
             "last_failed_sql": sql,
             "trace": _append_trace(state, "validation", "error", error),
         }
 
     return {
         "error": None,
+        "last_error_source": None,
         "trace": _append_trace(
             state,
             "validation",
             "success",
             "SQL passed safety validation.",
+        ),
+    }
+
+
+def reflection_node(state: WorkflowState) -> WorkflowState:
+    retry_count = state.get("retry_count", 0) + 1
+    corrected_sql = generate_sql(_build_reflection_prompt(state), state["schema"]).strip()
+
+    if not corrected_sql or corrected_sql.startswith("ERROR:"):
+        error = corrected_sql or "Reflection failed to generate corrected SQL."
+        return {
+            "retry_count": retry_count,
+            "error": error,
+            "trace": _append_trace(
+                state,
+                "reflection",
+                "error",
+                f"Correction attempt {retry_count}/{MAX_RETRIES} failed: {error}",
+            ),
+        }
+
+    return {
+        "retry_count": retry_count,
+        "sql": corrected_sql,
+        "error": None,
+        "trace": _append_trace(
+            state,
+            "reflection",
+            "retry",
+            f"Correction attempt {retry_count}/{MAX_RETRIES} generated updated SQL.",
         ),
     }
 
@@ -205,6 +272,7 @@ def execution_node(state: WorkflowState) -> WorkflowState:
             "rows": rows,
             "error": None,
             "last_error": None,
+            "last_error_source": None,
             "trace": _append_trace(
                 state,
                 "execution",
@@ -219,36 +287,23 @@ def execution_node(state: WorkflowState) -> WorkflowState:
             "rows": [],
             "error": error,
             "last_error": str(exc),
+            "last_error_source": "execution",
             "last_failed_sql": state.get("sql", ""),
             "trace": _append_trace(state, "execution", "error", error),
         }
 
 
-def retry_node(state: WorkflowState) -> WorkflowState:
-    retry_count = state.get("retry_count", 0) + 1
-    return {
-        "retry_count": retry_count,
-        "error": None,
-        "trace": _append_trace(
-            state,
-            "sql generation",
-            "retry",
-            f"Retrying SQL generation after failure ({retry_count}/{MAX_RETRIES}).",
-        ),
-    }
-
-
 def _route_after_validation(state: WorkflowState) -> str:
     if state.get("error"):
         if state.get("retry_count", 0) < MAX_RETRIES:
-            return "retry"
+            return "reflection"
         return "end"
     return "execution"
 
 
 def _route_after_execution(state: WorkflowState) -> str:
     if state.get("error") and state.get("retry_count", 0) < MAX_RETRIES:
-        return "retry"
+        return "reflection"
     return "end"
 
 
@@ -262,8 +317,8 @@ def build_workflow():
     graph.add_node("memory", memory_node)
     graph.add_node("sql_generation", sql_generation_node)
     graph.add_node("validation", validation_node)
+    graph.add_node("reflection", reflection_node)
     graph.add_node("execution", execution_node)
-    graph.add_node("retry", retry_node)
 
     graph.set_entry_point("planner")
     graph.add_edge("planner", "schema")
@@ -274,7 +329,7 @@ def build_workflow():
         "validation",
         _route_after_validation,
         {
-            "retry": "retry",
+            "reflection": "reflection",
             "execution": "execution",
             "end": END,
         },
@@ -283,11 +338,11 @@ def build_workflow():
         "execution",
         _route_after_execution,
         {
-            "retry": "retry",
+            "reflection": "reflection",
             "end": END,
         },
     )
-    graph.add_edge("retry", "sql_generation")
+    graph.add_edge("reflection", "validation")
 
     return graph.compile()
 
@@ -301,6 +356,7 @@ def _run_linear(question: str) -> WorkflowState:
         "error": None,
         "retry_count": 0,
         "last_error": None,
+        "last_error_source": None,
         "last_failed_sql": "",
         "trace": [],
     }
@@ -325,13 +381,17 @@ def _run_linear(question: str) -> WorkflowState:
         state.update(validation_node(state))
         if state.get("error"):
             if state.get("retry_count", 0) < MAX_RETRIES:
-                state.update(retry_node(state))
+                state.update(reflection_node(state))
+                if state.get("error"):
+                    return state
                 continue
             return state
 
         state.update(execution_node(state))
         if state.get("error") and state.get("retry_count", 0) < MAX_RETRIES:
-            state.update(retry_node(state))
+            state.update(reflection_node(state))
+            if state.get("error"):
+                return state
             continue
         return state
 
@@ -342,6 +402,7 @@ def run_workflow(question: str) -> WorkflowState:
         "error": None,
         "retry_count": 0,
         "last_error": None,
+        "last_error_source": None,
         "last_failed_sql": "",
         "memory_examples": [],
         "trace": [],

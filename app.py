@@ -108,6 +108,7 @@ def render_workflow_trace():
             "memory retrieval",
             "sql generation",
             "validation",
+            "reflection",
             "execution",
         ]
         icons = {
