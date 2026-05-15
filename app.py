@@ -2,9 +2,13 @@ import streamlit as st
 import pandas as pd
 import time
 
-from db import run_query, get_schema
-from guardrails import is_safe_sql
+from db import get_schema
 from openai import OpenAI
+
+try:
+    from graph.workflow import run_workflow
+except Exception:
+    run_workflow = None
 
 # ---------------- CONFIG ---------------- #
 st.set_page_config(
@@ -56,6 +60,9 @@ st.markdown("""
 st.divider()
 st.markdown("<br>", unsafe_allow_html=True)
 
+if "workflow_trace" not in st.session_state:
+    st.session_state.workflow_trace = []
+
 # ---------------- SIDEBAR ---------------- #
 with st.sidebar:
     st.markdown("## ⚙️ Settings")
@@ -81,6 +88,42 @@ with st.sidebar:
         df_uploaded = pd.read_csv(uploaded_file)
         st.session_state.uploaded_df = df_uploaded
         st.success("CSV uploaded successfully!")
+
+
+def render_workflow_trace():
+    with st.sidebar:
+        st.markdown("### 🔎 Workflow Trace")
+        trace = st.session_state.get("workflow_trace", [])
+        if not trace:
+            st.caption("Run a database query to see workflow steps.")
+            return
+
+        latest_by_step = {}
+        for item in trace:
+            latest_by_step[item["step"]] = item
+
+        ordered_steps = [
+            "planner",
+            "schema retrieval",
+            "sql generation",
+            "validation",
+            "execution",
+        ]
+        icons = {
+            "success": "✅",
+            "error": "❌",
+            "retry": "🔄",
+            "pending": "⏳",
+        }
+
+        for step in ordered_steps:
+            item = latest_by_step.get(
+                step,
+                {"status": "pending", "detail": "Not started."},
+            )
+            icon = icons.get(item["status"], "⏳")
+            st.markdown(f"**{icon} {step.title()}**")
+            st.caption(item["detail"])
 
 if show_schema:
     st.code(get_schema())
@@ -113,44 +156,43 @@ if c2.button("📊 Revenue by Country", use_container_width=True):
 
 if c3.button("🎵 Top Tracks", use_container_width=True):
     user_input = "Top 10 tracks"
+
+
+def is_scalar_result(df):
+    return not df.empty and len(df) == 1 and len(df.columns) == 1
+
+
+def can_render_chart(df):
+    if df.empty or len(df) < 2:
+        return False
+
+    numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+    cat_cols = df.select_dtypes(include=["object", "string"]).columns.tolist()
+
+    return bool((numeric_cols and cat_cols) or len(numeric_cols) >= 2)
+
+
+def build_overview_chart(df):
+    if not can_render_chart(df):
+        return None
+
+    numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+    cat_cols = df.select_dtypes(include=["object", "string"]).columns.tolist()
+
+    if numeric_cols and cat_cols:
+        chart_df = df[[cat_cols[0], numeric_cols[0]]].dropna()
+        if chart_df.empty:
+            return None
+        return chart_df.set_index(cat_cols[0])
+
+    chart_df = df[numeric_cols].dropna()
+    if chart_df.empty or len(chart_df.columns) < 2:
+        return None
+
+    return chart_df.set_index(numeric_cols[0])
+
+
 # ---------------- SAFE RUN ---------------- #
-def safe_run(sql, question, schema):
-    try:
-        return run_query(sql)
-
-    except Exception as e:
-        try:
-            fix_prompt = f"""
-Fix this SQL query.
-
-Schema:
-{schema}
-
-Broken SQL:
-{sql}
-
-Error:
-{str(e)}
-
-Return ONLY corrected SQL.
-"""
-
-            response = client.chat.completions.create(
-                model="gpt-4.1-mini",
-                messages=[{"role": "user", "content": fix_prompt}],
-                temperature=0
-            )
-
-            fixed_sql = response.choices[0].message.content.strip()
-            fixed_sql = fixed_sql.replace("```sql", "").replace("```", "").strip()
-
-            return run_query(fixed_sql)
-
-        except Exception as e2:
-            st.error("❌ Query failed even after fixing.")
-            st.code(sql, language="sql")
-            st.error(str(e2))
-            return [], []
 # ---------------- CHAT TAB ---------------- #
 with tab1:
     st.subheader("💬 Chat")
@@ -165,73 +207,62 @@ if user_input:
     st.session_state.messages.append({"role": "user", "content": question})
 
     start = time.time()
-    schema = get_schema()
+    sql = ""
 
-    # Stage 1: Generate SQL
-    with st.spinner("🧠 Generating SQL..."):
+    workflow_result = None
 
-        history_text = "\n".join([
-            f"{m['role']}: {m['content']}"
-            for m in st.session_state.messages[-5:]
-        ])
-
-        prompt = f"""
-    You are an expert SQL assistant.
-
-    Conversation:
-    {history_text}
-
-    User Question:
-    {question}
-
-    Database Schema:
-    {schema}
-
-    Generate ONLY SQL query.
-    """
-
-        response = client.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=[{"role": "user", "content": prompt}]
-        )
-
-        sql = response.choices[0].message.content.strip()
-        sql = sql.replace("```sql", "").replace("```", "").strip()
-        
-        if not is_safe_sql(sql):
-                st.error("🚫 Unsafe query blocked (Only SELECT queries allowed)")
-                st.stop()
-
-    # Stage 2
-    with st.spinner("🗄️ Running query..."):
-
+    # Stage 1 + 2
+    with st.spinner("🧠 Running SQL workflow..."):
         # ✅ USE CSV IF UPLOADED
         if "uploaded_df" in st.session_state:
             st.warning("⚠️ CSV mode: showing raw data (SQL not applied)")
             df = st.session_state.uploaded_df
             cols = df.columns
             rows = df.values
+            st.session_state.workflow_trace = []
+            render_workflow_trace()
         else:
-            cols, rows = safe_run(sql, question, schema)
+            if run_workflow is None:
+                render_workflow_trace()
+                st.error("❌ Workflow is unavailable.")
+                st.stop()
 
-            if not cols or not rows:
-                st.warning("⚠️ No data or query failed")
+            workflow_result = run_workflow(question)
+            st.session_state.workflow_trace = workflow_result.get("trace", [])
+            sql = (workflow_result.get("sql") or "").strip()
+            workflow_error = workflow_result.get("error")
+
+            if workflow_error:
+                render_workflow_trace()
+                st.error(f"❌ {workflow_error}")
+                if sql:
+                    st.code(sql, language="sql")
+                st.stop()
+
+            cols = workflow_result.get("columns", [])
+            rows = workflow_result.get("rows", [])
+
+            if not cols:
+                render_workflow_trace()
+                st.warning("⚠️ No columns returned or query failed")
                 st.stop()
 
             df = pd.DataFrame(rows, columns=cols)
+
+    render_workflow_trace()
 
     st.success(f"📊 Found {len(df)} rows")
 
     st.divider()
     st.markdown("### 📊 Insights Dashboard")
-    if not df.empty:
-        numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
-        cat_cols = df.select_dtypes(include=["object", "string"]).columns.tolist()
-
-        if numeric_cols and cat_cols:
-            chart_df = df[[cat_cols[0], numeric_cols[0]]].dropna().set_index(cat_cols[0])
-            st.bar_chart(chart_df, height=400)        
-        else:
+    if is_scalar_result(df):
+        scalar_col = df.columns[0]
+        st.metric(scalar_col, df.iloc[0, 0])
+    else:
+        overview_chart_df = build_overview_chart(df)
+        if overview_chart_df is not None:
+            st.bar_chart(overview_chart_df, height=400)
+        elif not df.empty:
             st.info("No suitable columns for visualization")
     try:
             exec_time = time.time() - start
@@ -273,7 +304,10 @@ if user_input:
                 numeric_cols = df.select_dtypes(include=["number"]).columns
                 cat_cols = df.select_dtypes(include=["object", "string"]).columns
 
-                if not df.empty:
+                if is_scalar_result(df):
+                    st.subheader("📊 Visualization")
+                    st.info("Single-value results are shown as a metric instead of a chart.")
+                elif can_render_chart(df):
 
                     # ✅ KEEP SELECTION STATE
                     if "x_col" not in st.session_state:
@@ -345,9 +379,10 @@ if user_input:
                         chart_df = filtered_df[[x_col, y_col]].dropna()
 
                         if not chart_df.empty:
-                            chart_df = chart_df.set_index(x_col)
-
                             st.caption(f"Using: {x_col} vs {y_col}")
+
+                            if chart_df[x_col].nunique() == len(chart_df):
+                                chart_df = chart_df.set_index(x_col)
 
                             if chart_type == "Bar":
                                 st.bar_chart(chart_df, height=400)
@@ -357,6 +392,11 @@ if user_input:
                                 st.area_chart(chart_df)
                         else:
                             st.info("No data for selected columns")
+                    else:
+                        st.info("No numeric columns available for charting")
+                elif not df.empty:
+                    st.subheader("📊 Visualization")
+                    st.info("This result shape is better viewed as a table.")
             # AI EXPLANATION
                 def explain_result():
                     sample = df.head(5).to_string()
