@@ -2,8 +2,7 @@
 🚀 A conversational AI-powered data analytics app that converts natural language into SQL queries and interactive insights.
 ---
 ## 🌐 Live Demo
-👉 **Streamlit App:**
-https://genai-sql-assistant-g2pwvuzvexzedzysr4vezo.streamlit.app
+https://agentic-ai-analytics-platform.onrender.com
 
 👉 **GitHub Repository:**
 https://github.com/saikirankonda99/genai-sql-assistant
@@ -57,13 +56,42 @@ https://www.linkedin.com/in/sai-kiran-konda/
 git clone https://github.com/saikirankonda99/genai-sql-assistant.git
 cd genai-sql-assistant
 pip install -r requirements.txt
-streamlit run genai-sql-assistant-v2/[app.py](http://app.py)
+streamlit run app.py
 ```
 ---
 ## 🔐 Setup
 Create a `.streamlit/secrets.toml` file:
 ```toml
 OPENAI_API_KEY = "your_api_key_here"
+```
+
+You can also use an environment variable instead:
+```bash
+export OPENAI_API_KEY="your_api_key_here"
+```
+
+---
+## 🐳 Run With Docker
+Build the image:
+```bash
+docker build -t genai-sql-assistant .
+```
+
+Run the app:
+```bash
+docker run --rm -p 8501:8501 -e OPENAI_API_KEY=your_api_key_here genai-sql-assistant
+```
+
+Then open:
+```text
+http://localhost:8501
+```
+
+The bundled SQLite database in `data/chinook.db` is copied into the image automatically.
+
+To persist generated telemetry/history data outside the container, mount the `data` directory:
+```bash
+docker run --rm -p 8501:8501 -e OPENAI_API_KEY=your_api_key_here -v "$(pwd)/data:/app/data" genai-sql-assistant
 ```
 ---
 ## ⚠️ Security
