@@ -13,7 +13,14 @@ except Exception:
 
 
 def get_openai_api_key():
-    return st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+    api_key = os.getenv("OPENAI_API_KEY")
+    if api_key:
+        return api_key
+
+    try:
+        return st.secrets["OPENAI_API_KEY"]
+    except Exception:
+        return None
 
 # ---------------- CONFIG ---------------- #
 st.set_page_config(
