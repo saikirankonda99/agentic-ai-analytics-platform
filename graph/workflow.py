@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, TypedDict
+from typing import Any, Callable, TypedDict
 
 from db import get_schema, run_query
 from graph.cost_tracker import log_query_cost
@@ -56,6 +56,9 @@ class WorkflowState(TypedDict, total=False):
     telemetry: dict[str, Any]
 
 
+WorkflowEventCallback = Callable[[str, WorkflowState, str, str], None]
+
+
 def _new_step_telemetry(
     step: str,
     model: str,
@@ -107,6 +110,18 @@ def _append_trace(
     trace = list(state.get("trace", []))
     trace.append({"step": step, "status": status, "detail": detail})
     return trace
+
+
+def _emit_event(
+    callback: WorkflowEventCallback | None,
+    phase: str,
+    state: WorkflowState,
+    step: str,
+    detail: str,
+) -> None:
+    if callback is None:
+        return
+    callback(phase, WorkflowState(state), step, detail)
 
 
 def planner_node(state: WorkflowState) -> WorkflowState:
@@ -454,7 +469,7 @@ def build_workflow():
 workflow = build_workflow()
 
 
-def _run_linear(question: str) -> WorkflowState:
+def _run_linear(question: str, callback: WorkflowEventCallback | None = None) -> WorkflowState:
     state: WorkflowState = {
         "question": question,
         "error": None,
@@ -475,42 +490,100 @@ def _run_linear(question: str) -> WorkflowState:
         "trace": [],
     }
 
+    _emit_event(callback, "active", state, "planner", "Analyzing question intent.")
     state.update(planner_node(state))
+    _emit_event(callback, "completed", state, "planner", "Question analyzed for SQL planning.")
     if state.get("error"):
         return state
 
+    _emit_event(callback, "active", state, "schema retrieval", "Loading database schema context.")
     state.update(schema_node(state))
+    _emit_event(
+        callback,
+        "completed" if not state.get("error") else "warning",
+        state,
+        "schema retrieval",
+        state.get("trace", [{}])[-1].get("detail", "Schema retrieval finished."),
+    )
     if state.get("error"):
         return state
 
+    _emit_event(callback, "active", state, "memory retrieval", "Retrieving similar examples from memory.")
     state.update(memory_node(state))
+    _emit_event(
+        callback,
+        "completed",
+        state,
+        "memory retrieval",
+        state.get("trace", [{}])[-1].get("detail", "Memory retrieval finished."),
+    )
     if state.get("error"):
         return state
 
     while True:
+        _emit_event(callback, "active", state, "sql generation", "Generating SQL candidate.")
         state.update(sql_generation_node(state))
+        _emit_event(
+            callback,
+            "completed" if not state.get("error") else "warning",
+            state,
+            "sql generation",
+            state.get("trace", [{}])[-1].get("detail", "SQL generation finished."),
+        )
         if state.get("error"):
             return state
 
+        _emit_event(callback, "active", state, "validation", "Running SQL safety validation.")
         state.update(validation_node(state))
+        _emit_event(
+            callback,
+            "completed" if not state.get("error") else "warning",
+            state,
+            "validation",
+            state.get("trace", [{}])[-1].get("detail", "Validation finished."),
+        )
         if state.get("error"):
             if state.get("retry_count", 0) < MAX_RETRIES:
+                _emit_event(callback, "active", state, "reflection", "Repairing SQL after validation failure.")
                 state.update(reflection_node(state))
+                _emit_event(
+                    callback,
+                    "warning" if not state.get("error") else "warning",
+                    state,
+                    "reflection",
+                    state.get("trace", [{}])[-1].get("detail", "Reflection finished."),
+                )
                 if state.get("error"):
                     return state
                 continue
             return state
 
+        _emit_event(callback, "active", state, "execution", "Executing SQL against the database.")
         state.update(execution_node(state))
+        _emit_event(
+            callback,
+            "completed" if not state.get("error") else "warning",
+            state,
+            "execution",
+            state.get("trace", [{}])[-1].get("detail", "Execution finished."),
+        )
         if state.get("error") and state.get("retry_count", 0) < MAX_RETRIES:
+            _emit_event(callback, "active", state, "reflection", "Repairing SQL after execution failure.")
             state.update(reflection_node(state))
+            _emit_event(
+                callback,
+                "warning" if not state.get("error") else "warning",
+                state,
+                "reflection",
+                state.get("trace", [{}])[-1].get("detail", "Reflection finished."),
+            )
             if state.get("error"):
                 return state
             continue
         return state
 
 
-def run_workflow(question: str) -> WorkflowState:
+def run_workflow(question: str, callback: WorkflowEventCallback | None = None) -> WorkflowState:
     initial_state: WorkflowState = {
         "question": question,
         "error": None,
@@ -532,8 +605,8 @@ def run_workflow(question: str) -> WorkflowState:
         "trace": [],
     }
 
-    if workflow is None:
-        return _run_linear(question)
+    if callback is not None or workflow is None:
+        return _run_linear(question, callback=callback)
 
     result = workflow.invoke(initial_state)
     return WorkflowState(result)

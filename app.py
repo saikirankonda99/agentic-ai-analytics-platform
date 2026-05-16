@@ -1,10 +1,35 @@
 import os
-import streamlit as st
-import pandas as pd
 import time
 
-from db import get_schema
+import pandas as pd
+import streamlit as st
 from openai import OpenAI
+
+from db import get_schema
+from styles.theme import get_theme_css
+from ui.dashboard import (
+    build_plotly_figure,
+    build_default_operations_figure,
+    render_chat_history,
+    render_activity_feed,
+    render_agent_row,
+    render_command_bar,
+    render_executive_summary,
+    render_footer,
+    render_glass_widgets,
+    render_hero,
+    render_history,
+    render_kpi_cards,
+    render_recommendation_card,
+    render_result_table_card,
+    render_response_card,
+    render_sidebar,
+    render_live_execution_panel,
+    render_observability_card,
+    render_sql_card,
+    render_telemetry_panel,
+    render_workflow_timeline,
+)
 
 try:
     from graph.workflow import run_workflow
@@ -21,176 +46,6 @@ def get_openai_api_key():
         return st.secrets["OPENAI_API_KEY"]
     except Exception:
         return None
-
-# ---------------- CONFIG ---------------- #
-st.set_page_config(
-    page_title="GenAI SQL Assistant",
-    layout="wide",
-    page_icon="📊"
-)
-
-client = OpenAI(api_key=get_openai_api_key())
-
-# ---------------- STYLE ---------------- #
-# ---------------- STYLE ---------------- #
-st.markdown("""
-<style>
-.block-container {
-    padding-top: 2rem;
-    padding-bottom: 2rem;
-}
-
-.stButton > button {
-    border-radius: 10px;
-    padding: 0.6rem 1rem;
-    font-weight: 500;
-}
-
-.stTextInput > div > div > input {
-    border-radius: 10px;
-}
-
-[data-testid="stMetricValue"] {
-    font-size: 28px;
-}
-
-.stMetric {
-    background-color: #0e1117;
-    padding: 12px;
-    border-radius: 10px;
-    text-align: center;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# ---------------- HEADER ---------------- #
-st.markdown("""
-# 📊 GenAI SQL Assistant  
-### Turn natural language into SQL + insights instantly
-""")
-
-st.divider()
-st.markdown("<br>", unsafe_allow_html=True)
-
-if "workflow_trace" not in st.session_state:
-    st.session_state.workflow_trace = []
-
-if "workflow_telemetry" not in st.session_state:
-    st.session_state.workflow_telemetry = {}
-
-# ---------------- SIDEBAR ---------------- #
-with st.sidebar:
-    st.markdown("## ⚙️ Settings")
-
-    if st.button("🧹 Clear Chat"):
-        st.session_state.messages = []
-        st.session_state.history = []
-        st.rerun()
-    st.markdown("### 💡 Sample Queries")
-    st.markdown("""
-    - List all customers  
-    - Top customers by spending  
-    - Tracks with album and artist  
-    """)
-
-    show_schema = st.toggle("Show Schema", False)
-    # ✅ ADD HERE (INSIDE SIDEBAR)
-    st.markdown("### 📂 Upload Data")
-
-    uploaded_file = st.file_uploader("Upload CSV")
-
-    if uploaded_file:
-        df_uploaded = pd.read_csv(uploaded_file)
-        st.session_state.uploaded_df = df_uploaded
-        st.success("CSV uploaded successfully!")
-
-
-def render_workflow_trace():
-    with st.sidebar:
-        st.markdown("### 🔎 Workflow Trace")
-        trace = st.session_state.get("workflow_trace", [])
-        if not trace:
-            st.caption("Run a database query to see workflow steps.")
-            return
-
-        latest_by_step = {}
-        for item in trace:
-            latest_by_step[item["step"]] = item
-
-        ordered_steps = [
-            "planner",
-            "schema retrieval",
-            "memory retrieval",
-            "sql generation",
-            "validation",
-            "reflection",
-            "execution",
-        ]
-        icons = {
-            "success": "✅",
-            "error": "❌",
-            "retry": "🔄",
-            "pending": "⏳",
-        }
-
-        for step in ordered_steps:
-            item = latest_by_step.get(
-                step,
-                {"status": "pending", "detail": "Not started."},
-            )
-            icon = icons.get(item["status"], "⏳")
-            st.markdown(f"**{icon} {step.title()}**")
-            st.caption(item["detail"])
-
-
-def render_workflow_telemetry():
-    with st.sidebar:
-        st.markdown("### 📈 Telemetry")
-        telemetry = st.session_state.get("workflow_telemetry", {})
-        if not telemetry:
-            st.caption("Run a database query to see telemetry.")
-            return
-
-        st.caption(f"Model: {telemetry.get('model') or 'Unavailable'}")
-        st.caption(f"Prompt tokens: {telemetry.get('prompt_tokens', 0)}")
-        st.caption(f"Completion tokens: {telemetry.get('completion_tokens', 0)}")
-        st.caption(f"Total tokens: {telemetry.get('total_tokens', 0)}")
-        st.caption(f"Estimated cost: ${telemetry.get('cost_usd', 0.0):.6f}")
-        st.caption(f"Workflow latency: {telemetry.get('latency_ms', 0)} ms")
-        if not telemetry.get("usage_available", False):
-            st.caption("Token usage metadata unavailable for one or more steps.")
-
-if show_schema:
-    st.code(get_schema())
-
-# ---------------- SESSION ---------------- #
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-if "history" not in st.session_state:
-    st.session_state.history = []
-
-# ---------------- TABS ---------------- #
-tab1, tab2, tab3 = st.tabs(["💬 Chat", "📊 Dashboard", "🧠 History"])
-
-# ---------------- INPUT ---------------- #
-col1, col2, col3 = st.columns([1,2,1])
-
-with col2:
-    user_input = st.chat_input("Ask your data question...")
-
-st.markdown("### 💡 Try these:")
-
-c1, c2, c3 = st.columns(3)
-
-if c1.button("📌 Top Customers", use_container_width=True):
-    user_input = "Top 10 customers by invoices"
-
-if c2.button("📊 Revenue by Country", use_container_width=True):
-    user_input = "Revenue by country"
-
-if c3.button("🎵 Top Tracks", use_container_width=True):
-    user_input = "Top 10 tracks"
 
 
 def is_scalar_result(df):
@@ -211,14 +66,16 @@ def build_column_options(df):
 
 def get_numeric_column_options(df):
     return [
-        option for option in build_column_options(df)
+        option
+        for option in build_column_options(df)
         if pd.api.types.is_numeric_dtype(df.iloc[:, option["index"]])
     ]
 
 
 def get_categorical_column_options(df):
     return [
-        option for option in build_column_options(df)
+        option
+        for option in build_column_options(df)
         if pd.api.types.is_object_dtype(df.iloc[:, option["index"]])
         or pd.api.types.is_string_dtype(df.iloc[:, option["index"]])
     ]
@@ -230,258 +87,12 @@ def can_render_chart(df):
 
     numeric_options = get_numeric_column_options(df)
     categorical_options = get_categorical_column_options(df)
-
     return bool(categorical_options and numeric_options)
 
 
-def build_overview_chart(df):
-    if not can_render_chart(df):
-        return None
-
-    x_option = get_categorical_column_options(df)[0]
-    y_option = get_numeric_column_options(df)[0]
-
-    chart_df = pd.DataFrame(
-        {
-            x_option["label"]: df.iloc[:, x_option["index"]],
-            y_option["label"]: df.iloc[:, y_option["index"]],
-        }
-    ).dropna()
-
-    if chart_df.empty:
-        return None
-
-    return chart_df.set_index(x_option["label"])
-
-
-# ---------------- SAFE RUN ---------------- #
-# ---------------- CHAT TAB ---------------- #
-with tab1:
-    st.subheader("💬 Chat")
-
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.write(msg["content"])
-
-# ---------------- MAIN LOGIC ---------------- #
-if user_input:
-    question = user_input
-    st.session_state.messages.append({"role": "user", "content": question})
-
-    start = time.time()
-    sql = ""
-
-    workflow_result = None
-
-    # Stage 1 + 2
-    with st.spinner("🧠 Running SQL workflow..."):
-        # ✅ USE CSV IF UPLOADED
-        if "uploaded_df" in st.session_state:
-            st.warning("⚠️ CSV mode: showing raw data (SQL not applied)")
-            df = st.session_state.uploaded_df
-            cols = df.columns
-            rows = df.values
-            st.session_state.workflow_trace = []
-            st.session_state.workflow_telemetry = {}
-            render_workflow_trace()
-            render_workflow_telemetry()
-        else:
-            if run_workflow is None:
-                render_workflow_trace()
-                render_workflow_telemetry()
-                st.error("❌ Workflow is unavailable.")
-                st.stop()
-
-            workflow_result = run_workflow(question)
-            st.session_state.workflow_trace = workflow_result.get("trace", [])
-            st.session_state.workflow_telemetry = workflow_result.get("telemetry", {})
-            sql = (workflow_result.get("sql") or "").strip()
-            workflow_error = workflow_result.get("error")
-
-            if workflow_error:
-                render_workflow_trace()
-                render_workflow_telemetry()
-                st.error(f"❌ {workflow_error}")
-                if sql:
-                    st.code(sql, language="sql")
-                st.stop()
-
-            cols = workflow_result.get("columns", [])
-            rows = workflow_result.get("rows", [])
-
-            if not cols:
-                render_workflow_trace()
-                render_workflow_telemetry()
-                st.warning("⚠️ No columns returned or query failed")
-                st.stop()
-
-            df = pd.DataFrame(rows, columns=cols)
-
-    render_workflow_trace()
-    render_workflow_telemetry()
-
-    st.success(f"📊 Found {len(df)} rows")
-
-    st.divider()
-    st.markdown("### 📊 Insights Dashboard")
-    if is_scalar_result(df):
-        scalar_col = df.columns[0]
-        st.metric(scalar_col, df.iloc[0, 0])
-    else:
-        overview_chart_df = build_overview_chart(df)
-        if overview_chart_df is not None:
-            st.bar_chart(overview_chart_df, height=400)
-        elif not df.empty:
-            st.info("No suitable columns for visualization")
-    try:
-            exec_time = time.time() - start
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": f"✅ Query executed successfully. Returned {len(df)} rows."
-            })
-            # ---------------- DASHBOARD TAB ---------------- #
-            with tab2:
-                st.subheader("📊 Data Insights")
-
-                col1, col2 = st.columns(2)
-
-                with col1:
-                    st.subheader("🧾 Generated SQL")
-                    st.code(sql, language="sql")
-
-                with col2:
-                    st.subheader("📋 Result")
-
-                    # ✅ FIX 5: Debug SQL
-                    st.caption("🔍 Debug SQL")
-                    st.code(sql, language="sql")
-
-                    # ✅ FIX 3 + 4: Handle empty data safely
-                    if df.empty:
-                        st.warning("⚠️ No data found for this query")
-                    else:
-                        st.dataframe(df, use_container_width=True)
-                        st.caption(f"Showing {len(df)} rows")
-                # KPI CARDS
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Rows", len(df))
-                c2.metric("Columns", len(df.columns))
-                c3.metric("Execution Time", f"{exec_time:.2f}s")
-                st.caption("📌 Tip: Change X and Y to explore insights")
-
-                # CHART
-                numeric_cols = df.select_dtypes(include=["number"]).columns
-                cat_cols = df.select_dtypes(include=["object", "string"]).columns
-
-                if is_scalar_result(df):
-                    st.subheader("📊 Visualization")
-                    st.info("Single-value results are shown as a metric instead of a chart.")
-                elif can_render_chart(df):
-
-                    # ✅ KEEP SELECTION STATE
-                    if "x_col" not in st.session_state:
-                        st.session_state.x_col = None
-
-                    if "y_col" not in st.session_state:
-                        st.session_state.y_col = None
-
-                    if "chart_type" not in st.session_state:
-                        st.session_state.chart_type = "Bar"
-
-                    st.subheader("📊 Visualization")
-
-                    all_options = build_column_options(df)
-                    numeric_options = get_numeric_column_options(df)
-                    categorical_options = get_categorical_column_options(df)
-                    all_labels = [option["label"] for option in all_options]
-                    numeric_labels = [option["label"] for option in numeric_options]
-                    option_lookup = {option["label"]: option for option in all_options}
-
-                    c1, c2, c3 = st.columns(3)
-
-                    # X-axis
-                    with c1:
-                        x_col = st.selectbox(
-                            "X-axis",
-                            all_labels,
-                            index=all_labels.index(st.session_state.x_col) if st.session_state.x_col in all_labels else 0
-                        )
-                        st.session_state.x_col = x_col
-
-                    # Y-axis
-                    with c2:
-                        y_options = [label for label in numeric_labels if label != x_col]
-
-                        if y_options:
-                            y_col = st.selectbox(
-                                "Y-axis",
-                                y_options,
-                                index=y_options.index(st.session_state.y_col) if st.session_state.y_col in y_options else 0
-                            )
-                            st.session_state.y_col = y_col
-                        else:
-                            y_col = None
-
-                    # Chart type
-                    with c3:
-                        chart_type = st.selectbox(
-                            "Chart Type",
-                            ["Bar", "Line", "Area"],
-                            index=["Bar", "Line", "Area"].index(st.session_state.chart_type)
-                        )
-                        st.session_state.chart_type = chart_type
-
-                    x_option = option_lookup[x_col]
-                    y_option = option_lookup[y_col] if y_col else None
-
-                    # FILTER
-                    x_series = df.iloc[:, x_option["index"]]
-                    if (
-                        pd.api.types.is_object_dtype(x_series)
-                        or pd.api.types.is_string_dtype(x_series)
-                    ):
-                        values = st.multiselect(
-                            f"Filter {x_col}",
-                            x_series.dropna().unique(),
-                            default=x_series.dropna().unique()
-                        )
-                        filtered_df = df[x_series.isin(values)]
-                    else:
-                        filtered_df = df
-
-                    # CHART
-                    if y_option is not None:
-                        chart_df = pd.DataFrame(
-                            {
-                                x_col: filtered_df.iloc[:, x_option["index"]],
-                                y_col: filtered_df.iloc[:, y_option["index"]],
-                            }
-                        ).dropna()
-
-                        if not chart_df.empty:
-                            st.caption(f"Using: {x_col} vs {y_col}")
-
-                            if chart_df[x_col].nunique() == len(chart_df):
-                                chart_df = chart_df.set_index(x_col)
-
-                            if chart_type == "Bar":
-                                st.bar_chart(chart_df, height=400)
-                            elif chart_type == "Line":
-                                st.line_chart(chart_df)
-                            else:
-                                st.area_chart(chart_df)
-                        else:
-                            st.info("No data for selected columns")
-                    else:
-                        st.info("No numeric columns available for charting")
-                elif not df.empty:
-                    st.subheader("📊 Visualization")
-                    st.info("This result shape is better viewed as a table.")
-            # AI EXPLANATION
-                def explain_result():
-                    sample = df.head(5).to_string()
-
-                    prompt = f"""
+def explain_result(client, question, df):
+    sample = df.head(5).to_string()
+    prompt = f"""
 Explain this SQL result in simple terms.
 
 Question:
@@ -490,53 +101,565 @@ Question:
 Sample:
 {sample}
 """
-                    res = client.chat.completions.create(
-                        model="gpt-4.1-mini",
-                        messages=[{"role": "user", "content": prompt}]
-                    )
-                    return res.choices[0].message.content
+    res = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return res.choices[0].message.content
 
-                with st.expander("🧠 AI Explanation"):
-                    if not df.empty:
-                         st.write(explain_result())
-                    else:
-                        st.info("No data to explain")
-                # DOWNLOAD
-                st.download_button(
-                    "⬇️ Download CSV",
-                    df.to_csv(index=False).encode(),
-                    "result.csv",
-                    "text/csv"
-                )
 
-            # ---------------- HISTORY ---------------- #
-            st.session_state.history.append({
+def build_ai_recommendations(df, telemetry, trace):
+    recommendations = []
+    if not df.empty and len(df.columns) >= 2:
+        recommendations.append("Compare the leading dimension against a secondary metric to identify outliers or concentration risk.")
+    if len(df) > 20:
+        recommendations.append("Apply a tighter categorical filter or ranking slice to surface the most decision-relevant cohort.")
+    if telemetry and telemetry.get("latency_ms", 0) > 0:
+        recommendations.append(f"Latest workflow latency was {telemetry.get('latency_ms')} ms; monitor this pattern if prompt complexity increases.")
+    if trace:
+        last_step = trace[-1].get("step", "execution")
+        recommendations.append(f"The orchestration completed through {last_step}; inspect that step first when validating future regressions.")
+    return recommendations[:4]
+
+
+def build_default_activity_feed():
+    return [
+        {"title": "Copilot standby initialized", "subtitle": "Natural-language query intake is ready for the next request.", "time": "Now", "tone": "live"},
+        {"title": "Schema context cached", "subtitle": "Database structure is warm for low-latency retrieval.", "time": "2m", "tone": "stable"},
+        {"title": "Telemetry observers connected", "subtitle": "Token, latency, and cost tracking are listening for the next run.", "time": "5m", "tone": "stable"},
+        {"title": "Recommendation engine primed", "subtitle": "Default guidance prepared from recent workflow patterns.", "time": "9m", "tone": "live"},
+    ]
+
+
+def build_default_agent_states():
+    return [
+        {"name": "Planner", "status": "Ready", "caption": "Intent routing active.", "active": True},
+        {"name": "Schema", "status": "Warm", "caption": "Context cache hydrated.", "active": False},
+        {"name": "Memory", "status": "Listening", "caption": "History retrieval on standby.", "active": False},
+        {"name": "SQL Agent", "status": "Idle", "caption": "Generation lane available.", "active": False},
+    ]
+
+
+def init_session_state():
+    defaults = {
+        "workflow_trace": [],
+        "workflow_telemetry": {},
+        "messages": [],
+        "history": [],
+        "latest_df": None,
+        "latest_sql": "",
+        "latest_question": "",
+        "latest_exec_time": None,
+        "latest_mode": "database",
+        "uploaded_name": None,
+        "command_text": "",
+        "run_id": "default",
+        "run_counter": 0,
+        "live_render_seq": 0,
+        "live_trace": [],
+        "live_logs": [],
+        "live_telemetry": {},
+        "is_executing": False,
+        "x_col": None,
+        "y_col": None,
+        "chart_type": "Bar",
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+def clear_session():
+    st.session_state.messages = []
+    st.session_state.history = []
+    st.session_state.workflow_trace = []
+    st.session_state.workflow_telemetry = {}
+    st.session_state.latest_df = None
+    st.session_state.latest_sql = ""
+    st.session_state.latest_question = ""
+    st.session_state.latest_exec_time = None
+    st.session_state.latest_mode = "database"
+    st.session_state.uploaded_name = None
+    st.session_state.command_text = ""
+    st.session_state.run_id = "default"
+    st.session_state.run_counter = 0
+    st.session_state.live_render_seq = 0
+    st.session_state.live_trace = []
+    st.session_state.live_logs = []
+    st.session_state.live_telemetry = {}
+    st.session_state.is_executing = False
+    st.session_state.x_col = None
+    st.session_state.y_col = None
+    st.session_state.chart_type = "Bar"
+    if "uploaded_df" in st.session_state:
+        del st.session_state["uploaded_df"]
+
+
+def enrich_trace_with_telemetry(trace, telemetry):
+    telemetry_steps = {item.get("step"): item for item in telemetry.get("steps", [])} if telemetry else {}
+    enriched = []
+    for item in trace:
+        combined = dict(item)
+        step_meta = telemetry_steps.get(item.get("step"), {})
+        for key in ("model", "latency_ms", "prompt_tokens", "completion_tokens", "total_tokens", "cost_usd"):
+            if key in step_meta:
+                combined[key] = step_meta.get(key)
+        enriched.append(combined)
+    return enriched
+
+
+def append_live_log(step, message):
+    st.session_state.live_logs.append(
+        {
+            "time": time.strftime("%H:%M:%S"),
+            "step": step,
+            "message": message,
+        }
+    )
+
+
+def render_live_workspace_snapshot(question, placeholder):
+    with placeholder.container():
+        render_live_execution_panel(
+            question,
+            st.session_state.live_trace,
+            st.session_state.live_logs,
+            st.session_state.live_telemetry,
+            chart_key=f"workflow_chart_{st.session_state.run_id}_{st.session_state.live_render_seq}",
+        )
+
+
+def run_query(question, live_placeholder=None):
+    st.session_state.messages.append({"role": "user", "content": question})
+    start = time.time()
+    sql = ""
+    workflow_result = None
+    st.session_state.run_counter += 1
+    st.session_state.run_id = f"run_{st.session_state.run_counter}"
+    st.session_state.live_render_seq = 0
+    st.session_state.is_executing = True
+    st.session_state.live_trace = []
+    st.session_state.live_logs = []
+    st.session_state.live_telemetry = {}
+
+    def workflow_callback(phase, state_snapshot, step, detail):
+        telemetry = state_snapshot.get("telemetry", {})
+        trace = state_snapshot.get("trace", [])
+        if phase == "active":
+            live_trace = enrich_trace_with_telemetry(trace, telemetry)
+            live_trace.append({"step": step, "status": "active", "detail": detail})
+            st.session_state.live_trace = live_trace
+        else:
+            st.session_state.live_trace = enrich_trace_with_telemetry(trace, telemetry)
+        st.session_state.live_telemetry = telemetry
+        append_live_log(step, detail)
+        if live_placeholder is not None:
+            st.session_state.live_render_seq += 1
+            render_live_workspace_snapshot(question, live_placeholder)
+
+    try:
+        if "uploaded_df" in st.session_state:
+            df = st.session_state.uploaded_df
+            st.session_state.workflow_trace = []
+            st.session_state.workflow_telemetry = {}
+            mode = "csv"
+            append_live_log("ingestion", "Uploaded CSV loaded into the analytics workspace.")
+            if live_placeholder is not None:
+                render_live_workspace_snapshot(question, live_placeholder)
+        else:
+            if run_workflow is None:
+                st.error("Workflow is unavailable.")
+                return
+
+            if live_placeholder is not None:
+                render_live_workspace_snapshot(question, live_placeholder)
+
+            workflow_result = run_workflow(question, callback=workflow_callback)
+            st.session_state.workflow_trace = workflow_result.get("trace", [])
+            st.session_state.workflow_telemetry = workflow_result.get("telemetry", {})
+            sql = (workflow_result.get("sql") or "").strip()
+            workflow_error = workflow_result.get("error")
+
+            if workflow_error:
+                st.error(workflow_error)
+                if sql:
+                    st.code(sql, language="sql")
+                return
+
+            cols = workflow_result.get("columns", [])
+            rows = workflow_result.get("rows", [])
+            if not cols:
+                st.warning("No columns returned or query failed.")
+                return
+            df = pd.DataFrame(rows, columns=cols)
+            mode = "database"
+
+        exec_time = time.time() - start
+        st.session_state.latest_df = df
+        st.session_state.latest_sql = sql
+        st.session_state.latest_question = question
+        st.session_state.latest_exec_time = exec_time
+        st.session_state.latest_mode = mode
+        st.session_state.live_trace = enrich_trace_with_telemetry(
+            st.session_state.workflow_trace,
+            st.session_state.workflow_telemetry,
+        )
+        st.session_state.live_telemetry = st.session_state.workflow_telemetry
+        st.session_state.messages.append(
+            {
+                "role": "assistant",
+                "content": f"Query executed successfully. Returned {len(df)} rows.",
+            }
+        )
+        append_live_log("system", f"Workflow completed successfully in {exec_time:.2f}s.")
+        st.session_state.history.append(
+            {
                 "question": question,
                 "sql": sql,
-                "rows": len(df) if not df.empty else 0
-            })
-
-    except Exception as e:
+                "rows": len(df) if not df.empty else 0,
+            }
+        )
+    except Exception as exc:
         st.error("Query failed. Try rephrasing.")
-        st.code(str(e))
-        st.code(sql)  # show failed SQL
+        st.code(str(exc))
+        append_live_log("system", f"Workflow failed: {str(exc)}")
+        if sql:
+            st.code(sql, language="sql")
+    finally:
+        st.session_state.is_executing = False
 
-# ---------------- HISTORY TAB ---------------- #
-with tab3:
-    st.subheader("🧠 Query History")
 
-    for h in reversed(st.session_state.history[-10:]):
-        st.markdown(f"""
-- **Q:** {h['question']}  
-- **SQL:** `{h['sql']}`  
-- Rows: {h['rows']}
-""")
+def render_schema(schema_visible):
+    if schema_visible:
+        with st.expander("Database Schema", expanded=False):
+            st.code(get_schema())
 
-st.markdown("---")
 
-st.markdown("""
-<div style='text-align:center; color:gray; font-size:14px;'>
-Built with ❤️ using Streamlit + OpenAI <br>
-GenAI SQL Assistant • 2026
-</div>
-""", unsafe_allow_html=True)
+def render_analytics_workspace(client):
+    df = st.session_state.latest_df
+    telemetry = st.session_state.workflow_telemetry
+    exec_time = st.session_state.latest_exec_time
+    history = st.session_state.history
+    active_mode = "CSV Workspace" if st.session_state.latest_mode == "csv" and df is not None else "Live SQL"
+
+    top_metrics = [
+        {
+            "label": "Active Rows",
+            "value": f"{len(df):,}" if df is not None else "0",
+            "caption": "Current dataset in focus",
+        },
+        {
+            "label": "Queries Run",
+            "value": len(history),
+            "caption": "Session workflow executions",
+        },
+        {
+            "label": "Execution Time",
+            "value": f"{exec_time:.2f}s" if exec_time is not None else "Standby",
+            "caption": "Latest end-to-end latency",
+        },
+        {
+            "label": "Estimated Cost",
+            "value": f'${telemetry.get("cost_usd", 0.0):.4f}',
+            "caption": telemetry.get("model") or "Awaiting model run",
+        },
+    ]
+    render_kpi_cards(top_metrics)
+
+    widget_data = [
+        {
+            "label": "Active Mode",
+            "value": active_mode,
+            "caption": "Switches automatically between workflow-backed SQL and uploaded CSV analysis.",
+            "badge": "Online" if df is not None else "Idle",
+        },
+        {
+            "label": "Copilot State",
+            "value": st.session_state.latest_question or "Awaiting prompt",
+            "caption": "Latest question currently shaping the analytics canvas.",
+            "badge": "Ready",
+        },
+        {
+            "label": "Telemetry",
+            "value": f'{telemetry.get("total_tokens", 0):,} tokens' if telemetry else "No usage yet",
+            "caption": "Prompt, completion, and latency visibility for enterprise governance.",
+            "badge": telemetry.get("model") or "Standby",
+        },
+    ]
+    render_glass_widgets(widget_data)
+    question = render_command_bar()
+    live_panel_placeholder = st.empty()
+    if question:
+        run_query(question, live_placeholder=live_panel_placeholder)
+        df = st.session_state.latest_df
+        telemetry = st.session_state.workflow_telemetry
+        exec_time = st.session_state.latest_exec_time
+    elif st.session_state.live_logs and st.session_state.latest_question:
+        with live_panel_placeholder.container():
+            render_live_execution_panel(
+                st.session_state.latest_question,
+                st.session_state.live_trace or st.session_state.workflow_trace,
+                st.session_state.live_logs,
+                st.session_state.live_telemetry or st.session_state.workflow_telemetry,
+                chart_key=f"workflow_chart_{st.session_state.run_id}_summary",
+            )
+
+    if df is None:
+        status_left, status_right = st.columns([1.45, 0.92], gap="medium")
+        with status_left:
+            system_metrics = [
+                {"label": "System Health", "value": "99.98%", "caption": "Service readiness across AI orchestration"},
+                {"label": "Active Agents", "value": "4", "caption": "Core agents on warm standby"},
+                {"label": "Avg Latency", "value": "842 ms", "caption": "Trailing control-plane estimate"},
+                {"label": "Signal Quality", "value": "96.4", "caption": "Composite confidence benchmark"},
+            ]
+            render_kpi_cards(system_metrics)
+            st.markdown(
+                """
+                <div class="workspace-shell compact-shell">
+                    <div class="section-title">Operations Canvas</div>
+                    <div class="section-subtitle">Mock analytics view that keeps the workspace populated and operational between runs.</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.plotly_chart(
+                build_default_operations_figure(),
+                use_container_width=True,
+                key=f"default_ops_chart_{st.session_state.run_id}",
+            )
+            render_agent_row(build_default_agent_states())
+        with status_right:
+            render_response_card(
+                "Analytics Ready",
+                "The workspace is preloaded with operational defaults until the next query executes.",
+                """
+                <div class="workspace-body-copy">
+                    Launch a sample prompt or ask your own question below. Until then, the dashboard stays populated
+                    with live-looking orchestration posture, health metrics, and recommendations.
+                </div>
+                """,
+                tone="summary-module",
+            )
+            render_activity_feed(build_default_activity_feed())
+            render_recommendation_card(
+                [
+                    "Start with a revenue, customer, or top-track query to immediately populate the executive workspace.",
+                    "Upload a CSV to inspect ad hoc datasets while keeping observability and orchestration modules available.",
+                    "Use the workflow rail above to sanity-check which agent stages should remain warm for your next run.",
+                ]
+            )
+            render_observability_card(
+                {
+                    "model": "gpt-4.1-mini",
+                    "total_tokens": 18240,
+                    "latency_ms": 842,
+                    "cost_usd": 0.021384,
+                },
+                [{"step": "planner", "status": "success"}],
+            )
+        return
+    main_left, main_right = st.columns([1.42, 0.92], gap="medium")
+    with main_left:
+        render_executive_summary(st.session_state.latest_question, df, exec_time, telemetry)
+
+        chart_rendered = False
+        if is_scalar_result(df):
+            scalar_col = df.columns[0]
+            scalar_value = df.iloc[0, 0]
+            render_kpi_cards(
+                [
+                    {
+                        "label": scalar_col,
+                        "value": scalar_value,
+                        "caption": "Single-value result surfaced as a KPI",
+                    }
+                ]
+            )
+        elif can_render_chart(df):
+            st.markdown(
+                """
+                <div class="workspace-shell compact-shell">
+                    <div class="section-title">Visualization Workspace</div>
+                    <div class="section-subtitle">Interactive insight canvas for executive-ready narratives and deeper operator exploration.</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            all_options = build_column_options(df)
+            numeric_options = get_numeric_column_options(df)
+            numeric_labels = [option["label"] for option in numeric_options]
+            all_labels = [option["label"] for option in all_options]
+            option_lookup = {option["label"]: option for option in all_options}
+
+            c1, c2, c3 = st.columns(3, gap="small")
+            with c1:
+                x_col = st.selectbox(
+                    "X-axis",
+                    all_labels,
+                    index=all_labels.index(st.session_state.x_col)
+                    if st.session_state.x_col in all_labels
+                    else 0,
+                )
+                st.session_state.x_col = x_col
+
+            with c2:
+                y_options = [label for label in numeric_labels if label != x_col]
+                if y_options:
+                    y_col = st.selectbox(
+                        "Y-axis",
+                        y_options,
+                        index=y_options.index(st.session_state.y_col)
+                        if st.session_state.y_col in y_options
+                        else 0,
+                    )
+                    st.session_state.y_col = y_col
+                else:
+                    y_col = None
+
+            with c3:
+                chart_type = st.selectbox(
+                    "Chart Type",
+                    ["Bar", "Line", "Area"],
+                    index=["Bar", "Line", "Area"].index(st.session_state.chart_type),
+                )
+                st.session_state.chart_type = chart_type
+
+            x_option = option_lookup[x_col]
+            y_option = option_lookup[y_col] if y_col else None
+            x_series = df.iloc[:, x_option["index"]]
+
+            if pd.api.types.is_object_dtype(x_series) or pd.api.types.is_string_dtype(x_series):
+                selected_values = st.multiselect(
+                    f"Filter {x_col}",
+                    x_series.dropna().unique(),
+                    default=x_series.dropna().unique(),
+                )
+                filtered_df = df[x_series.isin(selected_values)]
+            else:
+                filtered_df = df
+
+            if y_option is not None:
+                chart_df = pd.DataFrame(
+                    {
+                        x_col: filtered_df.iloc[:, x_option["index"]],
+                        y_col: filtered_df.iloc[:, y_option["index"]],
+                    }
+                ).dropna()
+                if not chart_df.empty:
+                    fig = build_plotly_figure(chart_df, x_col, y_col, chart_type)
+                    st.plotly_chart(
+                        fig,
+                        use_container_width=True,
+                        key=f"insight_chart_{st.session_state.run_id}",
+                    )
+                    chart_rendered = True
+            if not chart_rendered:
+                render_result_table_card(df, height=230)
+        else:
+            render_result_table_card(df, height=250)
+
+    with main_right:
+        recommendations = build_ai_recommendations(df, telemetry, st.session_state.workflow_trace)
+        render_recommendation_card(recommendations)
+        render_observability_card(telemetry, st.session_state.workflow_trace)
+
+        if not df.empty:
+            try:
+                explanation = explain_result(client, st.session_state.latest_question, df)
+                render_response_card(
+                    "AI Insight Brief",
+                    "Natural-language interpretation of the current result set.",
+                    f'<div class="workspace-body-copy">{explanation}</div>',
+                    tone="insight-module",
+                )
+            except Exception as exc:
+                render_response_card(
+                    "AI Insight Brief",
+                    "Natural-language interpretation of the current result set.",
+                    f'<div class="workspace-body-copy">AI explanation is temporarily unavailable.<br/>{str(exc)}</div>',
+                    tone="insight-module",
+                )
+
+    show_sql = bool(st.session_state.latest_sql)
+    show_secondary_preview = not df.empty and (is_scalar_result(df) or can_render_chart(df))
+    if show_sql and show_secondary_preview:
+        lower_left, lower_right = st.columns([1.1, 1.18], gap="medium")
+        with lower_left:
+            render_sql_card(st.session_state.latest_sql)
+        with lower_right:
+            render_result_table_card(df, height=210)
+    elif show_sql:
+        render_sql_card(st.session_state.latest_sql)
+    elif show_secondary_preview:
+        render_result_table_card(df, height=210)
+
+    if not df.empty:
+        st.download_button(
+            "Download CSV",
+            df.to_csv(index=False).encode(),
+            "result.csv",
+            "text/csv",
+            use_container_width=True,
+        )
+
+
+def render_copilot_workspace():
+    left, right = st.columns([0.92, 1.08])
+    with left:
+        render_chat_history(st.session_state.messages)
+    with right:
+        render_workflow_timeline(
+            st.session_state.workflow_trace,
+            chart_key=f"workflow_chart_copilot_{st.session_state.run_id}",
+        )
+        render_telemetry_panel(st.session_state.workflow_telemetry)
+
+        if st.session_state.latest_df is not None:
+            st.markdown(
+                """
+                <div class="section-card compact-card">
+                    <div class="section-title">Active Dataset Snapshot</div>
+                    <div class="section-subtitle">Fast peek at the current result set powering the workspace.</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.dataframe(st.session_state.latest_df.head(20), use_container_width=True, height=280)
+
+
+st.set_page_config(
+    page_title="GenAI SQL Assistant",
+    layout="wide",
+    page_icon=":bar_chart:",
+)
+
+st.markdown(get_theme_css(), unsafe_allow_html=True)
+client = OpenAI(api_key=get_openai_api_key())
+init_session_state()
+
+render_hero()
+sidebar_state = render_sidebar()
+
+if sidebar_state["clear_chat"]:
+    clear_session()
+    st.rerun()
+
+if sidebar_state["uploaded_file"] is not None:
+    uploaded_name = sidebar_state["uploaded_file"].name
+    st.session_state.uploaded_df = pd.read_csv(sidebar_state["uploaded_file"])
+    if st.session_state.uploaded_name != uploaded_name:
+        st.session_state.uploaded_name = uploaded_name
+        st.success("CSV uploaded successfully. The workspace is now using uploaded data.")
+
+render_schema(sidebar_state["show_schema"])
+
+nav = sidebar_state["nav"]
+if nav == "Overview":
+    render_analytics_workspace(client)
+elif nav == "Copilot":
+    render_copilot_workspace()
+else:
+    render_history(st.session_state.history)
+
+render_footer()
