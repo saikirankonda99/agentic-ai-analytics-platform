@@ -5,7 +5,7 @@
 https://agentic-ai-analytics-platform.onrender.com
 
 👉 **GitHub Repository:**
-https://github.com/saikirankonda99/genai-sql-assistant
+https://github.com/saikirankonda99/agentic-ai-analytics-platform
 
 👉 **LinkedIn Profile:**
 https://www.linkedin.com/in/sai-kiran-konda/
