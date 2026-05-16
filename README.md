@@ -2,8 +2,7 @@
 🚀 A conversational AI-powered data analytics app that converts natural language into SQL queries and interactive insights.
 ---
 ## 🌐 Live Demo
-👉 **Streamlit App:**
-https://genai-sql-assistant-g2pwvuzvexzedzysr4vezo.streamlit.app
+https://agentic-ai-analytics-platform.onrender.com
 
 👉 **GitHub Repository:**
 https://github.com/saikirankonda99/genai-sql-assistant
