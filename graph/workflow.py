@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import time
 from typing import Any, TypedDict
 
 from db import get_schema, run_query
+from graph.cost_tracker import log_query_cost
 from graph.history_store import retrieve_similar_queries, save_query_to_history
 from guardrails import is_safe_sql
-from llm import generate_sql
+from llm import DEFAULT_SQL_MODEL, generate_sql_with_telemetry
 
 try:
     from langgraph.graph import END, StateGraph
@@ -26,6 +28,17 @@ class WorkflowTrace(TypedDict):
     detail: str
 
 
+class StepTelemetry(TypedDict):
+    step: str
+    model: str
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    cost_usd: float
+    latency_ms: int
+    usage_available: bool
+
+
 class WorkflowState(TypedDict, total=False):
     question: str
     plan: dict[str, Any]
@@ -40,6 +53,49 @@ class WorkflowState(TypedDict, total=False):
     last_error_source: str | None
     last_failed_sql: str
     trace: list[WorkflowTrace]
+    telemetry: dict[str, Any]
+
+
+def _new_step_telemetry(
+    step: str,
+    model: str,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    total_tokens: int = 0,
+    cost_usd: float = 0.0,
+    latency_ms: int = 0,
+    usage_available: bool = False,
+) -> StepTelemetry:
+    return {
+        "step": step,
+        "model": model,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+        "cost_usd": cost_usd,
+        "latency_ms": latency_ms,
+        "usage_available": usage_available,
+    }
+
+
+def _record_telemetry(state: WorkflowState, step_data: StepTelemetry) -> dict[str, Any]:
+    telemetry = dict(state.get("telemetry", {}))
+    steps = list(telemetry.get("steps", []))
+    steps.append(step_data)
+
+    telemetry.update(
+        {
+            "steps": steps,
+            "prompt_tokens": sum(item.get("prompt_tokens", 0) for item in steps),
+            "completion_tokens": sum(item.get("completion_tokens", 0) for item in steps),
+            "total_tokens": sum(item.get("total_tokens", 0) for item in steps),
+            "cost_usd": sum(item.get("cost_usd", 0.0) for item in steps),
+            "latency_ms": sum(item.get("latency_ms", 0) for item in steps),
+            "model": next((item.get("model", "") for item in reversed(steps) if item.get("model")), ""),
+            "usage_available": any(item.get("usage_available", False) for item in steps),
+        }
+    )
+    return telemetry
 
 
 def _append_trace(
@@ -91,7 +147,9 @@ def schema_node(state: WorkflowState) -> WorkflowState:
 
 
 def memory_node(state: WorkflowState) -> WorkflowState:
+    started = time.perf_counter()
     examples = retrieve_similar_queries(state["question"], top_k=3)
+    latency_ms = int((time.perf_counter() - started) * 1000)
     if examples:
         detail = f"Retrieved {len(examples)} similar example(s)."
     else:
@@ -99,6 +157,15 @@ def memory_node(state: WorkflowState) -> WorkflowState:
 
     return {
         "memory_examples": examples,
+        "telemetry": _record_telemetry(
+            state,
+            _new_step_telemetry(
+                step="memory retrieval",
+                model="chromadb",
+                latency_ms=latency_ms,
+                usage_available=False,
+            ),
+        ),
         "trace": _append_trace(
             state,
             "memory retrieval",
@@ -170,10 +237,13 @@ def sql_generation_node(state: WorkflowState) -> WorkflowState:
     if state.get("error") and state.get("retry_count", 0) > MAX_RETRIES:
         return {}
 
-    sql = generate_sql(_build_generation_prompt(state), state["schema"]).strip()
+    generation_result = generate_sql_with_telemetry(_build_generation_prompt(state), state["schema"])
+    sql = generation_result["sql"].strip()
+    step_telemetry = _new_step_telemetry(step="sql generation", **generation_result["telemetry"])
     if not sql or sql.startswith("ERROR:"):
         return {
             "error": sql or "SQL generation failed.",
+            "telemetry": _record_telemetry(state, step_telemetry),
             "trace": _append_trace(
                 state,
                 "sql generation",
@@ -186,6 +256,7 @@ def sql_generation_node(state: WorkflowState) -> WorkflowState:
         "sql": sql,
         "error": None,
         "last_error_source": None,
+        "telemetry": _record_telemetry(state, step_telemetry),
         "trace": _append_trace(
             state,
             "sql generation",
@@ -231,13 +302,16 @@ def validation_node(state: WorkflowState) -> WorkflowState:
 
 def reflection_node(state: WorkflowState) -> WorkflowState:
     retry_count = state.get("retry_count", 0) + 1
-    corrected_sql = generate_sql(_build_reflection_prompt(state), state["schema"]).strip()
+    reflection_result = generate_sql_with_telemetry(_build_reflection_prompt(state), state["schema"])
+    corrected_sql = reflection_result["sql"].strip()
+    step_telemetry = _new_step_telemetry(step="reflection", **reflection_result["telemetry"])
 
     if not corrected_sql or corrected_sql.startswith("ERROR:"):
         error = corrected_sql or "Reflection failed to generate corrected SQL."
         return {
             "retry_count": retry_count,
             "error": error,
+            "telemetry": _record_telemetry(state, step_telemetry),
             "trace": _append_trace(
                 state,
                 "reflection",
@@ -250,6 +324,7 @@ def reflection_node(state: WorkflowState) -> WorkflowState:
         "retry_count": retry_count,
         "sql": corrected_sql,
         "error": None,
+        "telemetry": _record_telemetry(state, step_telemetry),
         "trace": _append_trace(
             state,
             "reflection",
@@ -260,12 +335,30 @@ def reflection_node(state: WorkflowState) -> WorkflowState:
 
 
 def execution_node(state: WorkflowState) -> WorkflowState:
+    started = time.perf_counter()
     try:
         columns, rows = run_query(state["sql"])
+        latency_ms = int((time.perf_counter() - started) * 1000)
         save_query_to_history(
             question=state["question"],
             sql=state["sql"],
             success=True,
+        )
+        telemetry = _record_telemetry(
+            state,
+            _new_step_telemetry(
+                step="execution",
+                model="sqlite",
+                latency_ms=latency_ms,
+                usage_available=False,
+            ),
+        )
+        log_query_cost(
+            question=state["question"],
+            model=telemetry.get("model") or DEFAULT_SQL_MODEL,
+            cost_usd=telemetry.get("cost_usd", 0.0),
+            tokens=telemetry.get("total_tokens", 0),
+            latency_ms=telemetry.get("latency_ms", 0),
         )
         return {
             "columns": columns,
@@ -273,6 +366,7 @@ def execution_node(state: WorkflowState) -> WorkflowState:
             "error": None,
             "last_error": None,
             "last_error_source": None,
+            "telemetry": telemetry,
             "trace": _append_trace(
                 state,
                 "execution",
@@ -281,6 +375,7 @@ def execution_node(state: WorkflowState) -> WorkflowState:
             ),
         }
     except Exception as exc:
+        latency_ms = int((time.perf_counter() - started) * 1000)
         error = f"SQL execution failed: {exc}"
         return {
             "columns": [],
@@ -289,6 +384,15 @@ def execution_node(state: WorkflowState) -> WorkflowState:
             "last_error": str(exc),
             "last_error_source": "execution",
             "last_failed_sql": state.get("sql", ""),
+            "telemetry": _record_telemetry(
+                state,
+                _new_step_telemetry(
+                    step="execution",
+                    model="sqlite",
+                    latency_ms=latency_ms,
+                    usage_available=False,
+                ),
+            ),
             "trace": _append_trace(state, "execution", "error", error),
         }
 
@@ -358,6 +462,16 @@ def _run_linear(question: str) -> WorkflowState:
         "last_error": None,
         "last_error_source": None,
         "last_failed_sql": "",
+        "telemetry": {
+            "steps": [],
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cost_usd": 0.0,
+            "latency_ms": 0,
+            "model": "",
+            "usage_available": False,
+        },
         "trace": [],
     }
 
@@ -405,6 +519,16 @@ def run_workflow(question: str) -> WorkflowState:
         "last_error_source": None,
         "last_failed_sql": "",
         "memory_examples": [],
+        "telemetry": {
+            "steps": [],
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cost_usd": 0.0,
+            "latency_ms": 0,
+            "model": "",
+            "usage_available": False,
+        },
         "trace": [],
     }
 

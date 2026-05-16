@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import pandas as pd
 import time
@@ -10,6 +11,10 @@ try:
 except Exception:
     run_workflow = None
 
+
+def get_openai_api_key():
+    return st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+
 # ---------------- CONFIG ---------------- #
 st.set_page_config(
     page_title="GenAI SQL Assistant",
@@ -17,7 +22,7 @@ st.set_page_config(
     page_icon="📊"
 )
 
-client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+client = OpenAI(api_key=get_openai_api_key())
 
 # ---------------- STYLE ---------------- #
 # ---------------- STYLE ---------------- #
@@ -62,6 +67,9 @@ st.markdown("<br>", unsafe_allow_html=True)
 
 if "workflow_trace" not in st.session_state:
     st.session_state.workflow_trace = []
+
+if "workflow_telemetry" not in st.session_state:
+    st.session_state.workflow_telemetry = {}
 
 # ---------------- SIDEBAR ---------------- #
 with st.sidebar:
@@ -127,6 +135,24 @@ def render_workflow_trace():
             st.markdown(f"**{icon} {step.title()}**")
             st.caption(item["detail"])
 
+
+def render_workflow_telemetry():
+    with st.sidebar:
+        st.markdown("### 📈 Telemetry")
+        telemetry = st.session_state.get("workflow_telemetry", {})
+        if not telemetry:
+            st.caption("Run a database query to see telemetry.")
+            return
+
+        st.caption(f"Model: {telemetry.get('model') or 'Unavailable'}")
+        st.caption(f"Prompt tokens: {telemetry.get('prompt_tokens', 0)}")
+        st.caption(f"Completion tokens: {telemetry.get('completion_tokens', 0)}")
+        st.caption(f"Total tokens: {telemetry.get('total_tokens', 0)}")
+        st.caption(f"Estimated cost: ${telemetry.get('cost_usd', 0.0):.6f}")
+        st.caption(f"Workflow latency: {telemetry.get('latency_ms', 0)} ms")
+        if not telemetry.get("usage_available", False):
+            st.caption("Token usage metadata unavailable for one or more steps.")
+
 if show_schema:
     st.code(get_schema())
 
@@ -164,34 +190,61 @@ def is_scalar_result(df):
     return not df.empty and len(df) == 1 and len(df.columns) == 1
 
 
+def build_column_options(df):
+    seen = {}
+    options = []
+
+    for idx, col in enumerate(df.columns.tolist()):
+        seen[col] = seen.get(col, 0) + 1
+        label = col if seen[col] == 1 else f"{col} ({seen[col]})"
+        options.append({"label": label, "index": idx, "name": col})
+
+    return options
+
+
+def get_numeric_column_options(df):
+    return [
+        option for option in build_column_options(df)
+        if pd.api.types.is_numeric_dtype(df.iloc[:, option["index"]])
+    ]
+
+
+def get_categorical_column_options(df):
+    return [
+        option for option in build_column_options(df)
+        if pd.api.types.is_object_dtype(df.iloc[:, option["index"]])
+        or pd.api.types.is_string_dtype(df.iloc[:, option["index"]])
+    ]
+
+
 def can_render_chart(df):
     if df.empty or len(df) < 2:
         return False
 
-    numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
-    cat_cols = df.select_dtypes(include=["object", "string"]).columns.tolist()
+    numeric_options = get_numeric_column_options(df)
+    categorical_options = get_categorical_column_options(df)
 
-    return bool((numeric_cols and cat_cols) or len(numeric_cols) >= 2)
+    return bool(categorical_options and numeric_options)
 
 
 def build_overview_chart(df):
     if not can_render_chart(df):
         return None
 
-    numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
-    cat_cols = df.select_dtypes(include=["object", "string"]).columns.tolist()
+    x_option = get_categorical_column_options(df)[0]
+    y_option = get_numeric_column_options(df)[0]
 
-    if numeric_cols and cat_cols:
-        chart_df = df[[cat_cols[0], numeric_cols[0]]].dropna()
-        if chart_df.empty:
-            return None
-        return chart_df.set_index(cat_cols[0])
+    chart_df = pd.DataFrame(
+        {
+            x_option["label"]: df.iloc[:, x_option["index"]],
+            y_option["label"]: df.iloc[:, y_option["index"]],
+        }
+    ).dropna()
 
-    chart_df = df[numeric_cols].dropna()
-    if chart_df.empty or len(chart_df.columns) < 2:
+    if chart_df.empty:
         return None
 
-    return chart_df.set_index(numeric_cols[0])
+    return chart_df.set_index(x_option["label"])
 
 
 # ---------------- SAFE RUN ---------------- #
@@ -222,20 +275,25 @@ if user_input:
             cols = df.columns
             rows = df.values
             st.session_state.workflow_trace = []
+            st.session_state.workflow_telemetry = {}
             render_workflow_trace()
+            render_workflow_telemetry()
         else:
             if run_workflow is None:
                 render_workflow_trace()
+                render_workflow_telemetry()
                 st.error("❌ Workflow is unavailable.")
                 st.stop()
 
             workflow_result = run_workflow(question)
             st.session_state.workflow_trace = workflow_result.get("trace", [])
+            st.session_state.workflow_telemetry = workflow_result.get("telemetry", {})
             sql = (workflow_result.get("sql") or "").strip()
             workflow_error = workflow_result.get("error")
 
             if workflow_error:
                 render_workflow_trace()
+                render_workflow_telemetry()
                 st.error(f"❌ {workflow_error}")
                 if sql:
                     st.code(sql, language="sql")
@@ -246,12 +304,14 @@ if user_input:
 
             if not cols:
                 render_workflow_trace()
+                render_workflow_telemetry()
                 st.warning("⚠️ No columns returned or query failed")
                 st.stop()
 
             df = pd.DataFrame(rows, columns=cols)
 
     render_workflow_trace()
+    render_workflow_telemetry()
 
     st.success(f"📊 Found {len(df)} rows")
 
@@ -323,9 +383,12 @@ if user_input:
 
                     st.subheader("📊 Visualization")
 
-                    all_cols = df.columns.tolist()
-                    numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
-                    cat_cols = df.select_dtypes(include=["object", "string"]).columns.tolist()
+                    all_options = build_column_options(df)
+                    numeric_options = get_numeric_column_options(df)
+                    categorical_options = get_categorical_column_options(df)
+                    all_labels = [option["label"] for option in all_options]
+                    numeric_labels = [option["label"] for option in numeric_options]
+                    option_lookup = {option["label"]: option for option in all_options}
 
                     c1, c2, c3 = st.columns(3)
 
@@ -333,14 +396,14 @@ if user_input:
                     with c1:
                         x_col = st.selectbox(
                             "X-axis",
-                            all_cols,
-                            index=all_cols.index(st.session_state.x_col) if st.session_state.x_col in all_cols else 0
+                            all_labels,
+                            index=all_labels.index(st.session_state.x_col) if st.session_state.x_col in all_labels else 0
                         )
                         st.session_state.x_col = x_col
 
                     # Y-axis
                     with c2:
-                        y_options = [c for c in numeric_cols if c != x_col]
+                        y_options = [label for label in numeric_labels if label != x_col]
 
                         if y_options:
                             y_col = st.selectbox(
@@ -361,24 +424,32 @@ if user_input:
                         )
                         st.session_state.chart_type = chart_type
 
-                    # Handle single numeric column
-                    if len(numeric_cols) == 1:
-                        y_col = numeric_cols[0]
+                    x_option = option_lookup[x_col]
+                    y_option = option_lookup[y_col] if y_col else None
 
                     # FILTER
-                    if x_col in cat_cols:
+                    x_series = df.iloc[:, x_option["index"]]
+                    if (
+                        pd.api.types.is_object_dtype(x_series)
+                        or pd.api.types.is_string_dtype(x_series)
+                    ):
                         values = st.multiselect(
                             f"Filter {x_col}",
-                            df[x_col].dropna().unique(),
-                            default=df[x_col].dropna().unique()
+                            x_series.dropna().unique(),
+                            default=x_series.dropna().unique()
                         )
-                        filtered_df = df[df[x_col].isin(values)]
+                        filtered_df = df[x_series.isin(values)]
                     else:
                         filtered_df = df
 
                     # CHART
-                    if y_col:
-                        chart_df = filtered_df[[x_col, y_col]].dropna()
+                    if y_option is not None:
+                        chart_df = pd.DataFrame(
+                            {
+                                x_col: filtered_df.iloc[:, x_option["index"]],
+                                y_col: filtered_df.iloc[:, y_option["index"]],
+                            }
+                        ).dropna()
 
                         if not chart_df.empty:
                             st.caption(f"Using: {x_col} vs {y_col}")
