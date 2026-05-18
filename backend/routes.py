@@ -5,12 +5,12 @@ from datetime import datetime, timezone
 from json import dumps
 from typing import Literal
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse
 
 from backend.auth_context import get_request_session
-from backend.models import RequestSession
+from backend.models import DEFAULT_WORKSPACE_ID, RequestSession
 from backend.runtime import orchestration_runtime
 from backend.services import (
     AgentExecution,
@@ -20,6 +20,7 @@ from backend.services import (
     WorkflowTelemetry,
     orchestration_service,
 )
+from backend.websocket import websocket_manager, workflow_channel
 
 
 SERVICE_NAME = "agentic-ai-analytics-backend"
@@ -46,6 +47,7 @@ WorkflowStreamUpdateType = Literal[
     "stage_transition",
     "agent_update",
     "telemetry_update",
+    "investigation_update",
 ]
 
 router = APIRouter(tags=["system"])
@@ -198,6 +200,31 @@ def stream_workflow_updates(workflow_id: str) -> StreamingResponse:
     )
 
 
+@router.websocket("/workflow/{workflow_id}/ws")
+async def websocket_workflow_updates(websocket: WebSocket, workflow_id: str) -> None:
+    workflow = orchestration_service.get_workflow(workflow_id)
+    if workflow is None:
+        await websocket.close(code=1008)
+        return
+
+    workspace_id = websocket.headers.get("x-workspace-id") or DEFAULT_WORKSPACE_ID
+    if workflow.workspace_id != workspace_id:
+        await websocket.close(code=1008)
+        return
+
+    channel = workflow_channel(workflow_id, workspace_id)
+    await websocket_manager.connect(websocket, channel)
+    try:
+        for update in orchestration_service.get_stream_updates(workflow_id) or ():
+            await websocket.send_text(dumps(_stream_update_payload(update)))
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        websocket_manager.disconnect(websocket, channel)
+    except RuntimeError:
+        websocket_manager.disconnect(websocket, channel)
+
+
 def _telemetry_response(telemetry: WorkflowTelemetry) -> WorkflowTelemetryResponse:
     return WorkflowTelemetryResponse(
         started_at=telemetry.started_at,
@@ -252,14 +279,18 @@ def _agent_executions_response(
 
 def _sse_stream(updates: tuple[WorkflowStreamUpdate, ...]) -> Iterator[str]:
     for update in updates:
-        event = WorkflowStreamUpdateResponse(
-            timestamp=update.timestamp,
-            update_type=update.update_type,
-            message=update.message,
-            payload=update.payload,
-        )
         yield f"event: {update.update_type}\n"
-        yield f"data: {dumps(event.dict())}\n\n"
+        yield f"data: {dumps(_stream_update_payload(update))}\n\n"
+
+
+def _stream_update_payload(update: WorkflowStreamUpdate) -> dict[str, object]:
+    event = WorkflowStreamUpdateResponse(
+        timestamp=update.timestamp,
+        update_type=update.update_type,
+        message=update.message,
+        payload=update.payload,
+    )
+    return event.dict()
 
 
 __all__ = ["router"]

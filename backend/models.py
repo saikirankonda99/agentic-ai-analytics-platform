@@ -29,6 +29,7 @@ WorkflowStreamUpdateType = Literal[
     "stage_transition",
     "agent_update",
     "telemetry_update",
+    "investigation_update",
 ]
 WORKFLOW_STAGES: tuple[WorkflowStage, ...] = (
     "planning",
