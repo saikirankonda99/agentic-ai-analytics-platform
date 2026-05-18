@@ -6,6 +6,14 @@ from typing import TYPE_CHECKING, Any, Callable, Literal
 from uuid import uuid4
 
 from backend.ports import BackendConfig, InMemoryCache, InlineWorker
+from backend.storage import (
+    EventStorage,
+    InMemoryEventStorage,
+    InMemoryTelemetryStorage,
+    InMemoryWorkflowStorage,
+    TelemetryStorage,
+    WorkflowStorage,
+)
 
 
 if TYPE_CHECKING:
@@ -113,9 +121,17 @@ class OrchestrationExecution:
 
 
 class OrchestrationService:
-    def __init__(self, config: BackendConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: BackendConfig | None = None,
+        workflow_storage: WorkflowStorage | None = None,
+        event_storage: EventStorage | None = None,
+        telemetry_storage: TelemetryStorage | None = None,
+    ) -> None:
         self.config = config or BackendConfig()
-        self.cache = InMemoryCache()
+        self.workflow_storage = workflow_storage or InMemoryWorkflowStorage()
+        self.event_storage = event_storage or InMemoryEventStorage()
+        self.telemetry_storage = telemetry_storage or InMemoryTelemetryStorage()
         self.worker = InlineWorker()
 
     def execute(self, question: str) -> OrchestrationExecution:
@@ -142,19 +158,13 @@ class OrchestrationService:
             return self._transition_workflow(execution.workflow_id, "failed")
 
     def get_workflow(self, workflow_id: str) -> OrchestrationExecution | None:
-        workflow = self.cache.get(workflow_id)
-        if isinstance(workflow, OrchestrationExecution):
-            return workflow
-        return None
+        return self.workflow_storage.get(workflow_id)
 
     def get_events(self, workflow_id: str) -> tuple[WorkflowEvent, ...] | None:
         if self.get_workflow(workflow_id) is None:
             return None
 
-        events = self.cache.get(self._events_key(workflow_id))
-        if isinstance(events, tuple):
-            return events
-        return ()
+        return self.event_storage.list(workflow_id)
 
     def get_stream_updates(self, workflow_id: str) -> tuple[WorkflowStreamUpdate, ...] | None:
         workflow = self.get_workflow(workflow_id)
@@ -163,16 +173,17 @@ class OrchestrationService:
 
         updates: list[WorkflowStreamUpdate] = []
         events = self.get_events(workflow_id) or ()
+        telemetry = self.telemetry_storage.get(workflow_id) or workflow.telemetry
         updates.extend(self._event_stream_updates(events))
         updates.extend(self._lifecycle_stream_updates(events))
         updates.extend(self._stage_stream_updates(workflow.stage_progression))
         updates.extend(self._agent_stream_updates(workflow.agent_executions, workflow.stage_progression))
-        updates.extend(self._telemetry_stream_updates(workflow.telemetry))
+        updates.extend(self._telemetry_stream_updates(telemetry))
         return tuple(sorted(updates, key=lambda update: update.timestamp))
 
     def _save_workflow(self, workflow: OrchestrationExecution) -> None:
-        self.cache.set(workflow.workflow_id, workflow)
-        self.cache.set("workflow:latest", workflow)
+        self.workflow_storage.save(workflow)
+        self.telemetry_storage.save(workflow.workflow_id, workflow.telemetry)
 
     def _transition_workflow(
         self,
@@ -255,13 +266,7 @@ class OrchestrationService:
             event_type=event_type,
             message=message,
         )
-        events = self.cache.get(self._events_key(workflow_id))
-        if not isinstance(events, tuple):
-            events = ()
-        self.cache.set(self._events_key(workflow_id), (*events, event))
-
-    def _events_key(self, workflow_id: str) -> str:
-        return f"{workflow_id}:events"
+        self.event_storage.append(workflow_id, event)
 
     def _event_stream_updates(self, events: tuple[WorkflowEvent, ...]) -> list[WorkflowStreamUpdate]:
         return [
