@@ -10,7 +10,8 @@ from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse
 
 from backend.auth_context import get_request_session
-from backend.models import DEFAULT_WORKSPACE_ID, RequestSession
+from backend.logging import get_logger
+from backend.models import DEFAULT_ORGANIZATION_ID, DEFAULT_WORKSPACE_ID, RequestSession
 from backend.runtime import orchestration_runtime
 from backend.services import (
     AgentCoordinationTrace,
@@ -23,6 +24,7 @@ from backend.services import (
 )
 from backend.websocket import websocket_manager, workflow_channel
 
+logger = get_logger(__name__)
 
 SERVICE_NAME = "agentic-ai-analytics-backend"
 SERVICE_VERSION = "0.1.0"
@@ -159,17 +161,29 @@ def health() -> dict[str, str]:
     }
 
 
+@router.get("/ready")
+def readiness() -> dict[str, str]:
+    return orchestration_service.readiness()
+
+
 @router.post("/execute", response_model=ExecuteResponse)
 def execute(
     payload: ExecuteRequest,
     background_tasks: BackgroundTasks,
     session: RequestSession = Depends(get_request_session),
 ) -> ExecuteResponse:
-    execution = orchestration_runtime.submit(
-        payload.question,
-        background_tasks,
-        workspace_id=session.workspace_id,
-    )
+    try:
+        orchestration_service.register_session(session)
+        execution = orchestration_runtime.submit(
+            payload.question,
+            background_tasks,
+            organization_id=session.organization_id,
+            workspace_id=session.workspace_id,
+            user_id=session.user_id,
+        )
+    except Exception as exc:
+        logger.exception("execute_request_failed workspace_id=%s", session.workspace_id)
+        raise HTTPException(status_code=500, detail="Workflow execution could not be started") from exc
     return ExecuteResponse(
         workflow_id=execution.workflow_id,
         question=execution.question,
@@ -187,6 +201,7 @@ def execute(
 def get_workflow(workflow_id: str) -> WorkflowStatusResponse:
     workflow = orchestration_service.get_workflow(workflow_id)
     if workflow is None:
+        logger.info("workflow_not_found workflow_id=%s", workflow_id)
         raise HTTPException(status_code=404, detail="Workflow not found")
 
     return WorkflowStatusResponse(
@@ -234,12 +249,16 @@ async def websocket_workflow_updates(websocket: WebSocket, workflow_id: str) -> 
         await websocket.close(code=1008)
         return
 
+    organization_id = websocket.headers.get("x-organization-id") or DEFAULT_ORGANIZATION_ID
     workspace_id = websocket.headers.get("x-workspace-id") or DEFAULT_WORKSPACE_ID
+    if workflow.organization_id != organization_id:
+        await websocket.close(code=1008)
+        return
     if workflow.workspace_id != workspace_id:
         await websocket.close(code=1008)
         return
 
-    channel = workflow_channel(workflow_id, workspace_id)
+    channel = workflow_channel(workflow_id, workspace_id, organization_id)
     await websocket_manager.connect(websocket, channel)
     try:
         for update in orchestration_service.get_stream_updates(workflow_id) or ():

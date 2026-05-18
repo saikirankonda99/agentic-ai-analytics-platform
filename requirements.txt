@@ -11,3 +11,6 @@ chromadb
 plotly
 redis
 psycopg[binary]
+pytest
+ruff
+black

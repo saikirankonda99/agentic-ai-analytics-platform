@@ -7,6 +7,9 @@
 # Python cache
 __pycache__/
 *.pyc
+.pytest_cache/
+.pytest_tmp/
+pytest-cache-files-*/
 
 # Virtual env
 venv/
@@ -16,3 +19,4 @@ logs/
 
 # Generated backend runtime state
 data/workflow_runtime.db
+data/test-runtime/
