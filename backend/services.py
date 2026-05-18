@@ -135,6 +135,10 @@ class OrchestrationService:
         self.worker = InlineWorker()
 
     def execute(self, question: str) -> OrchestrationExecution:
+        execution = self.create_workflow(question)
+        return self.run_workflow(execution.workflow_id)
+
+    def create_workflow(self, question: str) -> OrchestrationExecution:
         execution = OrchestrationExecution(
             workflow_id=f"workflow:{uuid4()}",
             question=question,
@@ -148,14 +152,16 @@ class OrchestrationService:
             "workflow_created",
             f"Workflow created for question: {question}",
         )
+        return execution
 
+    def run_workflow(self, workflow_id: str) -> OrchestrationExecution:
         try:
-            self._transition_workflow(execution.workflow_id, "running")
+            self._transition_workflow(workflow_id, "running")
             for stage in WORKFLOW_STAGES:
-                self._transition_stage(execution.workflow_id, stage)
-            return self._transition_workflow(execution.workflow_id, "completed")
+                self._transition_stage(workflow_id, stage)
+            return self._transition_workflow(workflow_id, "completed")
         except Exception:
-            return self._transition_workflow(execution.workflow_id, "failed")
+            return self._transition_workflow(workflow_id, "failed")
 
     def get_workflow(self, workflow_id: str) -> OrchestrationExecution | None:
         return self.workflow_storage.get(workflow_id)

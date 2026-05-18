@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from json import dumps
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse
 
@@ -130,8 +130,9 @@ def health() -> dict[str, str]:
 
 
 @router.post("/execute", response_model=ExecuteResponse)
-def execute(payload: ExecuteRequest) -> ExecuteResponse:
-    execution = orchestration_service.execute(payload.question)
+def execute(payload: ExecuteRequest, background_tasks: BackgroundTasks) -> ExecuteResponse:
+    execution = orchestration_service.create_workflow(payload.question)
+    background_tasks.add_task(orchestration_service.run_workflow, execution.workflow_id)
     return ExecuteResponse(
         workflow_id=execution.workflow_id,
         question=execution.question,
