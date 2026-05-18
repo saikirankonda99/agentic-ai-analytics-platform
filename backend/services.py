@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Literal
 from uuid import uuid4
@@ -14,6 +14,45 @@ if TYPE_CHECKING:
 
 WorkflowCallback = Callable[[str, "WorkflowState", str, str], None]
 WorkflowLifecycleState = Literal["queued", "running", "completed", "failed"]
+WorkflowStage = Literal[
+    "planning",
+    "schema_analysis",
+    "sql_generation",
+    "validation",
+    "execution",
+    "insight_generation",
+]
+WORKFLOW_STAGES: tuple[WorkflowStage, ...] = (
+    "planning",
+    "schema_analysis",
+    "sql_generation",
+    "validation",
+    "execution",
+    "insight_generation",
+)
+
+
+@dataclass(frozen=True)
+class TokenUsage:
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class WorkflowTelemetry:
+    started_at: str | None = None
+    completed_at: str | None = None
+    latency_ms: int | None = None
+    estimated_cost_usd: float = 0.0
+    token_usage: TokenUsage = field(default_factory=TokenUsage)
+
+
+@dataclass(frozen=True)
+class WorkflowStageProgress:
+    stage: WorkflowStage
+    status: WorkflowLifecycleState
+    timestamp: str
 
 
 @dataclass(frozen=True)
@@ -22,6 +61,9 @@ class OrchestrationExecution:
     question: str
     status: WorkflowLifecycleState
     created_at: str
+    telemetry: WorkflowTelemetry
+    current_stage: WorkflowStage | None = None
+    stage_progression: tuple[WorkflowStageProgress, ...] = ()
 
 
 class OrchestrationService:
@@ -36,11 +78,14 @@ class OrchestrationService:
             question=question,
             status="queued",
             created_at=datetime.now(timezone.utc).isoformat(),
+            telemetry=WorkflowTelemetry(),
         )
         self._save_workflow(execution)
 
         try:
             self._transition_workflow(execution.workflow_id, "running")
+            for stage in WORKFLOW_STAGES:
+                self._transition_stage(execution.workflow_id, stage)
             return self._transition_workflow(execution.workflow_id, "completed")
         except Exception:
             return self._transition_workflow(execution.workflow_id, "failed")
@@ -69,9 +114,77 @@ class OrchestrationService:
             question=workflow.question,
             status=status,
             created_at=workflow.created_at,
+            telemetry=self._build_telemetry(workflow, status),
+            current_stage=workflow.current_stage,
+            stage_progression=workflow.stage_progression,
         )
         self._save_workflow(updated)
         return updated
+
+    def _transition_stage(
+        self,
+        workflow_id: str,
+        stage: WorkflowStage,
+    ) -> OrchestrationExecution:
+        workflow = self.get_workflow(workflow_id)
+        if workflow is None:
+            raise ValueError(f"Workflow not found: {workflow_id}")
+
+        updated = OrchestrationExecution(
+            workflow_id=workflow.workflow_id,
+            question=workflow.question,
+            status=workflow.status,
+            created_at=workflow.created_at,
+            telemetry=workflow.telemetry,
+            current_stage=stage,
+            stage_progression=(
+                *workflow.stage_progression,
+                WorkflowStageProgress(
+                    stage=stage,
+                    status="completed",
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                ),
+            ),
+        )
+        self._save_workflow(updated)
+        return updated
+
+    def _build_telemetry(
+        self,
+        workflow: OrchestrationExecution,
+        status: WorkflowLifecycleState,
+    ) -> WorkflowTelemetry:
+        if status == "running":
+            return WorkflowTelemetry(started_at=datetime.now(timezone.utc).isoformat())
+
+        if status not in {"completed", "failed"}:
+            return workflow.telemetry
+
+        completed_at = datetime.now(timezone.utc)
+        started_at = workflow.telemetry.started_at or completed_at.isoformat()
+        started_at_dt = datetime.fromisoformat(started_at)
+        latency_ms = max(int((completed_at - started_at_dt).total_seconds() * 1000), 0)
+        token_usage = self._estimate_token_usage(workflow.question)
+
+        return WorkflowTelemetry(
+            started_at=started_at,
+            completed_at=completed_at.isoformat(),
+            latency_ms=latency_ms,
+            estimated_cost_usd=self._estimate_cost(token_usage),
+            token_usage=token_usage,
+        )
+
+    def _estimate_token_usage(self, question: str) -> TokenUsage:
+        prompt_tokens = max(len(question.split()), 1) + 16
+        completion_tokens = 24
+        return TokenUsage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+        )
+
+    def _estimate_cost(self, token_usage: TokenUsage) -> float:
+        return round(token_usage.total_tokens * 0.000002, 6)
 
 
 class AnalyticsBackendService:
