@@ -1030,34 +1030,41 @@ def render_executive_summary(question: str, df: pd.DataFrame, exec_time: float |
     shape_text = f"{len(df):,} rows x {len(df.columns)} columns"
     lead_column = df.columns[0] if not df.empty else "N/A"
     exec_time_text = f"{exec_time:.2f}s" if exec_time is not None else "pending runtime"
+
+    total_tokens = telemetry.get("total_tokens", 0)
+    formatted_tokens = f"{total_tokens:,}"
+
     body = (
         f'<div class="summary-stat-strip">'
         f'<div class="summary-stat">'
         f'<div class="summary-stat-label">Question</div>'
         f'<div class="summary-stat-value">{escape_html(question or "Awaiting prompt")}</div>'
         f"</div>"
+
         f'<div class="summary-stat">'
         f'<div class="summary-stat-label">Dataset Shape</div>'
         f'<div class="summary-stat-value">{escape_html(shape_text)}</div>'
         f"</div>"
+
         f'<div class="summary-stat">'
         f'<div class="summary-stat-label">Primary Dimension</div>'
         f'<div class="summary-stat-value">{escape_html(lead_column)}</div>'
         f"</div>"
         f"</div>"
+
         f'<div class="executive-callout">'
         f"Latest workflow completed in {escape_html(exec_time_text)} with "
-        f'{escape_html(f"{telemetry.get("total_tokens", 0):,}")} tokens processed. '
+        f"{escape_html(formatted_tokens)} tokens processed. "
         f"The current dataset is ready for executive review, SQL inspection, and follow-up analysis."
         f"</div>"
     )
+
     return render_response_card(
         "Executive Insight Summary",
         "Top-level readout for operators, analysts, and decision-makers.",
         body,
         tone="summary-module",
     )
-
 
 def render_activity_feed(items: list[dict]) -> str:
     body = "".join(
