@@ -10,6 +10,7 @@ from typing import Protocol
 from backend.config import settings
 from backend.models import (
     DEFAULT_WORKSPACE_ID,
+    AgentCoordinationTrace,
     AgentExecution,
     OrchestrationExecution,
     TokenUsage,
@@ -52,6 +53,14 @@ class AgentExecutionStorage(Protocol):
 
     def list(self, workflow_id: str, *, workspace_id: str | None = None) -> tuple[AgentExecution, ...]:
         """List agent execution metadata for a workflow."""
+
+
+class AgentTraceStorage(Protocol):
+    def save_all(self, workflow_id: str, traces: tuple[AgentCoordinationTrace, ...], *, workspace_id: str) -> None:
+        """Persist inter-agent coordination traces for a workflow."""
+
+    def list(self, workflow_id: str, *, workspace_id: str | None = None) -> tuple[AgentCoordinationTrace, ...]:
+        """List inter-agent coordination traces for a workflow."""
 
 
 class InMemoryWorkflowStorage:
@@ -112,6 +121,20 @@ class InMemoryAgentExecutionStorage:
     def list(self, workflow_id: str, *, workspace_id: str | None = None) -> tuple[AgentExecution, ...]:
         with self._lock:
             return self._agents.get(workflow_id, ())
+
+
+class InMemoryAgentTraceStorage:
+    def __init__(self) -> None:
+        self._traces: dict[str, tuple[AgentCoordinationTrace, ...]] = {}
+        self._lock = RLock()
+
+    def save_all(self, workflow_id: str, traces: tuple[AgentCoordinationTrace, ...], *, workspace_id: str) -> None:
+        with self._lock:
+            self._traces[workflow_id] = traces
+
+    def list(self, workflow_id: str, *, workspace_id: str | None = None) -> tuple[AgentCoordinationTrace, ...]:
+        with self._lock:
+            return self._traces.get(workflow_id, ())
 
 
 class SQLiteStore:
@@ -175,12 +198,26 @@ class SQLiteStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_workflow_agents_workflow_id
                     ON workflow_agents(workflow_id, id);
+
+                CREATE TABLE IF NOT EXISTS workflow_agent_traces (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    workflow_id TEXT NOT NULL,
+                    workspace_id TEXT NOT NULL DEFAULT 'workspace:default',
+                    timestamp TEXT NOT NULL,
+                    source_agent TEXT NOT NULL,
+                    target_agent TEXT NOT NULL,
+                    handoff_reason TEXT NOT NULL,
+                    context_summary TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_workflow_agent_traces_workflow_id
+                    ON workflow_agent_traces(workflow_id, id);
                 """
             )
             self._ensure_column(connection, "workflows", "workspace_id", "TEXT NOT NULL DEFAULT 'workspace:default'")
             self._ensure_column(connection, "workflow_events", "workspace_id", "TEXT NOT NULL DEFAULT 'workspace:default'")
             self._ensure_column(connection, "workflow_telemetry", "workspace_id", "TEXT NOT NULL DEFAULT 'workspace:default'")
             self._ensure_column(connection, "workflow_agents", "workspace_id", "TEXT NOT NULL DEFAULT 'workspace:default'")
+            self._ensure_column(connection, "workflow_agent_traces", "workspace_id", "TEXT NOT NULL DEFAULT 'workspace:default'")
 
     def _ensure_column(
         self,
@@ -378,15 +415,60 @@ class SQLiteAgentExecutionStorage(SQLiteStore):
         return tuple(AgentExecution(**dict(row)) for row in rows)
 
 
+class SQLiteAgentTraceStorage(SQLiteStore):
+    def save_all(self, workflow_id: str, traces: tuple[AgentCoordinationTrace, ...], *, workspace_id: str) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute("DELETE FROM workflow_agent_traces WHERE workflow_id = ?", (workflow_id,))
+            connection.executemany(
+                """
+                INSERT INTO workflow_agent_traces (
+                    workflow_id, workspace_id, timestamp, source_agent, target_agent,
+                    handoff_reason, context_summary
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        workflow_id,
+                        workspace_id,
+                        trace.timestamp,
+                        trace.source_agent,
+                        trace.target_agent,
+                        trace.handoff_reason,
+                        trace.context_summary,
+                    )
+                    for trace in traces
+                ],
+            )
+
+    def list(self, workflow_id: str, *, workspace_id: str | None = None) -> tuple[AgentCoordinationTrace, ...]:
+        query = """
+            SELECT timestamp, source_agent, target_agent, handoff_reason, context_summary
+            FROM workflow_agent_traces
+            WHERE workflow_id = ?
+        """
+        params: tuple[str, ...] = (workflow_id,)
+        if workspace_id is not None:
+            query += " AND workspace_id = ?"
+            params = (workflow_id, workspace_id)
+        query += " ORDER BY id ASC"
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return tuple(AgentCoordinationTrace(**dict(row)) for row in rows)
+
+
 __all__ = [
+    "AgentTraceStorage",
     "AgentExecutionStorage",
     "DEFAULT_WORKFLOW_DB_PATH",
     "EventStorage",
     "InMemoryAgentExecutionStorage",
+    "InMemoryAgentTraceStorage",
     "InMemoryEventStorage",
     "InMemoryTelemetryStorage",
     "InMemoryWorkflowStorage",
     "SQLiteAgentExecutionStorage",
+    "SQLiteAgentTraceStorage",
     "SQLiteEventStorage",
     "SQLiteTelemetryStorage",
     "SQLiteWorkflowStorage",

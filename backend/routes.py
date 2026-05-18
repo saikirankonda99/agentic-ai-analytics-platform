@@ -13,6 +13,7 @@ from backend.auth_context import get_request_session
 from backend.models import DEFAULT_WORKSPACE_ID, RequestSession
 from backend.runtime import orchestration_runtime
 from backend.services import (
+    AgentCoordinationTrace,
     AgentExecution,
     WorkflowEvent,
     WorkflowStageProgress,
@@ -35,11 +36,25 @@ WorkflowStageName = Literal[
     "execution",
     "insight_generation",
 ]
+AgentAssignedStageName = Literal[
+    "planning",
+    "schema_analysis",
+    "sql_generation",
+    "validation",
+    "execution",
+    "insight_generation",
+    "reflection",
+    "anomaly_detection",
+    "investigation",
+    "executive_briefing",
+]
 WorkflowEventType = Literal[
     "workflow_created",
     "lifecycle_transition",
     "stage_transition",
     "telemetry_update",
+    "agent_handoff",
+    "investigation_update",
 ]
 WorkflowStreamUpdateType = Literal[
     "workflow_event",
@@ -86,8 +101,16 @@ class WorkflowEventResponse(BaseModel):
 class AgentExecutionResponse(BaseModel):
     agent_name: str
     agent_role: str
-    assigned_stage: WorkflowStageName
+    assigned_stage: AgentAssignedStageName
     agent_status: AgentStatus
+
+
+class AgentCoordinationTraceResponse(BaseModel):
+    timestamp: str
+    source_agent: str
+    target_agent: str
+    handoff_reason: str
+    context_summary: str
 
 
 class WorkflowEventsResponse(BaseModel):
@@ -111,6 +134,7 @@ class ExecuteResponse(BaseModel):
     current_stage: WorkflowStageName | None
     stage_progression: list[WorkflowStageProgressResponse]
     agent_executions: list[AgentExecutionResponse]
+    agent_traces: list[AgentCoordinationTraceResponse]
 
 
 class WorkflowStatusResponse(BaseModel):
@@ -122,6 +146,7 @@ class WorkflowStatusResponse(BaseModel):
     current_stage: WorkflowStageName | None
     stage_progression: list[WorkflowStageProgressResponse]
     agent_executions: list[AgentExecutionResponse]
+    agent_traces: list[AgentCoordinationTraceResponse]
 
 
 @router.get("/health")
@@ -154,6 +179,7 @@ def execute(
         current_stage=execution.current_stage,
         stage_progression=_stage_progression_response(execution.stage_progression),
         agent_executions=_agent_executions_response(execution.agent_executions),
+        agent_traces=_agent_traces_response(orchestration_service.get_agent_traces(execution.workflow_id) or ()),
     )
 
 
@@ -172,6 +198,7 @@ def get_workflow(workflow_id: str) -> WorkflowStatusResponse:
         current_stage=workflow.current_stage,
         stage_progression=_stage_progression_response(workflow.stage_progression),
         agent_executions=_agent_executions_response(workflow.agent_executions),
+        agent_traces=_agent_traces_response(orchestration_service.get_agent_traces(workflow_id) or ()),
     )
 
 
@@ -274,6 +301,19 @@ def _agent_executions_response(
             agent_status=agent.agent_status,
         )
         for agent in agent_executions
+    ]
+
+
+def _agent_traces_response(traces: tuple[AgentCoordinationTrace, ...]) -> list[AgentCoordinationTraceResponse]:
+    return [
+        AgentCoordinationTraceResponse(
+            timestamp=trace.timestamp,
+            source_agent=trace.source_agent,
+            target_agent=trace.target_agent,
+            handoff_reason=trace.handoff_reason,
+            context_summary=trace.context_summary,
+        )
+        for trace in traces
     ]
 
 

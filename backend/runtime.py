@@ -36,7 +36,10 @@ class OrchestrationRuntime:
             await self._broadcast_new(workflow, {"workflow_event", "lifecycle_transition", "telemetry_update"})
             for stage in WORKFLOW_STAGES:
                 workflow = self.service.complete_stage(workflow_id, stage)
-                await self._broadcast_new(workflow, {"workflow_event", "stage_transition", "agent_update"})
+                await self._broadcast_new(
+                    workflow,
+                    {"workflow_event", "stage_transition", "agent_update", "investigation_update"},
+                )
             workflow = self.service.complete_workflow(workflow_id)
             await self._broadcast_new(workflow, {"workflow_event", "lifecycle_transition", "telemetry_update"})
             await self._broadcast_investigation_placeholder(workflow)

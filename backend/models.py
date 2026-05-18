@@ -17,11 +17,25 @@ WorkflowStage = Literal[
     "execution",
     "insight_generation",
 ]
+AgentAssignedStage = Literal[
+    "planning",
+    "schema_analysis",
+    "sql_generation",
+    "validation",
+    "execution",
+    "insight_generation",
+    "reflection",
+    "anomaly_detection",
+    "investigation",
+    "executive_briefing",
+]
 WorkflowEventType = Literal[
     "workflow_created",
     "lifecycle_transition",
     "stage_transition",
     "telemetry_update",
+    "agent_handoff",
+    "investigation_update",
 ]
 WorkflowStreamUpdateType = Literal[
     "workflow_event",
@@ -104,8 +118,17 @@ class WorkflowStageProgress:
 class AgentExecution:
     agent_name: str
     agent_role: str
-    assigned_stage: WorkflowStage
+    assigned_stage: AgentAssignedStage
     agent_status: AgentExecutionStatus
+
+
+@dataclass(frozen=True)
+class AgentCoordinationTrace:
+    timestamp: str
+    source_agent: str
+    target_agent: str
+    handoff_reason: str
+    context_summary: str
 
 
 @dataclass(frozen=True)
@@ -139,6 +162,8 @@ class OrchestrationExecution:
 __all__ = [
     "AgentExecution",
     "AgentExecutionStatus",
+    "AgentAssignedStage",
+    "AgentCoordinationTrace",
     "DEFAULT_USER_ID",
     "DEFAULT_WORKSPACE_ID",
     "OrchestrationExecution",

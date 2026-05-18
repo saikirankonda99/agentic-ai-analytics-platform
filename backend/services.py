@@ -4,11 +4,12 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
 from uuid import uuid4
 
+from backend.agents import MultiAgentCoordinator
 from backend.memory import MemoryDocument, VectorMemoryStore, build_vector_memory_store
 from backend.models import (
     DEFAULT_WORKSPACE_ID,
-    STAGE_AGENTS,
     WORKFLOW_STAGES,
+    AgentCoordinationTrace,
     AgentExecution,
     OrchestrationExecution,
     TokenUsage,
@@ -23,8 +24,10 @@ from backend.models import (
 from backend.ports import BackendConfig, InMemoryCache, InlineWorker
 from backend.storage import (
     AgentExecutionStorage,
+    AgentTraceStorage,
     EventStorage,
     SQLiteAgentExecutionStorage,
+    SQLiteAgentTraceStorage,
     SQLiteEventStorage,
     SQLiteTelemetryStorage,
     SQLiteWorkflowStorage,
@@ -48,14 +51,18 @@ class OrchestrationService:
         event_storage: EventStorage | None = None,
         telemetry_storage: TelemetryStorage | None = None,
         agent_execution_storage: AgentExecutionStorage | None = None,
+        agent_trace_storage: AgentTraceStorage | None = None,
         vector_memory_store: VectorMemoryStore | None = None,
+        agent_coordinator: MultiAgentCoordinator | None = None,
     ) -> None:
         self.config = config or BackendConfig()
         self.workflow_storage = workflow_storage or SQLiteWorkflowStorage()
         self.event_storage = event_storage or SQLiteEventStorage()
         self.telemetry_storage = telemetry_storage or SQLiteTelemetryStorage()
         self.agent_execution_storage = agent_execution_storage or SQLiteAgentExecutionStorage()
+        self.agent_trace_storage = agent_trace_storage or SQLiteAgentTraceStorage()
         self.vector_memory_store = vector_memory_store or build_vector_memory_store()
+        self.agent_coordinator = agent_coordinator or MultiAgentCoordinator()
         self.worker = InlineWorker()
 
     def execute(self, question: str) -> OrchestrationExecution:
@@ -138,6 +145,13 @@ class OrchestrationService:
 
         return self.event_storage.list(workflow_id, workspace_id=workflow.workspace_id)
 
+    def get_agent_traces(self, workflow_id: str) -> tuple[AgentCoordinationTrace, ...] | None:
+        workflow = self.get_workflow(workflow_id)
+        if workflow is None:
+            return None
+
+        return self.agent_trace_storage.list(workflow_id, workspace_id=workflow.workspace_id)
+
     def get_stream_updates(self, workflow_id: str) -> tuple[WorkflowStreamUpdate, ...] | None:
         workflow = self.get_workflow(workflow_id)
         if workflow is None:
@@ -148,6 +162,7 @@ class OrchestrationService:
         telemetry = self.telemetry_storage.get(workflow_id) or workflow.telemetry
         updates.extend(self._event_stream_updates(events))
         updates.extend(self._lifecycle_stream_updates(events))
+        updates.extend(self._investigation_stream_updates(events))
         updates.extend(self._stage_stream_updates(workflow.stage_progression))
         updates.extend(self._agent_stream_updates(workflow.agent_executions, workflow.stage_progression))
         updates.extend(self._telemetry_stream_updates(telemetry))
@@ -207,6 +222,8 @@ class OrchestrationService:
         if workflow is None:
             raise ValueError(f"Workflow not found: {workflow_id}")
 
+        coordination = self.agent_coordinator.coordinate_stage(stage, workflow.question)
+        traces = (*self.agent_trace_storage.list(workflow_id, workspace_id=workflow.workspace_id), *coordination.traces)
         updated = OrchestrationExecution(
             workflow_id=workflow.workflow_id,
             workspace_id=workflow.workspace_id,
@@ -225,10 +242,33 @@ class OrchestrationService:
             ),
             agent_executions=(
                 *workflow.agent_executions,
-                self._simulate_agent_execution(stage),
+                *coordination.executions,
             ),
         )
         self._save_workflow(updated)
+        self.agent_trace_storage.save_all(workflow_id, traces, workspace_id=workflow.workspace_id)
+        for trace in coordination.traces:
+            self._append_event(
+                workflow_id,
+                "agent_handoff",
+                f"{trace.source_agent} handed off to {trace.target_agent}.",
+                workspace_id=workflow.workspace_id,
+            )
+        if stage == "insight_generation":
+            self._append_event(
+                workflow_id,
+                "investigation_update",
+                "Anomaly detection triggered an autonomous investigation chain.",
+                workspace_id=workflow.workspace_id,
+            )
+            self.vector_memory_store.upsert(
+                MemoryDocument(
+                    namespace="investigation",
+                    text=f"Autonomous investigation chain for {workflow.question}",
+                    workspace_id=workflow.workspace_id,
+                    metadata={"workflow_id": workflow.workflow_id},
+                )
+            )
         self._append_event(
             workflow_id,
             "stage_transition",
@@ -280,6 +320,22 @@ class OrchestrationService:
             )
             for event in events
             if event.event_type == "lifecycle_transition"
+        ]
+
+    def _investigation_stream_updates(self, events: tuple[WorkflowEvent, ...]) -> list[WorkflowStreamUpdate]:
+        return [
+            WorkflowStreamUpdate(
+                timestamp=event.timestamp,
+                update_type="investigation_update",
+                message=event.message,
+                payload={
+                    "event_type": event.event_type,
+                    "message": event.message,
+                    "timestamp": event.timestamp,
+                },
+            )
+            for event in events
+            if event.event_type == "investigation_update"
         ]
 
     def _stage_stream_updates(
@@ -351,15 +407,6 @@ class OrchestrationService:
                 )
             )
         return updates
-
-    def _simulate_agent_execution(self, stage: WorkflowStage) -> AgentExecution:
-        agent_name, agent_role = STAGE_AGENTS[stage]
-        return AgentExecution(
-            agent_name=agent_name,
-            agent_role=agent_role,
-            assigned_stage=stage,
-            agent_status="completed",
-        )
 
     def _build_telemetry(
         self,
