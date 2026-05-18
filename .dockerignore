@@ -1,5 +1,6 @@
 .git
 .gitignore
+.env
 .venv
 venv
 __pycache__
@@ -11,4 +12,5 @@ __pycache__
 .ruff_cache
 .streamlit/secrets.toml
 data/cost_log.db
+data/workflow_runtime.db
 data/history_store

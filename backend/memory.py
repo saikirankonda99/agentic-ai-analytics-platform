@@ -5,6 +5,7 @@ from math import sqrt
 from typing import Any, Literal, Protocol
 from uuid import uuid4
 
+from backend.config import settings
 from backend.models import DEFAULT_WORKSPACE_ID
 
 
@@ -121,6 +122,31 @@ class InMemoryVectorMemoryStore:
         return tuple(sorted(results, key=lambda result: result.score, reverse=True)[:top_k])
 
 
+class PgVectorMemoryStore:
+    def __init__(self, database_url: str, embedding_service: EmbeddingService | None = None) -> None:
+        self.database_url = database_url
+        self.embedding_service = embedding_service or HashingEmbeddingService()
+
+    def upsert(self, document: MemoryDocument) -> MemoryRecord:
+        raise NotImplementedError("pgvector persistence is configured but not enabled yet.")
+
+    def search(
+        self,
+        query: str,
+        *,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
+        namespace: MemoryNamespace | None = None,
+        top_k: int = 5,
+    ) -> tuple[MemorySearchResult, ...]:
+        raise NotImplementedError("pgvector retrieval is configured but not enabled yet.")
+
+
+def build_vector_memory_store() -> VectorMemoryStore:
+    if settings.vector_database_url:
+        return PgVectorMemoryStore(settings.vector_database_url)
+    return InMemoryVectorMemoryStore()
+
+
 def _cosine_similarity(left: tuple[float, ...], right: tuple[float, ...]) -> float:
     return sum(left_value * right_value for left_value, right_value in zip(left, right))
 
@@ -133,5 +159,7 @@ __all__ = [
     "MemoryNamespace",
     "MemoryRecord",
     "MemorySearchResult",
+    "PgVectorMemoryStore",
     "VectorMemoryStore",
+    "build_vector_memory_store",
 ]

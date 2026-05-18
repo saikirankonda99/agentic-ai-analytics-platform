@@ -7,6 +7,8 @@ from json import dumps
 from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
+from backend.config import settings
+from backend.messaging import EventBus, event_bus
 from backend.models import DEFAULT_WORKSPACE_ID, WorkflowStreamUpdate
 
 
@@ -17,7 +19,8 @@ class WebSocketChannel:
 
 
 class WebSocketConnectionManager:
-    def __init__(self) -> None:
+    def __init__(self, bus: EventBus = event_bus) -> None:
+        self.bus = bus
         self._connections: dict[WebSocketChannel, set[WebSocket]] = defaultdict(set)
 
     async def connect(self, websocket: WebSocket, channel: WebSocketChannel) -> None:
@@ -34,6 +37,7 @@ class WebSocketConnectionManager:
             self._connections.pop(channel, None)
 
     async def broadcast(self, channel: WebSocketChannel, update: WorkflowStreamUpdate) -> None:
+        self.bus.publish(_channel_name(channel), _serialize_update(update))
         stale_connections: list[WebSocket] = []
         for websocket in tuple(self._connections.get(channel, ())):
             try:
@@ -60,6 +64,10 @@ def _serialize_update(update: WorkflowStreamUpdate) -> str:
             "payload": update.payload,
         }
     )
+
+
+def _channel_name(channel: WebSocketChannel) -> str:
+    return f"{settings.websocket_channel_prefix}:{channel.workspace_id}:{channel.workflow_id}"
 
 
 websocket_manager = WebSocketConnectionManager()

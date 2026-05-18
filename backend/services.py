@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
 from uuid import uuid4
 
-from backend.memory import InMemoryVectorMemoryStore, MemoryDocument, VectorMemoryStore
+from backend.memory import MemoryDocument, VectorMemoryStore, build_vector_memory_store
 from backend.models import (
     DEFAULT_WORKSPACE_ID,
     STAGE_AGENTS,
@@ -55,7 +55,7 @@ class OrchestrationService:
         self.event_storage = event_storage or SQLiteEventStorage()
         self.telemetry_storage = telemetry_storage or SQLiteTelemetryStorage()
         self.agent_execution_storage = agent_execution_storage or SQLiteAgentExecutionStorage()
-        self.vector_memory_store = vector_memory_store or InMemoryVectorMemoryStore()
+        self.vector_memory_store = vector_memory_store or build_vector_memory_store()
         self.worker = InlineWorker()
 
     def execute(self, question: str) -> OrchestrationExecution:

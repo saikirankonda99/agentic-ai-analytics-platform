@@ -9,3 +9,5 @@ openai
 langgraph
 chromadb
 plotly
+redis
+psycopg[binary]

@@ -7,6 +7,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Protocol
 
+from backend.config import settings
 from backend.models import (
     DEFAULT_WORKSPACE_ID,
     AgentExecution,
@@ -18,7 +19,7 @@ from backend.models import (
 )
 
 
-DEFAULT_WORKFLOW_DB_PATH = Path("data") / "workflow_runtime.db"
+DEFAULT_WORKFLOW_DB_PATH = Path(settings.sqlite_workflow_path)
 
 
 class WorkflowStorage(Protocol):
