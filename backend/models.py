@@ -5,7 +5,14 @@ from typing import Any, Literal
 
 
 DEFAULT_USER_ID = "user:anonymous"
+DEFAULT_ORGANIZATION_ID = "organization:default"
 DEFAULT_WORKSPACE_ID = "workspace:default"
+UsageEventType = Literal[
+    "api_request",
+    "workflow_execution",
+    "token_usage",
+    "estimated_ai_cost",
+]
 
 WorkflowLifecycleState = Literal["queued", "running", "completed", "failed"]
 AgentExecutionStatus = Literal["queued", "running", "completed", "failed"]
@@ -71,15 +78,33 @@ class User:
 
 
 @dataclass(frozen=True)
+class Organization:
+    organization_id: str
+    name: str
+    plan: str = "free"
+
+
+@dataclass(frozen=True)
 class Workspace:
     workspace_id: str
     name: str
+    organization_id: str = DEFAULT_ORGANIZATION_ID
+
+
+@dataclass(frozen=True)
+class WorkspaceMembership:
+    user_id: str
+    workspace_id: str
+    organization_id: str
+    roles: tuple[str, ...] = ("workspace:member",)
 
 
 @dataclass(frozen=True)
 class RequestSession:
     user: User
+    organization: Organization
     workspace: Workspace
+    membership: WorkspaceMembership
     roles: tuple[str, ...] = ()
 
     @property
@@ -89,6 +114,10 @@ class RequestSession:
     @property
     def workspace_id(self) -> str:
         return self.workspace.workspace_id
+
+    @property
+    def organization_id(self) -> str:
+        return self.organization.organization_id
 
 
 @dataclass(frozen=True)
@@ -157,6 +186,21 @@ class OrchestrationExecution:
     current_stage: WorkflowStage | None = None
     stage_progression: tuple[WorkflowStageProgress, ...] = ()
     agent_executions: tuple[AgentExecution, ...] = ()
+    organization_id: str = DEFAULT_ORGANIZATION_ID
+    user_id: str = DEFAULT_USER_ID
+
+
+@dataclass(frozen=True)
+class UsageRecord:
+    usage_id: str
+    organization_id: str
+    workspace_id: str
+    user_id: str
+    event_type: UsageEventType
+    quantity: float
+    estimated_cost_usd: float
+    timestamp: str
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 __all__ = [
@@ -164,15 +208,20 @@ __all__ = [
     "AgentExecutionStatus",
     "AgentAssignedStage",
     "AgentCoordinationTrace",
+    "DEFAULT_ORGANIZATION_ID",
     "DEFAULT_USER_ID",
     "DEFAULT_WORKSPACE_ID",
     "OrchestrationExecution",
+    "Organization",
     "RequestSession",
     "STAGE_AGENTS",
     "TokenUsage",
+    "UsageEventType",
+    "UsageRecord",
     "User",
     "WORKFLOW_STAGES",
     "Workspace",
+    "WorkspaceMembership",
     "WorkflowEvent",
     "WorkflowEventType",
     "WorkflowLifecycleState",

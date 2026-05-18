@@ -5,8 +5,11 @@ from typing import TYPE_CHECKING, Any, Callable
 from uuid import uuid4
 
 from backend.agents import MultiAgentCoordinator
+from backend.logging import get_logger
 from backend.memory import MemoryDocument, VectorMemoryStore, build_vector_memory_store
 from backend.models import (
+    DEFAULT_ORGANIZATION_ID,
+    DEFAULT_USER_ID,
     DEFAULT_WORKSPACE_ID,
     WORKFLOW_STAGES,
     AgentCoordinationTrace,
@@ -20,20 +23,25 @@ from backend.models import (
     WorkflowStageProgress,
     WorkflowStreamUpdate,
     WorkflowTelemetry,
+    RequestSession,
 )
 from backend.ports import BackendConfig, InMemoryCache, InlineWorker
 from backend.storage import (
+    AccountStorage,
     AgentExecutionStorage,
     AgentTraceStorage,
     EventStorage,
+    SQLiteAccountStorage,
     SQLiteAgentExecutionStorage,
     SQLiteAgentTraceStorage,
     SQLiteEventStorage,
     SQLiteTelemetryStorage,
     SQLiteWorkflowStorage,
     TelemetryStorage,
+    UsageStorage,
     WorkflowStorage,
 )
+from backend.usage import UsageService, usage_service
 
 
 if TYPE_CHECKING:
@@ -41,6 +49,7 @@ if TYPE_CHECKING:
 
 
 WorkflowCallback = Callable[[str, "WorkflowState", str, str], None]
+logger = get_logger(__name__)
 
 
 class OrchestrationService:
@@ -48,52 +57,119 @@ class OrchestrationService:
         self,
         config: BackendConfig | None = None,
         workflow_storage: WorkflowStorage | None = None,
+        account_storage: AccountStorage | None = None,
         event_storage: EventStorage | None = None,
         telemetry_storage: TelemetryStorage | None = None,
         agent_execution_storage: AgentExecutionStorage | None = None,
         agent_trace_storage: AgentTraceStorage | None = None,
+        usage_storage: UsageStorage | None = None,
+        usage: UsageService | None = None,
         vector_memory_store: VectorMemoryStore | None = None,
         agent_coordinator: MultiAgentCoordinator | None = None,
     ) -> None:
         self.config = config or BackendConfig()
         self.workflow_storage = workflow_storage or SQLiteWorkflowStorage()
+        self.account_storage = account_storage or SQLiteAccountStorage()
         self.event_storage = event_storage or SQLiteEventStorage()
         self.telemetry_storage = telemetry_storage or SQLiteTelemetryStorage()
         self.agent_execution_storage = agent_execution_storage or SQLiteAgentExecutionStorage()
         self.agent_trace_storage = agent_trace_storage or SQLiteAgentTraceStorage()
+        self.usage_service = usage or (UsageService(usage_storage=usage_storage) if usage_storage else usage_service)
         self.vector_memory_store = vector_memory_store or build_vector_memory_store()
         self.agent_coordinator = agent_coordinator or MultiAgentCoordinator()
         self.worker = InlineWorker()
 
-    def execute(self, question: str) -> OrchestrationExecution:
-        execution = self.create_workflow(question)
+    def register_session(self, session: RequestSession) -> None:
+        self.account_storage.save_organization(session.organization)
+        self.account_storage.save_workspace(session.workspace)
+        self.account_storage.save_membership(session.membership)
+
+    def execute(
+        self,
+        question: str,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
+        organization_id: str = DEFAULT_ORGANIZATION_ID,
+        user_id: str = DEFAULT_USER_ID,
+    ) -> OrchestrationExecution:
+        execution = self.create_workflow(
+            question,
+            workspace_id=workspace_id,
+            organization_id=organization_id,
+            user_id=user_id,
+        )
         return self.run_workflow(execution.workflow_id)
 
-    def create_workflow(self, question: str, workspace_id: str = DEFAULT_WORKSPACE_ID) -> OrchestrationExecution:
+    def create_workflow(
+        self,
+        question: str,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
+        organization_id: str = DEFAULT_ORGANIZATION_ID,
+        user_id: str = DEFAULT_USER_ID,
+    ) -> OrchestrationExecution:
         execution = OrchestrationExecution(
             workflow_id=f"workflow:{uuid4()}",
+            organization_id=organization_id,
             workspace_id=workspace_id,
+            user_id=user_id,
             question=question,
             status="queued",
             created_at=datetime.now(timezone.utc).isoformat(),
             telemetry=WorkflowTelemetry(),
         )
         self._save_workflow(execution)
+        logger.info(
+            "workflow_created workflow_id=%s workspace_id=%s",
+            execution.workflow_id,
+            execution.workspace_id,
+        )
+        self.usage_service.record(
+            "workflow_execution",
+            organization_id=execution.organization_id,
+            workspace_id=execution.workspace_id,
+            user_id=execution.user_id,
+            metadata={"workflow_id": execution.workflow_id},
+        )
         self._append_event(
             execution.workflow_id,
             "workflow_created",
             f"Workflow created for question: {question}",
+            organization_id=execution.organization_id,
             workspace_id=execution.workspace_id,
         )
         self.vector_memory_store.upsert(
             MemoryDocument(
                 namespace="workflow_context",
                 text=question,
+                organization_id=execution.organization_id,
                 workspace_id=execution.workspace_id,
                 metadata={"workflow_id": execution.workflow_id},
             )
         )
         return execution
+
+    def readiness(self) -> dict[str, str]:
+        checks = {
+            "account_storage": self._check_dependency(lambda: self.account_storage.get_workspace("__readiness__")),
+            "workflow_storage": self._check_dependency(lambda: self.workflow_storage.get("workflow:latest")),
+            "event_storage": self._check_dependency(lambda: self.event_storage.list("__readiness__")),
+            "telemetry_storage": self._check_dependency(lambda: self.telemetry_storage.get("__readiness__")),
+            "agent_execution_storage": self._check_dependency(
+                lambda: self.agent_execution_storage.list("__readiness__")
+            ),
+            "agent_trace_storage": self._check_dependency(lambda: self.agent_trace_storage.list("__readiness__")),
+            "usage_storage": self._check_dependency(lambda: self.usage_service.list_usage(workspace_id="__readiness__")),
+            "vector_memory": "ok",
+        }
+        checks["status"] = "ready" if all(value == "ok" for value in checks.values()) else "degraded"
+        return checks
+
+    def _check_dependency(self, check: Callable[[], object]) -> str:
+        try:
+            check()
+        except Exception:
+            logger.exception("readiness_check_failed")
+            return "error"
+        return "ok"
 
     def run_workflow(self, workflow_id: str) -> OrchestrationExecution:
         try:
@@ -128,7 +204,9 @@ class OrchestrationService:
         )
         return OrchestrationExecution(
             workflow_id=workflow.workflow_id,
+            organization_id=workflow.organization_id,
             workspace_id=workflow.workspace_id,
+            user_id=workflow.user_id,
             question=workflow.question,
             status=workflow.status,
             created_at=workflow.created_at,
@@ -170,10 +248,16 @@ class OrchestrationService:
 
     def _save_workflow(self, workflow: OrchestrationExecution) -> None:
         self.workflow_storage.save(workflow)
-        self.telemetry_storage.save(workflow.workflow_id, workflow.telemetry, workspace_id=workflow.workspace_id)
+        self.telemetry_storage.save(
+            workflow.workflow_id,
+            workflow.telemetry,
+            organization_id=workflow.organization_id,
+            workspace_id=workflow.workspace_id,
+        )
         self.agent_execution_storage.save_all(
             workflow.workflow_id,
             workflow.agent_executions,
+            organization_id=workflow.organization_id,
             workspace_id=workflow.workspace_id,
         )
 
@@ -188,7 +272,9 @@ class OrchestrationService:
 
         updated = OrchestrationExecution(
             workflow_id=workflow.workflow_id,
+            organization_id=workflow.organization_id,
             workspace_id=workflow.workspace_id,
+            user_id=workflow.user_id,
             question=workflow.question,
             status=status,
             created_at=workflow.created_at,
@@ -198,10 +284,12 @@ class OrchestrationService:
             agent_executions=workflow.agent_executions,
         )
         self._save_workflow(updated)
+        logger.info("workflow_lifecycle_transition workflow_id=%s status=%s", workflow_id, status)
         self._append_event(
             workflow_id,
             "lifecycle_transition",
             f"Workflow status changed to {status}.",
+            organization_id=workflow.organization_id,
             workspace_id=workflow.workspace_id,
         )
         if updated.telemetry != workflow.telemetry:
@@ -209,8 +297,11 @@ class OrchestrationService:
                 workflow_id,
                 "telemetry_update",
                 f"Workflow telemetry updated for {status} status.",
+                organization_id=workflow.organization_id,
                 workspace_id=workflow.workspace_id,
             )
+            if status in {"completed", "failed"}:
+                self._record_telemetry_usage(updated)
         return updated
 
     def _transition_stage(
@@ -226,7 +317,9 @@ class OrchestrationService:
         traces = (*self.agent_trace_storage.list(workflow_id, workspace_id=workflow.workspace_id), *coordination.traces)
         updated = OrchestrationExecution(
             workflow_id=workflow.workflow_id,
+            organization_id=workflow.organization_id,
             workspace_id=workflow.workspace_id,
+            user_id=workflow.user_id,
             question=workflow.question,
             status=workflow.status,
             created_at=workflow.created_at,
@@ -246,12 +339,19 @@ class OrchestrationService:
             ),
         )
         self._save_workflow(updated)
-        self.agent_trace_storage.save_all(workflow_id, traces, workspace_id=workflow.workspace_id)
+        logger.info("workflow_stage_completed workflow_id=%s stage=%s", workflow_id, stage)
+        self.agent_trace_storage.save_all(
+            workflow_id,
+            traces,
+            organization_id=workflow.organization_id,
+            workspace_id=workflow.workspace_id,
+        )
         for trace in coordination.traces:
             self._append_event(
                 workflow_id,
                 "agent_handoff",
                 f"{trace.source_agent} handed off to {trace.target_agent}.",
+                organization_id=workflow.organization_id,
                 workspace_id=workflow.workspace_id,
             )
         if stage == "insight_generation":
@@ -259,12 +359,14 @@ class OrchestrationService:
                 workflow_id,
                 "investigation_update",
                 "Anomaly detection triggered an autonomous investigation chain.",
+                organization_id=workflow.organization_id,
                 workspace_id=workflow.workspace_id,
             )
             self.vector_memory_store.upsert(
                 MemoryDocument(
                     namespace="investigation",
                     text=f"Autonomous investigation chain for {workflow.question}",
+                    organization_id=workflow.organization_id,
                     workspace_id=workflow.workspace_id,
                     metadata={"workflow_id": workflow.workflow_id},
                 )
@@ -273,6 +375,7 @@ class OrchestrationService:
             workflow_id,
             "stage_transition",
             f"Workflow stage completed: {stage}.",
+            organization_id=workflow.organization_id,
             workspace_id=workflow.workspace_id,
         )
         return updated
@@ -283,13 +386,41 @@ class OrchestrationService:
         event_type: WorkflowEventType,
         message: str,
         workspace_id: str,
+        organization_id: str = DEFAULT_ORGANIZATION_ID,
     ) -> None:
         event = WorkflowEvent(
             timestamp=datetime.now(timezone.utc).isoformat(),
             event_type=event_type,
             message=message,
         )
-        self.event_storage.append(workflow_id, event, workspace_id=workspace_id)
+        self.event_storage.append(
+            workflow_id,
+            event,
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+        )
+
+    def _record_telemetry_usage(self, workflow: OrchestrationExecution) -> None:
+        token_usage = workflow.telemetry.token_usage
+        if token_usage.total_tokens:
+            self.usage_service.record(
+                "token_usage",
+                organization_id=workflow.organization_id,
+                workspace_id=workflow.workspace_id,
+                user_id=workflow.user_id,
+                quantity=float(token_usage.total_tokens),
+                metadata={"workflow_id": workflow.workflow_id},
+            )
+        if workflow.telemetry.estimated_cost_usd:
+            self.usage_service.record(
+                "estimated_ai_cost",
+                organization_id=workflow.organization_id,
+                workspace_id=workflow.workspace_id,
+                user_id=workflow.user_id,
+                quantity=workflow.telemetry.estimated_cost_usd,
+                estimated_cost_usd=workflow.telemetry.estimated_cost_usd,
+                metadata={"workflow_id": workflow.workflow_id},
+            )
 
     def _event_stream_updates(self, events: tuple[WorkflowEvent, ...]) -> list[WorkflowStreamUpdate]:
         return [
@@ -451,6 +582,7 @@ class AnalyticsBackendService:
         self.config = config or BackendConfig()
         self.cache = InMemoryCache()
         self.worker = InlineWorker()
+        self.vector_memory_store = build_vector_memory_store()
 
     def execute_query(
         self,
@@ -491,6 +623,7 @@ class AnalyticsBackendService:
         rows: list[Any],
         name: str,
         workspace_id: str = DEFAULT_WORKSPACE_ID,
+        organization_id: str = DEFAULT_ORGANIZATION_ID,
     ) -> dict[str, Any]:
         import pandas as pd
         from semantic import profile_dataframe
@@ -500,6 +633,7 @@ class AnalyticsBackendService:
             MemoryDocument(
                 namespace="semantic_dataset_summary",
                 text=f"{name}: {profile}",
+                organization_id=organization_id,
                 workspace_id=workspace_id,
                 metadata={"dataset_name": name},
             )
@@ -515,6 +649,7 @@ class AnalyticsBackendService:
         semantic_context: dict[str, Any] | None = None,
         max_queries: int = 3,
         workspace_id: str = DEFAULT_WORKSPACE_ID,
+        organization_id: str = DEFAULT_ORGANIZATION_ID,
     ) -> dict[str, Any]:
         from investigation import run_investigation
 
@@ -524,6 +659,7 @@ class AnalyticsBackendService:
             MemoryDocument(
                 namespace="investigation",
                 text=f"{question}: {result}",
+                organization_id=organization_id,
                 workspace_id=workspace_id,
                 metadata={"sql": sql},
             )
@@ -536,6 +672,7 @@ class AnalyticsBackendService:
         targets: list[str],
         semantic_context: dict[str, Any] | None = None,
         workspace_id: str = DEFAULT_WORKSPACE_ID,
+        organization_id: str = DEFAULT_ORGANIZATION_ID,
     ) -> dict[str, Any]:
         from monitoring import run_monitoring_checks
 
@@ -546,6 +683,7 @@ class AnalyticsBackendService:
             MemoryDocument(
                 namespace="executive_insight",
                 text=f"{targets}: {briefing}",
+                organization_id=organization_id,
                 workspace_id=workspace_id,
                 metadata={"targets": targets},
             )

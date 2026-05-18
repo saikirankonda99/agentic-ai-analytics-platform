@@ -9,11 +9,12 @@ from starlette.websockets import WebSocketDisconnect
 
 from backend.config import settings
 from backend.messaging import EventBus, event_bus
-from backend.models import DEFAULT_WORKSPACE_ID, WorkflowStreamUpdate
+from backend.models import DEFAULT_ORGANIZATION_ID, DEFAULT_WORKSPACE_ID, WorkflowStreamUpdate
 
 
 @dataclass(frozen=True)
 class WebSocketChannel:
+    organization_id: str
     workspace_id: str
     workflow_id: str
 
@@ -51,8 +52,16 @@ class WebSocketConnectionManager:
             self.disconnect(websocket, channel)
 
 
-def workflow_channel(workflow_id: str, workspace_id: str = DEFAULT_WORKSPACE_ID) -> WebSocketChannel:
-    return WebSocketChannel(workspace_id=workspace_id, workflow_id=workflow_id)
+def workflow_channel(
+    workflow_id: str,
+    workspace_id: str = DEFAULT_WORKSPACE_ID,
+    organization_id: str = DEFAULT_ORGANIZATION_ID,
+) -> WebSocketChannel:
+    return WebSocketChannel(
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+        workflow_id=workflow_id,
+    )
 
 
 def _serialize_update(update: WorkflowStreamUpdate) -> str:
@@ -67,7 +76,10 @@ def _serialize_update(update: WorkflowStreamUpdate) -> str:
 
 
 def _channel_name(channel: WebSocketChannel) -> str:
-    return f"{settings.websocket_channel_prefix}:{channel.workspace_id}:{channel.workflow_id}"
+    return (
+        f"{settings.websocket_channel_prefix}:"
+        f"{channel.organization_id}:{channel.workspace_id}:{channel.workflow_id}"
+    )
 
 
 websocket_manager = WebSocketConnectionManager()

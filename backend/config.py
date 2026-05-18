@@ -7,6 +7,7 @@ from os import getenv
 @dataclass(frozen=True)
 class AppSettings:
     environment: str = "development"
+    log_level: str = "INFO"
     backend_host: str = "0.0.0.0"
     backend_port: int = 8000
     streamlit_port: int = 8501
@@ -28,6 +29,7 @@ class AppSettings:
 def get_settings() -> AppSettings:
     return AppSettings(
         environment=getenv("APP_ENV", "development"),
+        log_level=getenv("LOG_LEVEL", "INFO"),
         backend_host=getenv("BACKEND_HOST", "0.0.0.0"),
         backend_port=int(getenv("BACKEND_PORT", "8000")),
         streamlit_port=int(getenv("STREAMLIT_SERVER_PORT", "8501")),
