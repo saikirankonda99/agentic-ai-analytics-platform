@@ -1527,7 +1527,7 @@ def render_copilot_workspace():
 
 
 st.set_page_config(
-    page_title="GenAI SQL Assistant",
+    page_title="Agentic AI Analytics Platform",
     layout="wide",
     page_icon=":bar_chart:",
 )
