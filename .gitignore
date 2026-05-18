@@ -13,3 +13,6 @@ venv/
 
 # Logs
 logs/
+
+# Generated backend runtime state
+data/workflow_runtime.db

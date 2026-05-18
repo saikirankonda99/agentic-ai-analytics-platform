@@ -1,16 +1,32 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Callable, Literal
+from typing import TYPE_CHECKING, Any, Callable
 from uuid import uuid4
 
+from backend.memory import InMemoryVectorMemoryStore, VectorMemoryStore
+from backend.models import (
+    STAGE_AGENTS,
+    WORKFLOW_STAGES,
+    AgentExecution,
+    OrchestrationExecution,
+    TokenUsage,
+    WorkflowEvent,
+    WorkflowEventType,
+    WorkflowLifecycleState,
+    WorkflowStage,
+    WorkflowStageProgress,
+    WorkflowStreamUpdate,
+    WorkflowTelemetry,
+)
 from backend.ports import BackendConfig, InMemoryCache, InlineWorker
 from backend.storage import (
+    AgentExecutionStorage,
     EventStorage,
-    InMemoryEventStorage,
-    InMemoryTelemetryStorage,
-    InMemoryWorkflowStorage,
+    SQLiteAgentExecutionStorage,
+    SQLiteEventStorage,
+    SQLiteTelemetryStorage,
+    SQLiteWorkflowStorage,
     TelemetryStorage,
     WorkflowStorage,
 )
@@ -21,103 +37,6 @@ if TYPE_CHECKING:
 
 
 WorkflowCallback = Callable[[str, "WorkflowState", str, str], None]
-WorkflowLifecycleState = Literal["queued", "running", "completed", "failed"]
-AgentExecutionStatus = Literal["queued", "running", "completed", "failed"]
-WorkflowStage = Literal[
-    "planning",
-    "schema_analysis",
-    "sql_generation",
-    "validation",
-    "execution",
-    "insight_generation",
-]
-WorkflowEventType = Literal[
-    "workflow_created",
-    "lifecycle_transition",
-    "stage_transition",
-    "telemetry_update",
-]
-WorkflowStreamUpdateType = Literal[
-    "workflow_event",
-    "lifecycle_transition",
-    "stage_transition",
-    "agent_update",
-    "telemetry_update",
-]
-WORKFLOW_STAGES: tuple[WorkflowStage, ...] = (
-    "planning",
-    "schema_analysis",
-    "sql_generation",
-    "validation",
-    "execution",
-    "insight_generation",
-)
-STAGE_AGENTS: dict[WorkflowStage, tuple[str, str]] = {
-    "planning": ("planner_agent", "Workflow planner"),
-    "schema_analysis": ("schema_agent", "Schema analyst"),
-    "sql_generation": ("sql_agent", "SQL generator"),
-    "validation": ("validation_agent", "Query validator"),
-    "execution": ("execution_agent", "Query executor"),
-    "insight_generation": ("insight_agent", "Insight generator"),
-}
-
-
-@dataclass(frozen=True)
-class TokenUsage:
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
-
-
-@dataclass(frozen=True)
-class WorkflowTelemetry:
-    started_at: str | None = None
-    completed_at: str | None = None
-    latency_ms: int | None = None
-    estimated_cost_usd: float = 0.0
-    token_usage: TokenUsage = field(default_factory=TokenUsage)
-
-
-@dataclass(frozen=True)
-class WorkflowStageProgress:
-    stage: WorkflowStage
-    status: WorkflowLifecycleState
-    timestamp: str
-
-
-@dataclass(frozen=True)
-class AgentExecution:
-    agent_name: str
-    agent_role: str
-    assigned_stage: WorkflowStage
-    agent_status: AgentExecutionStatus
-
-
-@dataclass(frozen=True)
-class WorkflowEvent:
-    timestamp: str
-    event_type: WorkflowEventType
-    message: str
-
-
-@dataclass(frozen=True)
-class WorkflowStreamUpdate:
-    timestamp: str
-    update_type: WorkflowStreamUpdateType
-    message: str
-    payload: dict[str, Any]
-
-
-@dataclass(frozen=True)
-class OrchestrationExecution:
-    workflow_id: str
-    question: str
-    status: WorkflowLifecycleState
-    created_at: str
-    telemetry: WorkflowTelemetry
-    current_stage: WorkflowStage | None = None
-    stage_progression: tuple[WorkflowStageProgress, ...] = ()
-    agent_executions: tuple[AgentExecution, ...] = ()
 
 
 class OrchestrationService:
@@ -127,11 +46,15 @@ class OrchestrationService:
         workflow_storage: WorkflowStorage | None = None,
         event_storage: EventStorage | None = None,
         telemetry_storage: TelemetryStorage | None = None,
+        agent_execution_storage: AgentExecutionStorage | None = None,
+        vector_memory_store: VectorMemoryStore | None = None,
     ) -> None:
         self.config = config or BackendConfig()
-        self.workflow_storage = workflow_storage or InMemoryWorkflowStorage()
-        self.event_storage = event_storage or InMemoryEventStorage()
-        self.telemetry_storage = telemetry_storage or InMemoryTelemetryStorage()
+        self.workflow_storage = workflow_storage or SQLiteWorkflowStorage()
+        self.event_storage = event_storage or SQLiteEventStorage()
+        self.telemetry_storage = telemetry_storage or SQLiteTelemetryStorage()
+        self.agent_execution_storage = agent_execution_storage or SQLiteAgentExecutionStorage()
+        self.vector_memory_store = vector_memory_store or InMemoryVectorMemoryStore()
         self.worker = InlineWorker()
 
     def execute(self, question: str) -> OrchestrationExecution:
@@ -176,7 +99,22 @@ class OrchestrationService:
         return self._transition_stage(workflow_id, stage)
 
     def get_workflow(self, workflow_id: str) -> OrchestrationExecution | None:
-        return self.workflow_storage.get(workflow_id)
+        workflow = self.workflow_storage.get(workflow_id)
+        if workflow is None:
+            return None
+
+        telemetry = self.telemetry_storage.get(workflow.workflow_id) or workflow.telemetry
+        agent_executions = self.agent_execution_storage.list(workflow.workflow_id)
+        return OrchestrationExecution(
+            workflow_id=workflow.workflow_id,
+            question=workflow.question,
+            status=workflow.status,
+            created_at=workflow.created_at,
+            telemetry=telemetry,
+            current_stage=workflow.current_stage,
+            stage_progression=workflow.stage_progression,
+            agent_executions=agent_executions,
+        )
 
     def get_events(self, workflow_id: str) -> tuple[WorkflowEvent, ...] | None:
         if self.get_workflow(workflow_id) is None:
@@ -202,6 +140,7 @@ class OrchestrationService:
     def _save_workflow(self, workflow: OrchestrationExecution) -> None:
         self.workflow_storage.save(workflow)
         self.telemetry_storage.save(workflow.workflow_id, workflow.telemetry)
+        self.agent_execution_storage.save_all(workflow.workflow_id, workflow.agent_executions)
 
     def _transition_workflow(
         self,
