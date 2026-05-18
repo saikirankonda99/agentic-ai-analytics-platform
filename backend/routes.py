@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from uuid import uuid4
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+
+from backend.services import orchestration_service
 
 
 SERVICE_NAME = "agentic-ai-analytics-backend"
@@ -24,6 +25,13 @@ class ExecuteResponse(BaseModel):
     timestamp: str
 
 
+class WorkflowStatusResponse(BaseModel):
+    workflow_id: str
+    question: str
+    status: str
+    created_at: str
+
+
 @router.get("/health")
 def health() -> dict[str, str]:
     return {
@@ -36,11 +44,26 @@ def health() -> dict[str, str]:
 
 @router.post("/execute", response_model=ExecuteResponse)
 def execute(payload: ExecuteRequest) -> ExecuteResponse:
+    execution = orchestration_service.execute(payload.question)
     return ExecuteResponse(
-        workflow_id=f"workflow:{uuid4()}",
-        question=payload.question,
-        status="accepted",
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        workflow_id=execution.workflow_id,
+        question=execution.question,
+        status=execution.status,
+        timestamp=execution.created_at,
+    )
+
+
+@router.get("/workflow/{workflow_id}", response_model=WorkflowStatusResponse)
+def get_workflow(workflow_id: str) -> WorkflowStatusResponse:
+    workflow = orchestration_service.get_workflow(workflow_id)
+    if workflow is None:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    return WorkflowStatusResponse(
+        workflow_id=workflow.workflow_id,
+        question=workflow.question,
+        status=workflow.status,
+        created_at=workflow.created_at,
     )
 
 
