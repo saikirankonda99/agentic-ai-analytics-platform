@@ -1,304 +1,590 @@
 # Agentic AI Analytics Platform
 
-A production-deployed natural language analytics platform built around agentic workflow patterns: autonomous investigation, guardrails, evaluation, and stateful memory. Implements production-grade controls (query validation, workspace isolation, structured monitoring, cost tracking) suitable for enterprise GenAI deployments.
+Production-oriented natural language analytics system designed around agentic workflow patterns, safe SQL generation, evaluation, observability, and multi-step analytical reasoning.
 
-**Status:** v1 deployed. v2 (multi-agent orchestration via LangGraph, MCP integration, Bedrock backend) under active development.
+The platform extends beyond text-to-SQL generation into the operational concerns required for deploying LLM-driven analytics systems in realistic environments: validation, hallucination mitigation, telemetry, workspace isolation, evaluation, and conversational analytical workflows.
 
------
+Current deployment supports SQLite and CSV-backed datasets with isolated user workspaces. The architecture is intentionally modular to support future migration toward distributed multi-agent orchestration.
 
-## Links
+---
 
-- **Live deployment:** https://agentic-ai-analytics-platform.onrender.com
-- **Repository:** https://github.com/saikirankonda99/agentic-ai-analytics-platform
-- **Author:** [Sai Kiran Konda](https://www.linkedin.com/in/sai-kiran-konda/)
+# Live System
 
------
+- Live Deployment: https://agentic-ai-analytics-platform.onrender.com
+- Repository: https://github.com/saikirankonda99/agentic-ai-analytics-platform
+- Author: Sai Kiran Konda
 
-## Overview
+---
 
-Most natural-language-to-SQL implementations terminate at query generation. This platform is designed around the production concerns that begin where generation ends: validation, observability, evaluation, safe execution, and reasoning over results.
+# Why This Project Exists
 
-The architecture treats SQL generation as one step in a broader analytical workflow. Specialized modules handle semantic grounding, guardrail enforcement, autonomous insight surfacing, multi-step investigation, conversational memory, and per-user workspace isolation. An evaluation harness measures correctness and hallucination rate against a golden set rather than relying on demo-grade qualitative assessment.
+Most NL-to-SQL demos stop at query generation. Real systems fail after generation:
 
-The platform is currently deployed on Render with Docker, running against a SQLite demonstration database (Chinook) with CSV upload support for custom datasets.
+- queries hallucinate valid-looking but incorrect logic
+- generated SQL becomes unsafe
+- analytical context disappears between turns
+- no observability exists for debugging failures
+- no evaluation framework measures correctness
+- no isolation exists between users or datasets
 
------
+This project was built to explore the engineering problems that emerge when LLM-based analytics systems move from demos into production-style workflows.
 
-## Architecture (v1)
+The architecture treats SQL generation as one component inside a broader analytical system that includes:
 
-```
+- semantic grounding
+- query guardrails
+- autonomous insight surfacing
+- conversational memory
+- multi-step investigations
+- evaluation harnesses
+- telemetry and cost monitoring
+
+---
+
+# Core Design Goals
+
+## 1. Fail Closed Instead of Failing Open
+
+Unsafe or malformed SQL should never reach execution.
+
+The system validates all generated SQL before execution using:
+- SELECT-only enforcement
+- destructive operation blocking
+- syntactic validation
+- retry-with-context correction flow
+
+If correction fails, execution stops.
+
+---
+
+## 2. Reduce Hallucination Risk
+
+LLMs frequently generate syntactically correct but semantically incorrect SQL.
+
+The system reduces hallucinations through:
+- schema-aware grounding
+- semantic context retrieval
+- evaluation harnesses
+- reflection-oriented investigation flows
+- conversational context retention
+
+---
+
+## 3. Preserve Analytical Context
+
+Real analytical workflows are iterative.
+
+The platform maintains conversational memory to support follow-up reasoning such as:
+
+> "Filter that to last quarter"
+
+or
+
+> "Compare this against the previous region"
+
+without regenerating context from scratch.
+
+---
+
+## 4. Prioritize Operational Visibility
+
+Production AI systems require telemetry.
+
+The platform tracks:
+- request latency
+- token usage
+- query execution history
+- failure traces
+- generated SQL audit logs
+
+This observability layer exists to make debugging and evaluation possible.
+
+---
+
+# Current Architecture (v1)
+
+```text
 ┌─────────────────────────────────────────────────────┐
-│              Streamlit UI                            │
-└────────────────────┬─────────────────────────────────┘
+│                  Streamlit UI                       │
+└────────────────────┬────────────────────────────────┘
                      │
         ┌────────────▼──────────────┐
-        │   Workspace + Auth         │   workspace.py
-        │   Per-user isolation       │   auth.py
+        │ Workspace + Auth           │
+        │ Per-user isolation         │
         └────────────┬──────────────┘
                      │
         ┌────────────▼──────────────┐
-        │   Semantic Layer           │   semantic.py
-        │   Schema-aware context     │
+        │ Semantic Grounding Layer   │
+        │ Schema-aware retrieval     │
         └────────────┬──────────────┘
                      │
         ┌────────────▼──────────────┐
-        │   LLM Abstraction          │   llm.py
-        │   Provider-agnostic call   │
+        │ LLM Abstraction Layer      │
+        │ Provider-agnostic calls    │
         └────────────┬──────────────┘
                      │
         ┌────────────▼──────────────┐
-        │   Guardrails               │   guardrails.py
-        │   SELECT-only enforcement  │
-        │   Destructive op blocking  │
-        │   Syntactic validation     │
+        │ Guardrails                 │
+        │ SQL validation             │
+        │ Destructive op blocking    │
         └────────────┬──────────────┘
                      │
         ┌────────────▼──────────────┐
-        │   Execution                │   db.py
+        │ Query Execution Layer      │
         └────────────┬──────────────┘
                      │
         ┌────────────▼──────────────┐
-        │   Autonomous Insights      │   autonomous_insights.py
-        │   Anomaly and trend        │
-        │   surfacing without        │
-        │   explicit prompting       │
+        │ Autonomous Insights        │
+        │ Trend + anomaly surfacing  │
         └────────────┬──────────────┘
                      │
         ┌────────────▼──────────────┐
-        │   Investigation            │   investigation.py
-        │   Follow-up reasoning      │
-        │   and multi-step analysis  │
+        │ Investigation Engine       │
+        │ Multi-step reasoning       │
         └────────────┬──────────────┘
                      │
         ┌────────────▼──────────────┐
-        │   Memory + Monitoring      │   analytics_memory.py
-        │                            │   monitoring.py
+        │ Memory + Monitoring        │
         └────────────────────────────┘
 ```
 
------
+---
 
-## Module Responsibilities
+# Repository Structure
 
-|Module                  |Responsibility                                                                             |
-|------------------------|-------------------------------------------------------------------------------------------|
-|`app.py`                |Streamlit entry point and UI composition                                                   |
-|`api.py`                |REST API layer for programmatic access                                                     |
-|`workspace.py`          |Per-user workspace and session isolation                                                   |
-|`auth.py`               |Authentication and access control                                                          |
-|`semantic.py`           |Schema introspection and context construction for LLM grounding                            |
-|`llm.py`                |Provider-agnostic LLM interface (OpenAI; designed for Claude/Bedrock extension)            |
-|`guardrails.py`         |Query validation: SELECT-only enforcement, destructive operation blocking, syntactic checks|
-|`db.py`                 |Database execution layer with connection pooling and error handling                        |
-|`autonomous_insights.py`|Proactive pattern detection and anomaly surfacing                                          |
-|`investigation.py`      |Multi-step reasoning and follow-up question generation                                     |
-|`analytics_memory.py`   |Conversation state and context retention                                                   |
-|`monitoring.py`         |Structured logging, latency tracking, cost telemetry                                       |
-|`evals/`                |Golden-set evaluation framework                                                            |
+```text
+agentic-ai-analytics-platform/
 
------
-
-## Agentic Design Patterns
-
-The implementation realizes several patterns relevant to production agentic AI systems:
-
-**Tool use with enforced boundaries.** All LLM-generated SQL passes through `guardrails.py` before reaching the database. The validator enforces SELECT-only execution, blocks destructive operations (DROP, DELETE, UPDATE, INSERT, ALTER), and performs syntactic checks. This is the autonomy boundary: the LLM is given a tool, but the tool’s surface area is constrained.
-
-**Autonomous task execution.** `autonomous_insights.py` surfaces patterns, anomalies, and trends without explicit user prompting. The agent decides when surfacing is warranted based on query results and historical context.
-
-**Multi-step investigation reasoning.** `investigation.py` extends single-turn query-response into multi-step analytical sessions. Follow-up questions are generated and reasoned over rather than treating each user input as independent.
-
-**Stateful memory.** `analytics_memory.py` maintains conversation context across turns, enabling references like “filter that by last quarter” without re-stating the prior query.
-
-**Semantic grounding.** `semantic.py` retrieves relevant schema context before generation, reducing hallucination by giving the LLM the actual table and column definitions rather than relying on parametric memory.
-
-**Production observability.** `monitoring.py` captures structured logs, latency metrics, and per-query token cost — the operational telemetry required to debug agentic systems in production.
-
------
-
-## Evaluation Framework
-
-The `evals/` module implements a golden-set evaluation harness measuring:
-
-- **Correctness:** does the generated SQL produce the expected result set?
-- **Hallucination rate:** queries that compile and execute but compute something different from what was asked
-- **Latency:** end-to-end response time
-- **Cost per task:** LLM token spend per successful analytical workflow
-
-Hallucination rate is the metric that matters most for production deployment. A SQL query that compiles and returns rows is not the same as a correct answer; the evaluation framework distinguishes the two.
-
------
-
-## Tech Stack
-
-|Layer     |Technology                                                 |
-|----------|-----------------------------------------------------------|
-|Frontend  |Streamlit                                                  |
-|Backend   |Python                                                     |
-|LLM       |OpenAI API (extensible to Anthropic Claude and AWS Bedrock)|
-|Database  |SQLite (Chinook), CSV upload support                       |
-|Data Layer|Pandas                                                     |
-|Evaluation|Custom golden-set framework                                |
-|Deployment|Docker on Render                                           |
-|Monitoring|Structured logging, in-app telemetry                       |
-
------
-
-## Security and Safety Controls
-
-- **SELECT-only enforcement** at the guardrails layer; destructive operations rejected before execution
-- **Syntactic validation** prior to execution; invalid SQL gets a single LLM correction attempt with error context, after which it fails closed
-- **Workspace isolation** — uploaded datasets are scoped per user and never shared across sessions
-- **Authentication** required for access
-- **Audit logging** of every generated query
-- **Cost monitoring** with per-request token tracking
-
------
-
-## Roadmap (v2)
-
-v2 is a structural upgrade from the current sequential pipeline to a stateful multi-agent graph. The motivation is twofold: enable richer agentic patterns (reflection, planning, multi-agent collaboration) and align the architecture with the orchestration standards used in enterprise agentic AI deployments.
-
-### Target architecture
-
-```
-                ┌────────────────────────────┐
-                │   User Goal                │
-                └─────────────┬──────────────┘
-                              │
-                      ┌───────▼────────┐
-                      │  Planner       │   Decomposes goal into subtasks
-                      └───────┬────────┘
-                              │
-             ┌────────────────┼─────────────────┐
-             │                │                  │
-      ┌──────▼──────┐  ┌─────▼──────┐  ┌──────▼──────┐
-      │ Schema       │  │ History    │  │ Intent      │
-      │ (RAG)        │  │ (RAG)      │  │             │
-      └──────┬──────┘  └─────┬──────┘  └──────┬──────┘
-             │                │                  │
-             └────────────────┼──────────────────┘
-                              │
-                      ┌───────▼────────┐
-                      │ SQL Generator  │
-                      └───────┬────────┘
-                              │
-                      ┌───────▼────────┐
-                      │ Reflection     │   Critic loop; flags hallucinations
-                      └───────┬────────┘
-                              │
-                      ┌───────▼────────┐
-                      │ Human Approval │   For destructive or high-risk operations
-                      └───────┬────────┘
-                              │
-                      ┌───────▼────────┐
-                      │ Executor       │
-                      └───────┬────────┘
-                              │
-                      ┌───────▼────────┐
-                      │ Summarizer     │
-                      └────────────────┘
+├── app.py
+├── api.py
+├── auth.py
+├── workspace.py
+├── semantic.py
+├── llm.py
+├── guardrails.py
+├── db.py
+├── autonomous_insights.py
+├── investigation.py
+├── analytics_memory.py
+├── monitoring.py
+├── requirements.txt
+├── Dockerfile
+├── data/
+├── evals/
+└── tests/
 ```
 
-### Planned changes
+---
 
-|Item                                |Rationale                                                                                                                      |
-|------------------------------------|-------------------------------------------------------------------------------------------------------------------------------|
-|Refactor orchestration to LangGraph |Stateful graph execution replaces sequential pipeline; enables conditional routing, retry loops, and parallel agent execution  |
-|Planner agent                       |Decomposes complex multi-step analytical questions into subtasks executed by specialized agents                                |
-|Reflection agent                    |Critic loop that validates generated SQL against intent before execution; addresses hallucination as a first-class failure mode|
-|History agent                       |Retrieval-augmented context from prior queries to improve generation for recurring analytical patterns                         |
-|Human-in-the-loop checkpoint UI     |Explicit approval flow for operations flagged as high-risk or destructive                                                      |
-|Expanded golden-set evaluation suite|Target 50+ queries with annotated expected results and hallucination markers                                                   |
-|Multi-database adapter              |PostgreSQL, MySQL, and Snowflake support beyond the current SQLite implementation                                              |
-|Model Context Protocol (MCP) server |Expose query execution as an MCP-compatible tool consumable by external agentic systems                                        |
-|AWS Bedrock backend option          |Claude via Bedrock alongside OpenAI for enterprise deployments requiring AWS-native infrastructure                             |
-|Cost monitoring dashboard           |Per-user, per-query token spend visibility                                                                                     |
+# Engineering Decisions
 
------
+## Why Streamlit
 
-## Running Locally
+Streamlit allowed rapid iteration on conversational analytics workflows while keeping the focus on backend orchestration and analytical behavior rather than frontend engineering overhead.
+
+---
+
+## Why SQLite Initially
+
+SQLite reduced infrastructure complexity during early iteration and enabled rapid experimentation with:
+- query validation
+- semantic grounding
+- evaluation logic
+- memory handling
+
+The architecture intentionally abstracts execution logic to support PostgreSQL, Snowflake, and MySQL migration later.
+
+---
+
+## Why Provider Abstraction
+
+`llm.py` isolates model providers from orchestration logic.
+
+This prevents tight coupling to a single vendor and allows future migration toward:
+- OpenAI
+- Claude
+- Bedrock-hosted models
+- local inference endpoints
+
+without rewriting analytical workflows.
+
+---
+
+## Why Guardrails Exist Outside the Prompt
+
+Prompt-only safety is insufficient.
+
+Validation occurs programmatically before execution because:
+- prompts can drift
+- models hallucinate
+- jailbreaks happen
+- unsafe SQL must fail deterministically
+
+---
+
+## Why Stateful Memory Matters
+
+Most text-to-SQL systems treat every query independently.
+
+Analytical workflows are iterative by nature, so the platform preserves:
+- prior filters
+- previous aggregations
+- user investigation history
+- contextual references
+
+across turns.
+
+---
+
+# Module Responsibilities
+
+| Module | Responsibility |
+|---|---|
+| `app.py` | Streamlit UI entrypoint |
+| `api.py` | REST API layer |
+| `workspace.py` | Per-user workspace isolation |
+| `auth.py` | Authentication and session management |
+| `semantic.py` | Schema introspection and semantic grounding |
+| `llm.py` | Provider abstraction layer |
+| `guardrails.py` | SQL safety enforcement |
+| `db.py` | Query execution and database access |
+| `autonomous_insights.py` | Trend and anomaly surfacing |
+| `investigation.py` | Follow-up reasoning workflows |
+| `analytics_memory.py` | Stateful conversational memory |
+| `monitoring.py` | Logging, telemetry, latency tracking |
+| `evals/` | Golden-set evaluation framework |
+| `tests/` | Validation and regression testing |
+
+---
+
+# Agentic Workflow Patterns
+
+## Controlled Tool Use
+
+The LLM does not receive unrestricted database access.
+
+All generated SQL passes through:
+- syntactic validation
+- restricted operation checks
+- execution policy enforcement
+
+before execution.
+
+This defines the autonomy boundary.
+
+---
+
+## Autonomous Insight Generation
+
+The system proactively surfaces:
+- anomalies
+- trends
+- outliers
+- unexpected distributions
+
+without requiring explicit user prompting.
+
+---
+
+## Multi-Step Investigations
+
+Analytical sessions are modeled as iterative workflows rather than isolated prompts.
+
+The system can:
+- generate follow-up questions
+- refine prior analysis
+- compare historical queries
+- continue investigations across turns
+
+---
+
+## Stateful Context Retention
+
+Conversation memory enables references to:
+- prior aggregations
+- earlier filters
+- previous datasets
+- historical analytical context
+
+without regenerating the entire workflow.
+
+---
+
+# Evaluation Framework
+
+The `evals/` module implements a golden-set evaluation harness focused on production failure modes.
+
+Measured metrics include:
+
+| Metric | Purpose |
+|---|---|
+| Correctness | Does SQL produce the intended result? |
+| Hallucination Rate | Did the query return plausible but incorrect answers? |
+| Latency | End-to-end workflow execution time |
+| Token Cost | LLM usage cost per analytical task |
+
+The evaluation layer exists because successful execution does not imply correctness.
+
+A query that compiles and returns rows may still produce analytically invalid output.
+
+---
+
+# Observability and Monitoring
+
+Production AI systems require debugging visibility.
+
+The monitoring layer captures:
+- structured logs
+- generated SQL audit history
+- token consumption
+- latency metrics
+- execution failures
+- correction attempts
+
+This telemetry is used to identify:
+- hallucination patterns
+- slow workflows
+- repeated correction failures
+- prompt regressions
+
+---
+
+# Security Controls
+
+## SQL Safety Enforcement
+
+The platform blocks:
+- DROP
+- DELETE
+- UPDATE
+- INSERT
+- ALTER
+- TRUNCATE
+
+before execution.
+
+Only validated SELECT queries are allowed.
+
+---
+
+## Workspace Isolation
+
+Uploaded datasets remain isolated per user workspace and are never shared across sessions.
+
+---
+
+## Audit Logging
+
+Every generated query is logged for:
+- traceability
+- debugging
+- evaluation
+- failure analysis
+
+---
+
+# Performance Notes
+
+Current deployment targets correctness and workflow reliability over raw throughput.
+
+Observed characteristics:
+- average response latency: 3–8 seconds
+- lower latency for schema-aware repeated queries
+- higher latency during multi-step investigation flows
+- token cost increases during iterative reasoning
+
+Optimization work is ongoing.
+
+---
+
+# Known Limitations
+
+The current system still has several limitations:
+
+- SQLite backend is not suitable for high concurrency
+- conversational memory is session-scoped only
+- autonomous insight generation can over-surface weak trends
+- long-context prompts increase token cost significantly
+- evaluation coverage is still limited relative to production-scale datasets
+
+These limitations are intentionally documented because operational weaknesses matter in real deployments.
+
+---
+
+# Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Frontend | Streamlit |
+| Backend | Python |
+| Data Layer | Pandas |
+| Database | SQLite |
+| LLM Provider | OpenAI |
+| Containerization | Docker |
+| Deployment | Render |
+| Evaluation | Custom golden-set framework |
+| Monitoring | Structured logging + telemetry |
+
+---
+
+# Running Locally
+
+## Clone Repository
 
 ```bash
 git clone https://github.com/saikirankonda99/agentic-ai-analytics-platform.git
+
 cd agentic-ai-analytics-platform
+```
+
+---
+
+## Install Dependencies
+
+```bash
 pip install -r requirements.txt
-streamlit run app.py
 ```
 
-Configure the OpenAI API key via `.streamlit/secrets.toml`:
+---
 
-```toml
-OPENAI_API_KEY = "your_api_key_here"
-```
+## Configure API Key
 
-Or as an environment variable:
+### Option 1 — Environment Variable
 
 ```bash
 export OPENAI_API_KEY="your_api_key_here"
 ```
 
------
+### Option 2 — Streamlit Secrets
 
-## Running with Docker
+Create:
 
-Build:
+```text
+.streamlit/secrets.toml
+```
+
+Add:
+
+```toml
+OPENAI_API_KEY="your_api_key_here"
+```
+
+---
+
+## Start Application
+
+```bash
+streamlit run app.py
+```
+
+---
+
+# Docker Deployment
+
+## Build
 
 ```bash
 docker build -t agentic-ai-analytics-platform .
 ```
 
-Run:
+---
+
+## Run
 
 ```bash
 docker run --rm -p 8501:8501 \
-  -e OPENAI_API_KEY=your_api_key_here \
-  agentic-ai-analytics-platform
+-e OPENAI_API_KEY=your_api_key_here \
+agentic-ai-analytics-platform
 ```
 
-The application is available at `http://localhost:8501`.
+---
 
-To persist telemetry and uploaded data outside the container, mount the data directory:
+# Example Analytical Queries
 
-```bash
-docker run --rm -p 8501:8501 \
-  -e OPENAI_API_KEY=your_api_key_here \
-  -v "$(pwd)/data:/app/data" \
-  agentic-ai-analytics-platform
-```
+Example prompts against the Chinook dataset:
 
-The bundled SQLite database in `data/chinook.db` is copied into the image at build time.
+- Top customers by revenue
+- Revenue by geography
+- Artist performance comparison
+- Genre distribution trends
+- Regional sales breakdown
+- Monthly purchasing behavior
+- Album sales by market segment
 
------
+CSV uploads are also supported for isolated custom dataset analysis.
 
-## Example Queries
+---
 
-The live deployment runs against the Chinook sample database. Representative queries:
+# Challenges Encountered During Development
 
-- List all customers
-- Top 10 customers by total spending
-- Revenue breakdown by country
-- Tracks with album and artist
-- Genre distribution by region
-- Sales performance comparison across markets
+Some recurring engineering problems during implementation:
 
-CSV upload is supported for analysis against custom datasets within isolated workspaces.
+- controlling hallucinated joins
+- reducing invalid aggregation generation
+- handling malformed SQL correction loops
+- maintaining conversational context consistency
+- preventing schema drift during CSV uploads
+- balancing latency against deeper reasoning chains
+- keeping prompts deterministic across workflows
 
------
+These issues significantly influenced the architecture.
 
-## Contributing
+---
 
-This project is under active development. Contributions, bug reports, and architectural feedback are welcome via GitHub Issues and Pull Requests.
+# Roadmap (v2)
 
------
+The next iteration transitions from a sequential pipeline toward stateful multi-agent orchestration.
 
-## License
+Primary goals:
+- richer analytical reasoning
+- reflection loops
+- parallel agent execution
+- planner-based decomposition
+- enterprise orchestration compatibility
+
+---
+
+## Planned Improvements
+
+| Planned Work | Motivation |
+|---|---|
+| LangGraph orchestration | Stateful graph execution |
+| Reflection agent | Hallucination detection before execution |
+| Planner agent | Multi-step task decomposition |
+| History-aware retrieval | Better analytical continuity |
+| Snowflake/Postgres adapters | Production database support |
+| MCP server support | External agent interoperability |
+| Bedrock integration | Enterprise AWS-native deployments |
+| Expanded evaluation suite | Larger correctness benchmark coverage |
+| Human approval checkpoints | High-risk operation review |
+| Telemetry dashboard | Per-user cost visibility |
+
+---
+
+# Contributing
+
+The project is still evolving and architectural feedback is welcome.
+
+Contributions are encouraged for:
+- orchestration improvements
+- evaluation methodology
+- hallucination mitigation
+- database adapters
+- telemetry and monitoring
+- testing coverage
+
+---
+
+# License
 
 See LICENSE file.
 
------
+---
 
-## Author
+# Author
 
-**Sai Kiran Konda**
-[LinkedIn](https://www.linkedin.com/in/sai-kiran-konda/) · [GitHub](https://github.com/saikirankonda99) · saikiran1.konda@gmail.com
+Sai Kiran Konda
+
+- LinkedIn: https://www.linkedin.com/in/sai-kiran-konda/
+- GitHub: https://github.com/saikirankonda99
+- Email: saikiran1.konda@gmail.com
