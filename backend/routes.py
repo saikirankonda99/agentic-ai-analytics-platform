@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import datetime, timezone
+from json import dumps
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+from starlette.responses import StreamingResponse
 
 from backend.services import (
     AgentExecution,
     WorkflowEvent,
     WorkflowStageProgress,
+    WorkflowStreamUpdate,
     WorkflowTelemetry,
     orchestration_service,
 )
@@ -31,6 +35,13 @@ WorkflowEventType = Literal[
     "workflow_created",
     "lifecycle_transition",
     "stage_transition",
+    "telemetry_update",
+]
+WorkflowStreamUpdateType = Literal[
+    "workflow_event",
+    "lifecycle_transition",
+    "stage_transition",
+    "agent_update",
     "telemetry_update",
 ]
 
@@ -77,6 +88,13 @@ class AgentExecutionResponse(BaseModel):
 class WorkflowEventsResponse(BaseModel):
     workflow_id: str
     events: list[WorkflowEventResponse]
+
+
+class WorkflowStreamUpdateResponse(BaseModel):
+    timestamp: str
+    update_type: WorkflowStreamUpdateType
+    message: str
+    payload: dict[str, object]
 
 
 class ExecuteResponse(BaseModel):
@@ -156,6 +174,19 @@ def get_workflow_events(workflow_id: str) -> WorkflowEventsResponse:
     )
 
 
+@router.get("/workflow/{workflow_id}/stream")
+def stream_workflow_updates(workflow_id: str) -> StreamingResponse:
+    updates = orchestration_service.get_stream_updates(workflow_id)
+    if updates is None:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    return StreamingResponse(
+        _sse_stream(updates),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 def _telemetry_response(telemetry: WorkflowTelemetry) -> WorkflowTelemetryResponse:
     return WorkflowTelemetryResponse(
         started_at=telemetry.started_at,
@@ -206,6 +237,18 @@ def _agent_executions_response(
         )
         for agent in agent_executions
     ]
+
+
+def _sse_stream(updates: tuple[WorkflowStreamUpdate, ...]) -> Iterator[str]:
+    for update in updates:
+        event = WorkflowStreamUpdateResponse(
+            timestamp=update.timestamp,
+            update_type=update.update_type,
+            message=update.message,
+            payload=update.payload,
+        )
+        yield f"event: {update.update_type}\n"
+        yield f"data: {dumps(event.dict())}\n\n"
 
 
 __all__ = ["router"]

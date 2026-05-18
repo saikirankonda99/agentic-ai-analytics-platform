@@ -29,6 +29,13 @@ WorkflowEventType = Literal[
     "stage_transition",
     "telemetry_update",
 ]
+WorkflowStreamUpdateType = Literal[
+    "workflow_event",
+    "lifecycle_transition",
+    "stage_transition",
+    "agent_update",
+    "telemetry_update",
+]
 WORKFLOW_STAGES: tuple[WorkflowStage, ...] = (
     "planning",
     "schema_analysis",
@@ -86,6 +93,14 @@ class WorkflowEvent:
 
 
 @dataclass(frozen=True)
+class WorkflowStreamUpdate:
+    timestamp: str
+    update_type: WorkflowStreamUpdateType
+    message: str
+    payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class OrchestrationExecution:
     workflow_id: str
     question: str
@@ -140,6 +155,20 @@ class OrchestrationService:
         if isinstance(events, tuple):
             return events
         return ()
+
+    def get_stream_updates(self, workflow_id: str) -> tuple[WorkflowStreamUpdate, ...] | None:
+        workflow = self.get_workflow(workflow_id)
+        if workflow is None:
+            return None
+
+        updates: list[WorkflowStreamUpdate] = []
+        events = self.get_events(workflow_id) or ()
+        updates.extend(self._event_stream_updates(events))
+        updates.extend(self._lifecycle_stream_updates(events))
+        updates.extend(self._stage_stream_updates(workflow.stage_progression))
+        updates.extend(self._agent_stream_updates(workflow.agent_executions, workflow.stage_progression))
+        updates.extend(self._telemetry_stream_updates(workflow.telemetry))
+        return tuple(sorted(updates, key=lambda update: update.timestamp))
 
     def _save_workflow(self, workflow: OrchestrationExecution) -> None:
         self.cache.set(workflow.workflow_id, workflow)
@@ -233,6 +262,107 @@ class OrchestrationService:
 
     def _events_key(self, workflow_id: str) -> str:
         return f"{workflow_id}:events"
+
+    def _event_stream_updates(self, events: tuple[WorkflowEvent, ...]) -> list[WorkflowStreamUpdate]:
+        return [
+            WorkflowStreamUpdate(
+                timestamp=event.timestamp,
+                update_type="workflow_event",
+                message=event.message,
+                payload={
+                    "event_type": event.event_type,
+                    "message": event.message,
+                    "timestamp": event.timestamp,
+                },
+            )
+            for event in events
+        ]
+
+    def _lifecycle_stream_updates(self, events: tuple[WorkflowEvent, ...]) -> list[WorkflowStreamUpdate]:
+        return [
+            WorkflowStreamUpdate(
+                timestamp=event.timestamp,
+                update_type="lifecycle_transition",
+                message=event.message,
+                payload={
+                    "event_type": event.event_type,
+                    "message": event.message,
+                    "timestamp": event.timestamp,
+                },
+            )
+            for event in events
+            if event.event_type == "lifecycle_transition"
+        ]
+
+    def _stage_stream_updates(
+        self,
+        stage_progression: tuple[WorkflowStageProgress, ...],
+    ) -> list[WorkflowStreamUpdate]:
+        return [
+            WorkflowStreamUpdate(
+                timestamp=stage.timestamp,
+                update_type="stage_transition",
+                message=f"Workflow stage completed: {stage.stage}.",
+                payload={
+                    "stage": stage.stage,
+                    "status": stage.status,
+                    "timestamp": stage.timestamp,
+                },
+            )
+            for stage in stage_progression
+        ]
+
+    def _agent_stream_updates(
+        self,
+        agent_executions: tuple[AgentExecution, ...],
+        stage_progression: tuple[WorkflowStageProgress, ...],
+    ) -> list[WorkflowStreamUpdate]:
+        stage_timestamps = {stage.stage: stage.timestamp for stage in stage_progression}
+        return [
+            WorkflowStreamUpdate(
+                timestamp=stage_timestamps.get(agent.assigned_stage, datetime.now(timezone.utc).isoformat()),
+                update_type="agent_update",
+                message=f"Agent {agent.agent_name} completed {agent.assigned_stage}.",
+                payload={
+                    "agent_name": agent.agent_name,
+                    "agent_role": agent.agent_role,
+                    "assigned_stage": agent.assigned_stage,
+                    "agent_status": agent.agent_status,
+                },
+            )
+            for agent in agent_executions
+        ]
+
+    def _telemetry_stream_updates(self, telemetry: WorkflowTelemetry) -> list[WorkflowStreamUpdate]:
+        updates: list[WorkflowStreamUpdate] = []
+        if telemetry.started_at is not None:
+            updates.append(
+                WorkflowStreamUpdate(
+                    timestamp=telemetry.started_at,
+                    update_type="telemetry_update",
+                    message="Workflow telemetry started.",
+                    payload={"started_at": telemetry.started_at},
+                )
+            )
+        if telemetry.completed_at is not None:
+            updates.append(
+                WorkflowStreamUpdate(
+                    timestamp=telemetry.completed_at,
+                    update_type="telemetry_update",
+                    message="Workflow telemetry completed.",
+                    payload={
+                        "completed_at": telemetry.completed_at,
+                        "latency_ms": telemetry.latency_ms,
+                        "estimated_cost_usd": telemetry.estimated_cost_usd,
+                        "token_usage": {
+                            "prompt_tokens": telemetry.token_usage.prompt_tokens,
+                            "completion_tokens": telemetry.token_usage.completion_tokens,
+                            "total_tokens": telemetry.token_usage.total_tokens,
+                        },
+                    },
+                )
+            )
+        return updates
 
     def _simulate_agent_execution(self, stage: WorkflowStage) -> AgentExecution:
         agent_name, agent_role = STAGE_AGENTS[stage]
