@@ -10,6 +10,7 @@ from styles.theme import get_theme_css
 from ui.dashboard import (
     build_plotly_figure,
     build_default_operations_figure,
+    escape_html,
     render_chat_history,
     render_activity_feed,
     render_agent_row,
@@ -425,43 +426,50 @@ def render_analytics_workspace(client):
             )
             st.plotly_chart(
                 build_default_operations_figure(),
-                use_container_width=True,
+                width="stretch",
                 key=f"default_ops_chart_{st.session_state.run_id}",
             )
-            render_agent_row(build_default_agent_states())
+            st.markdown(render_agent_row(build_default_agent_states()), unsafe_allow_html=True)
         with status_right:
-            render_response_card(
-                "Analytics Ready",
-                "The workspace is preloaded with operational defaults until the next query executes.",
-                """
-                <div class="workspace-body-copy">
-                    Launch a sample prompt or ask your own question below. Until then, the dashboard stays populated
-                    with live-looking orchestration posture, health metrics, and recommendations.
-                </div>
-                """,
-                tone="summary-module",
+            st.markdown(
+                render_response_card(
+                    "Analytics Ready",
+                    "The workspace is preloaded with operational defaults until the next query executes.",
+                    '<div class="workspace-body-copy">Launch a sample prompt or ask your own question below. Until then, the dashboard stays populated with live-looking orchestration posture, health metrics, and recommendations.</div>',
+                    tone="summary-module",
+                ),
+                unsafe_allow_html=True,
             )
-            render_activity_feed(build_default_activity_feed())
-            render_recommendation_card(
-                [
-                    "Start with a revenue, customer, or top-track query to immediately populate the executive workspace.",
-                    "Upload a CSV to inspect ad hoc datasets while keeping observability and orchestration modules available.",
-                    "Use the workflow rail above to sanity-check which agent stages should remain warm for your next run.",
-                ]
+            st.markdown(render_activity_feed(build_default_activity_feed()), unsafe_allow_html=True)
+            st.markdown(
+                render_recommendation_card(
+                    [
+                        "Start with a revenue, customer, or top-track query to immediately populate the executive workspace.",
+                        "Upload a CSV to inspect ad hoc datasets while keeping observability and orchestration modules available.",
+                        "Use the workflow rail above to sanity-check which agent stages should remain warm for your next run.",
+                    ]
+                ),
+                unsafe_allow_html=True,
             )
-            render_observability_card(
-                {
-                    "model": "gpt-4.1-mini",
-                    "total_tokens": 18240,
-                    "latency_ms": 842,
-                    "cost_usd": 0.021384,
-                },
-                [{"step": "planner", "status": "success"}],
+            st.markdown(
+                render_observability_card(
+                    {
+                        "model": "gpt-4.1-mini",
+                        "total_tokens": 18240,
+                        "latency_ms": 842,
+                        "cost_usd": 0.021384,
+                    },
+                    [{"step": "planner", "status": "success"}],
+                ),
+                unsafe_allow_html=True,
             )
         return
     main_left, main_right = st.columns([1.42, 0.92], gap="medium")
     with main_left:
-        render_executive_summary(st.session_state.latest_question, df, exec_time, telemetry)
+        st.markdown(
+            render_executive_summary(st.session_state.latest_question, df, exec_time, telemetry),
+            unsafe_allow_html=True,
+        )
 
         chart_rendered = False
         if is_scalar_result(df):
@@ -550,7 +558,7 @@ def render_analytics_workspace(client):
                     fig = build_plotly_figure(chart_df, x_col, y_col, chart_type)
                     st.plotly_chart(
                         fig,
-                        use_container_width=True,
+                        width="stretch",
                         key=f"insight_chart_{st.session_state.run_id}",
                     )
                     chart_rendered = True
@@ -561,24 +569,30 @@ def render_analytics_workspace(client):
 
     with main_right:
         recommendations = build_ai_recommendations(df, telemetry, st.session_state.workflow_trace)
-        render_recommendation_card(recommendations)
-        render_observability_card(telemetry, st.session_state.workflow_trace)
+        st.markdown(render_recommendation_card(recommendations), unsafe_allow_html=True)
+        st.markdown(render_observability_card(telemetry, st.session_state.workflow_trace), unsafe_allow_html=True)
 
         if not df.empty:
             try:
                 explanation = explain_result(client, st.session_state.latest_question, df)
-                render_response_card(
-                    "AI Insight Brief",
-                    "Natural-language interpretation of the current result set.",
-                    f'<div class="workspace-body-copy">{explanation}</div>',
-                    tone="insight-module",
+                st.markdown(
+                    render_response_card(
+                        "AI Insight Brief",
+                        "Natural-language interpretation of the current result set.",
+                        f'<div class="workspace-body-copy">{escape_html(explanation)}</div>',
+                        tone="insight-module",
+                    ),
+                    unsafe_allow_html=True,
                 )
             except Exception as exc:
-                render_response_card(
-                    "AI Insight Brief",
-                    "Natural-language interpretation of the current result set.",
-                    f'<div class="workspace-body-copy">AI explanation is temporarily unavailable.<br/>{str(exc)}</div>',
-                    tone="insight-module",
+                st.markdown(
+                    render_response_card(
+                        "AI Insight Brief",
+                        "Natural-language interpretation of the current result set.",
+                        f'<div class="workspace-body-copy">AI explanation is temporarily unavailable.<br/>{escape_html(exc)}</div>',
+                        tone="insight-module",
+                    ),
+                    unsafe_allow_html=True,
                 )
 
     show_sql = bool(st.session_state.latest_sql)
@@ -600,7 +614,7 @@ def render_analytics_workspace(client):
             df.to_csv(index=False).encode(),
             "result.csv",
             "text/csv",
-            use_container_width=True,
+            width="stretch",
         )
 
 
@@ -625,7 +639,7 @@ def render_copilot_workspace():
                 """,
                 unsafe_allow_html=True,
             )
-            st.dataframe(st.session_state.latest_df.head(20), use_container_width=True, height=280)
+            st.dataframe(st.session_state.latest_df.head(20), width="stretch", height=280)
 
 
 st.set_page_config(

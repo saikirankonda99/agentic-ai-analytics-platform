@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from html import escape
+
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -16,6 +18,16 @@ STATUS_META = {
     "pending": {"label": "Idle", "color": "#64748b"},
 }
 
+WORKFLOW_STEPS = [
+    "planner",
+    "schema retrieval",
+    "memory retrieval",
+    "sql generation",
+    "validation",
+    "reflection",
+    "execution",
+]
+
 STEP_META = {
     "planner": {"title": "Planner", "caption": "Intent routing"},
     "schema retrieval": {"title": "Schema", "caption": "Context retrieval"},
@@ -26,9 +38,76 @@ STEP_META = {
     "execution": {"title": "Execution", "caption": "Warehouse run"},
 }
 
+SAMPLE_PROMPTS = [
+    "List all customers",
+    "Top 10 customers by invoices",
+    "Revenue by country",
+    "Tracks with album and artist",
+]
+
+
+# ---------------------------------------------------------------------------
+# HTML primitives
+# ---------------------------------------------------------------------------
+
+
+def escape_html(value: object) -> str:
+    return escape("" if value is None else str(value), quote=True)
+
+
+def markdown_html(html: str) -> None:
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def section_header_html(title: str, subtitle: str, class_name: str = "section-card compact-card") -> str:
+    return (
+        f'<div class="{class_name}">'
+        f'<div class="section-title">{escape_html(title)}</div>'
+        f'<div class="section-subtitle">{escape_html(subtitle)}</div>'
+        f"</div>"
+    )
+
+
+def response_body_html(body_html: str) -> str:
+    return f'<div class="workspace-module-body">{body_html}</div>'
+
+
+def render_response_card(
+    title: str,
+    subtitle: str,
+    body_html: str,
+    tone: str = "default",
+) -> str:
+    return (
+        f'<div class="workspace-module {tone}">'
+        f'<div class="workspace-module-head">'
+        f'<div class="section-title">{escape_html(title)}</div>'
+        f'<div class="section-subtitle">{escape_html(subtitle)}</div>'
+        f"</div>"
+        f"{response_body_html(body_html)}"
+        f"</div>"
+    )
+
+
+def metric_grid_html(items: list[tuple[str, object]]) -> str:
+    return "".join(
+        (
+            f'<div class="observability-metric">'
+            f'<div class="observability-label">{escape_html(label)}</div>'
+            f'<div class="observability-value">{escape_html(value)}</div>'
+            f"</div>"
+        )
+        for label, value in items
+    )
+
+
+# ---------------------------------------------------------------------------
+# Shell and navigation sections
+# ---------------------------------------------------------------------------
+
 
 def render_hero() -> None:
-    st.markdown(
+    markdown_html(
         """
         <div class="hero-card">
             <div class="hero-eyebrow">AI Analytics Workspace</div>
@@ -44,21 +123,19 @@ def render_hero() -> None:
                 <span class="hero-badge">Plotly canvas</span>
             </div>
         </div>
-        """,
-        unsafe_allow_html=True,
+        """
     )
 
 
 def render_sidebar() -> dict:
     with st.sidebar:
-        st.markdown(
+        markdown_html(
             """
             <div class="sidebar-brand">
                 <p class="sidebar-brand-title">GenAI SQL Assistant</p>
                 <div class="sidebar-brand-copy">Analytics operations cockpit for AI-native querying.</div>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """
         )
 
         nav = st.radio(
@@ -72,13 +149,8 @@ def render_sidebar() -> dict:
         show_schema = st.toggle("Show database schema", value=False)
 
         st.markdown("### Sample Prompts")
-        for query in [
-            "List all customers",
-            "Top 10 customers by invoices",
-            "Revenue by country",
-            "Tracks with album and artist",
-        ]:
-            st.markdown(f'<div class="sample-query">{query}</div>', unsafe_allow_html=True)
+        for query in SAMPLE_PROMPTS:
+            markdown_html(f'<div class="sample-query">{escape_html(query)}</div>')
 
         st.markdown("### CSV Upload")
         uploaded_file = st.file_uploader("Upload CSV", type=["csv"], label_visibility="collapsed")
@@ -91,15 +163,27 @@ def render_sidebar() -> dict:
         }
 
 
-def render_prompt_launcher() -> str | None:
-    st.markdown(
+def render_footer() -> None:
+    markdown_html(
         """
-        <div class="section-card compact-card">
-            <div class="section-title">Prompt Launcher</div>
-            <div class="section-subtitle">Launch a workflow from a recommended question or type your own below.</div>
+        <div class="footer-note">
+            Built with Streamlit and OpenAI for AI-native analytics workflows.
         </div>
-        """,
-        unsafe_allow_html=True,
+        """
+    )
+
+
+# ---------------------------------------------------------------------------
+# Command and conversation sections
+# ---------------------------------------------------------------------------
+
+
+def render_prompt_launcher() -> str | None:
+    markdown_html(
+        section_header_html(
+            "Prompt Launcher",
+            "Launch a workflow from a recommended question or type your own below.",
+        )
     )
     c1, c2, c3 = st.columns(3)
     prompt = None
@@ -112,109 +196,13 @@ def render_prompt_launcher() -> str | None:
     return prompt
 
 
-def render_chat_history(messages: list[dict]) -> None:
-    st.markdown(
-        """
-        <div class="chat-card">
-            <div class="section-title">AI Copilot Conversation</div>
-            <div class="section-subtitle">Every workflow run is mirrored here so the reasoning trail stays visible.</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    if not messages:
-        st.markdown(
-            """
-            <div class="response-card assistant-card">
-                <div class="response-meta">AI Copilot</div>
-                <div class="response-content">
-                    Ask a question to populate the workspace with SQL, telemetry, workflow state, and executive
-                    analytics.
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        return
-
-    for msg in messages:
-        role_class = "assistant-card" if msg["role"] == "assistant" else "user-card"
-        role_label = "AI Copilot" if msg["role"] == "assistant" else "User Query"
-        content = str(msg["content"]).replace("\n", "<br/>")
-        st.markdown(
-            f"""
-            <div class="response-card {role_class}">
-                <div class="response-meta">{role_label}</div>
-                <div class="response-content">{content}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-
-def render_kpi_cards(metrics: list[dict]) -> None:
-    columns = st.columns(len(metrics))
-    for column, metric in zip(columns, metrics):
-        with column:
-            st.markdown(
-                f"""
-                <div class="kpi-card">
-                    <div class="kpi-label">{metric["label"]}</div>
-                    <div class="kpi-value">{metric["value"]}</div>
-                    <div class="kpi-delta">{metric["caption"]}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-
-def render_glass_widgets(widgets: list[dict]) -> None:
-    columns = st.columns(len(widgets))
-    for column, widget in zip(columns, widgets):
-        with column:
-            badge = widget.get("badge")
-            badge_html = f'<span class="status-pill">{badge}</span>' if badge else ""
-            st.markdown(
-                f"""
-                <div class="glass-widget">
-                    <div class="glass-widget-top">
-                        <div class="glass-widget-label">{widget["label"]}</div>
-                        {badge_html}
-                    </div>
-                    <div class="glass-widget-value">{widget["value"]}</div>
-                    <div class="glass-widget-copy">{widget["caption"]}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-
-def render_response_card(title: str, subtitle: str, body_html: str, tone: str = "default") -> None:
-    st.markdown(
-        f"""
-        <div class="workspace-module {tone}">
-            <div class="workspace-module-head">
-                <div class="section-title">{title}</div>
-                <div class="section-subtitle">{subtitle}</div>
-            </div>
-
-            <div class="workspace-module-body">
-                {body_html}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
 def render_command_bar() -> str | None:
-    st.markdown(
-        """
-        <div class="workspace-shell compact-shell">
-            <div class="section-title">Command Workspace</div>
-            <div class="section-subtitle">Submit a question and keep orchestration anchored to the analytics workspace.</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    markdown_html(
+        section_header_html(
+            "Command Workspace",
+            "Submit a question and keep orchestration anchored to the analytics workspace.",
+            class_name="workspace-shell compact-shell",
+        )
     )
     prompt = None
     with st.form("command_bar_form", clear_on_submit=False):
@@ -246,6 +234,109 @@ def render_command_bar() -> str | None:
     return None
 
 
+def chat_message_html(message: dict) -> str:
+    role_class = "assistant-card" if message["role"] == "assistant" else "user-card"
+    role_label = "AI Copilot" if message["role"] == "assistant" else "User Query"
+    content = escape_html(message["content"]).replace("\n", "<br/>")
+    return (
+        f'<div class="response-card {role_class}">'
+        f'<div class="response-meta">{role_label}</div>'
+        f'<div class="response-content">{content}</div>'
+        f"</div>"
+    )
+
+
+def render_chat_history(messages: list[dict]) -> None:
+    markdown_html(
+        section_header_html(
+            "AI Copilot Conversation",
+            "Every workflow run is mirrored here so the reasoning trail stays visible.",
+            class_name="chat-card",
+        )
+    )
+    if not messages:
+        markdown_html(
+            """
+            <div class="response-card assistant-card">
+                <div class="response-meta">AI Copilot</div>
+                <div class="response-content">
+                    Ask a question to populate the workspace with SQL, telemetry, workflow state, and executive
+                    analytics.
+                </div>
+            </div>
+            """
+        )
+        return
+
+    for message in messages:
+        markdown_html(chat_message_html(message))
+
+
+# ---------------------------------------------------------------------------
+# KPI and glass widgets
+# ---------------------------------------------------------------------------
+
+
+def kpi_card_html(metric: dict) -> str:
+    return (
+        f'<div class="kpi-card">'
+        f'<div class="kpi-label">{escape_html(metric["label"])}</div>'
+        f'<div class="kpi-value">{escape_html(metric["value"])}</div>'
+        f'<div class="kpi-delta">{escape_html(metric["caption"])}</div>'
+        f"</div>"
+    )
+
+
+def render_kpi_cards(metrics: list[dict]) -> None:
+    columns = st.columns(len(metrics))
+    for column, metric in zip(columns, metrics):
+        with column:
+            markdown_html(kpi_card_html(metric))
+
+
+def glass_widget_html(widget: dict) -> str:
+    badge = widget.get("badge")
+    badge_html = f'<span class="status-pill">{escape_html(badge)}</span>' if badge else ""
+    return (
+        f'<div class="glass-widget">'
+        f'<div class="glass-widget-top">'
+        f'<div class="glass-widget-label">{escape_html(widget["label"])}</div>'
+        f"{badge_html}"
+        f"</div>"
+        f'<div class="glass-widget-value">{escape_html(widget["value"])}</div>'
+        f'<div class="glass-widget-copy">{escape_html(widget["caption"])}</div>'
+        f"</div>"
+    )
+
+
+def render_glass_widgets(widgets: list[dict]) -> None:
+    columns = st.columns(len(widgets))
+    for column, widget in zip(columns, widgets):
+        with column:
+            markdown_html(glass_widget_html(widget))
+
+
+# ---------------------------------------------------------------------------
+# Charts
+# ---------------------------------------------------------------------------
+
+
+def apply_chart_theme(fig: go.Figure, height: int = 410) -> go.Figure:
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(15,23,42,0.32)",
+        font=dict(color="#e2e8f0"),
+        margin=dict(l=10, r=10, t=30, b=10),
+        height=height,
+        xaxis_title=None,
+        yaxis_title=None,
+        legend_title=None,
+    )
+    fig.update_xaxes(showgrid=False, zeroline=False, color="#94a3b8")
+    fig.update_yaxes(gridcolor="rgba(148, 163, 184, 0.14)", zeroline=False, color="#94a3b8")
+    return fig
+
+
 def build_plotly_figure(df: pd.DataFrame, x_col: str, y_col: str, chart_type: str) -> go.Figure:
     if chart_type == "Line":
         fig = px.line(df, x=x_col, y=y_col, markers=True)
@@ -254,40 +345,17 @@ def build_plotly_figure(df: pd.DataFrame, x_col: str, y_col: str, chart_type: st
     else:
         fig = px.bar(df, x=x_col, y=y_col)
 
-    fig.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(15,23,42,0.32)",
-        font=dict(color="#e2e8f0"),
-        margin=dict(l=10, r=10, t=30, b=10),
-        height=410,
-        xaxis_title=None,
-        yaxis_title=None,
-        legend_title=None,
-    )
-    fig.update_xaxes(
-        showgrid=False,
-        zeroline=False,
-        color="#94a3b8",
-    )
-    fig.update_yaxes(
-        gridcolor="rgba(148, 163, 184, 0.14)",
-        zeroline=False,
-        color="#94a3b8",
-    )
-    if fig.data:
-        for trace in fig.data:
-            if getattr(trace, "type", "") == "bar":
-                trace.update(
-                    marker=dict(
-                        color="#56ccf2",
-                        line=dict(color="rgba(86, 204, 242, 0.45)", width=1),
-                    )
+    apply_chart_theme(fig)
+    for trace in fig.data:
+        if getattr(trace, "type", "") == "bar":
+            trace.update(
+                marker=dict(
+                    color="#56ccf2",
+                    line=dict(color="rgba(86, 204, 242, 0.45)", width=1),
                 )
-            else:
-                trace.update(
-                    marker=dict(color="#56ccf2"),
-                    line=dict(color="#56ccf2", width=3),
-                )
+            )
+        else:
+            trace.update(marker=dict(color="#56ccf2"), line=dict(color="#56ccf2", width=3))
     return fig
 
 
@@ -321,105 +389,101 @@ def build_default_operations_figure() -> go.Figure:
             line=dict(color="#34d399", width=2, dash="dot"),
         )
     )
+    apply_chart_theme(fig, height=420)
     fig.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(15,23,42,0.34)",
-        font=dict(color="#e2e8f0"),
         margin=dict(l=10, r=10, t=24, b=10),
-        height=420,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
     )
-    fig.update_xaxes(showgrid=False, zeroline=False, color="#94a3b8")
-    fig.update_yaxes(gridcolor="rgba(148, 163, 184, 0.14)", zeroline=False, color="#94a3b8")
     return fig
 
 
-def render_workflow_timeline(trace: list[dict], chart_key: str | None = None) -> None:
-    st.markdown(
-        """
-        <div class="section-card compact-card">
-            <div class="section-title">AI Orchestration Workflow</div>
-            <div class="section-subtitle">Enterprise workflow view from planning through execution, with agent status and telemetry context.</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    ordered_steps = [
-        "planner",
-        "schema retrieval",
-        "memory retrieval",
-        "sql generation",
-        "validation",
-        "reflection",
-        "execution",
-    ]
+# ---------------------------------------------------------------------------
+# Workflow timeline
+# ---------------------------------------------------------------------------
 
-    latest_by_step = {}
+
+def latest_trace_by_step(trace: list[dict]) -> dict[str, dict]:
+    latest = {}
     for item in trace:
-        latest_by_step[item["step"]] = item
+        latest[item["step"]] = item
+    return latest
 
-    if not trace:
-        st.markdown('<div class="workflow-empty">Run a query to activate the workflow timeline.</div>', unsafe_allow_html=True)
-        return
 
-    status_values = [latest_by_step.get(step, {"status": "pending"})["status"] for step in ordered_steps]
-    active_step = None
-    for step in reversed(ordered_steps):
+def active_workflow_step(latest_by_step: dict[str, dict]) -> str | None:
+    for step in reversed(WORKFLOW_STEPS):
         if latest_by_step.get(step):
-            active_step = step
-            break
+            return step
+    return None
 
-    workflow_html = ['<div class="workflow-rail-shell"><div class="workflow-rail">']
-    for index, step in enumerate(ordered_steps):
-        item = latest_by_step.get(step, {"status": "idle", "detail": "Not started."})
-        meta = STATUS_META.get(item["status"], STATUS_META["pending"])
-        step_info = STEP_META.get(step, {"title": step.title(), "caption": "Workflow step"})
-        is_active = item["status"] == "active" or (step == active_step and item["status"] not in {"success", "error", "warning"})
-        connector = ""
-        if index < len(ordered_steps) - 1:
-            connector = '<div class="workflow-connector"></div>'
 
-        latency = item.get("latency_ms")
-        retries = item.get("retries")
-        model = item.get("model")
+def workflow_step_metadata(item: dict) -> str:
+    telemetry_bits = []
+    if item.get("model"):
+        telemetry_bits.append(f'<span>{escape_html(item["model"])}</span>')
+    if item.get("latency_ms") is not None:
+        telemetry_bits.append(f'<span>{escape_html(item["latency_ms"])} ms</span>')
+    if item.get("retries") is not None:
+        telemetry_bits.append(f'<span>{escape_html(item["retries"])} retries</span>')
+    return "".join(telemetry_bits or ["<span>Telemetry pending</span>"])
 
-        telemetry_bits = []
-        if model:
-            telemetry_bits.append(f"<span>{model}</span>")
-        if latency is not None:
-            telemetry_bits.append(f"<span>{latency} ms</span>")
-        if retries is not None:
-            telemetry_bits.append(f"<span>{retries} retries</span>")
-        if not telemetry_bits:
-            telemetry_bits.append("<span>Telemetry pending</span>")
 
-        workflow_html.append(
-            f"""
-            <div class="workflow-node-wrap">
-                <div class="workflow-node {'active-agent' if is_active else ''}">
-                    <div class="workflow-node-top">
-                        <div>
-                            <div class="workflow-node-title">{step_info["title"]}</div>
-                            <div class="workflow-node-caption">{step_info["caption"]}</div>
-                        </div>
-                        <div class="workflow-status-dot" style="--status-color:{meta["color"]};"></div>
-                    </div>
-                    <div class="workflow-node-status" style="color:{meta["color"]};">{meta["label"]}</div>
-                    <div class="workflow-node-detail">{item["detail"]}</div>
-                    <div class="workflow-node-metadata">{''.join(telemetry_bits)}</div>
-                </div>
-                {connector}
-            </div>
-            """
+def workflow_node_html(step: str, item: dict, active_step: str | None, show_connector: bool) -> str:
+    status = item.get("status", "idle")
+    meta = STATUS_META.get(status, STATUS_META["pending"])
+    step_info = STEP_META.get(step, {"title": step.title(), "caption": "Workflow step"})
+    is_active = status == "active" or (step == active_step and status not in {"success", "error", "warning"})
+    active_class = "active-agent" if is_active else ""
+    connector = '<div class="workflow-connector"></div>' if show_connector else ""
+
+    return (
+        f'<div class="workflow-node-wrap">'
+        f'<div class="workflow-node {active_class}">'
+        f'<div class="workflow-node-top">'
+        f"<div>"
+        f'<div class="workflow-node-title">{escape_html(step_info["title"])}</div>'
+        f'<div class="workflow-node-caption">{escape_html(step_info["caption"])}</div>'
+        f"</div>"
+        f'<div class="workflow-status-dot" style="--status-color:{meta["color"]};"></div>'
+        f"</div>"
+        f'<div class="workflow-node-status" style="color:{meta["color"]};">{meta["label"]}</div>'
+        f'<div class="workflow-node-detail">{escape_html(item.get("detail", "Not started."))}</div>'
+        f'<div class="workflow-node-metadata">{workflow_step_metadata(item)}</div>'
+        f"</div>"
+        f"{connector}"
+        f"</div>"
+    )
+
+
+def workflow_timeline_html(trace: list[dict]) -> tuple[str, list[str]]:
+    header = section_header_html(
+        "AI Orchestration Workflow",
+        "Enterprise workflow view from planning through execution, with agent status and telemetry context.",
+    )
+    if not trace:
+        return header + '<div class="workflow-empty">Run a query to activate the workflow timeline.</div>', []
+
+    latest = latest_trace_by_step(trace)
+    active_step = active_workflow_step(latest)
+    nodes = [
+        workflow_node_html(
+            step,
+            latest.get(step, {"status": "idle", "detail": "Not started."}),
+            active_step,
+            index < len(WORKFLOW_STEPS) - 1,
         )
-    workflow_html.append("</div></div>")
-    st.markdown("".join(workflow_html), unsafe_allow_html=True)
+        for index, step in enumerate(WORKFLOW_STEPS)
+    ]
+    statuses = [latest.get(step, {"status": "pending"})["status"] for step in WORKFLOW_STEPS]
+    return header + '<div class="workflow-rail-shell"><div class="workflow-rail">' + "".join(nodes) + "</div></div>", statuses
 
+
+def build_workflow_chart(status_values: list[str]) -> go.Figure:
     fig = go.Figure(
         data=[
             go.Scatter(
-                x=ordered_steps,
-                y=[1] * len(ordered_steps),
+                x=WORKFLOW_STEPS,
+                y=[1] * len(WORKFLOW_STEPS),
                 mode="lines+markers",
                 marker=dict(
                     size=14,
@@ -440,16 +504,77 @@ def render_workflow_timeline(trace: list[dict], chart_key: str | None = None) ->
         xaxis=dict(showgrid=False, zeroline=False, visible=False),
         yaxis=dict(showgrid=False, zeroline=False, visible=False),
     )
-    workflow_chart_key = (
-        chart_key
-        or f"workflow_chart_{st.session_state.get('live_render_seq', 0)}"
-    )
+    return fig
 
+
+def render_workflow_timeline(trace: list[dict], chart_key: str | None = None) -> None:
+    html, status_values = workflow_timeline_html(trace)
+    markdown_html(html)
+    if not trace:
+        return
+
+    workflow_chart_key = chart_key or f"workflow_chart_{st.session_state.get('live_render_seq', 0)}"
     st.plotly_chart(
-        fig,
+        build_workflow_chart(status_values),
         width="stretch",
         config={"displayModeBar": False},
         key=workflow_chart_key,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Execution logs and telemetry
+# ---------------------------------------------------------------------------
+
+
+def live_execution_summary_html(question: str) -> str:
+    return render_response_card(
+        "Live Execution System",
+        f"Autonomous orchestration is currently processing: {question}",
+        "",
+        tone="summary-module",
+    )
+
+
+def log_line_html(entry: dict) -> str:
+    return (
+        f'<div class="log-line">'
+        f'<span class="log-time">{escape_html(entry["time"])}</span>'
+        f'<span class="log-step">{escape_html(entry["step"])}</span>'
+        f'<span class="log-message">{escape_html(entry["message"])}</span>'
+        f"</div>"
+    )
+
+
+def execution_log_html(logs: list[dict]) -> str:
+    log_items = "".join(log_line_html(entry) for entry in logs[-12:])
+    if not log_items:
+        log_items = '<div class="workflow-empty">Waiting for workflow events.</div>'
+    return render_response_card(
+        "Execution Log Stream",
+        "Live operational events from the orchestration layer.",
+        f'<div class="log-stream">{log_items}</div>',
+        tone="default-module",
+    )
+
+
+def live_telemetry_items(telemetry: dict) -> list[tuple[str, object]]:
+    return [
+        ("Model", telemetry.get("model") or "Pending"),
+        ("Prompt Tokens", f'{telemetry.get("prompt_tokens", 0):,}'),
+        ("Completion Tokens", f'{telemetry.get("completion_tokens", 0):,}'),
+        ("Total Tokens", f'{telemetry.get("total_tokens", 0):,}'),
+        ("Latency", f'{telemetry.get("latency_ms", 0)} ms'),
+        ("Cost", f'${telemetry.get("cost_usd", 0.0):.6f}'),
+    ]
+
+
+def progressive_telemetry_html(telemetry: dict) -> str:
+    return render_response_card(
+        "Progressive Telemetry",
+        "Runtime usage and observability revealed as agents complete.",
+        f'<div class="observability-grid">{metric_grid_html(live_telemetry_items(telemetry))}</div>',
+        tone="observability-module",
     )
 
 
@@ -460,293 +585,22 @@ def render_live_execution_panel(
     telemetry: dict,
     chart_key: str | None = None,
 ) -> None:
-    st.markdown(
-        f"""
-        <div class="workspace-module summary-module">
-            <div class="workspace-module-head">
-                <div class="section-title">Live Execution System</div>
-                <div class="section-subtitle">Autonomous orchestration is currently processing: {question}</div>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    markdown_html(live_execution_summary_html(question))
     render_workflow_timeline(trace, chart_key=chart_key)
 
     left, right = st.columns([1.2, 0.8])
     with left:
-        log_items = "".join(
-            [
-                f"""
-                <div class="log-line">
-                    <span class="log-time">{entry["time"]}</span>
-                    <span class="log-step">{entry["step"]}</span>
-                    <span class="log-message">{entry["message"]}</span>
-                </div>
-                """
-                for entry in logs[-12:]
-            ]
-        ) or '<div class="workflow-empty">Waiting for workflow events.</div>'
-        st.markdown(
-            """
-            <div class="workspace-module default-module">
-                <div class="workspace-module-head">
-                    <div class="section-title">Execution Log Stream</div>
-                    <div class="section-subtitle">
-                        Live operational events from the orchestration layer.
-                    </div>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        st.markdown(
-            f'<div class="log-stream">{log_items}</div>',
-            unsafe_allow_html=True,
-        )
+        markdown_html(execution_log_html(logs))
     with right:
-        telemetry_items = [
-            ("Model", telemetry.get("model") or "Pending"),
-            ("Prompt Tokens", f'{telemetry.get("prompt_tokens", 0):,}'),
-            ("Completion Tokens", f'{telemetry.get("completion_tokens", 0):,}'),
-            ("Total Tokens", f'{telemetry.get("total_tokens", 0):,}'),
-            ("Latency", f'{telemetry.get("latency_ms", 0)} ms'),
-            ("Cost", f'${telemetry.get("cost_usd", 0.0):.6f}'),
-        ]
-
-        telemetry_html = "".join(
-            [
-                f"""
-                <div class="observability-metric">
-                    <div class="observability-label">{label}</div>
-                    <div class="observability-value">{value}</div>
-                </div>
-                """
-                for label, value in telemetry_items
-            ]
-        )
-
-        st.markdown(
-            """
-            <div class="workspace-module observability-module">
-                <div class="workspace-module-head">
-                    <div class="section-title">Progressive Telemetry</div>
-                    <div class="section-subtitle">
-                        Runtime usage and observability revealed as agents complete.
-                    </div>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        st.markdown(
-            f'<div class="observability-grid">{telemetry_html}</div>',
-            unsafe_allow_html=True,
-        )
-
-
-def render_sql_and_results(sql: str, df: pd.DataFrame) -> None:
-    st.markdown(
-        """
-        <div class="workspace-shell">
-            <div class="section-title">Analytics Workspace</div>
-            <div class="section-subtitle">SQL generation and result exploration inside the same dark command surface.</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    left, right = st.columns([1.05, 1.35])
-    with left:
-        st.markdown(
-            """
-            <div class="workspace-panel">
-                <div class="section-title">Generated SQL</div>
-                <div class="section-subtitle">Inspectable query output from the AI workflow.</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.code(sql or "-- CSV mode: no SQL generated", language="sql")
-
-    with right:
-        st.markdown(
-            """
-            <div class="workspace-panel">
-                <div class="section-title">Result Explorer</div>
-                <div class="section-subtitle">Interactive preview of the returned dataset.</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        if df.empty:
-            st.warning("No data found for this query.")
-        else:
-            st.dataframe(df, width="stretch", height=360)
-
-
-def render_sql_card(sql: str) -> None:
-    if not sql:
-        return
-    st.markdown(
-        """
-        <div class="workspace-shell compact-shell">
-            <div class="section-title">SQL Generation</div>
-            <div class="section-subtitle">Collapsed by default to keep the workspace dense and operator-focused.</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    with st.expander("SQL Trace", expanded=False):
-        st.code(sql, language="sql")
-
-
-def render_result_table_card(df: pd.DataFrame, height: int = 240) -> None:
-    if df.empty:
-        return
-    st.markdown(
-        """
-        <div class="workspace-shell compact-shell">
-            <div class="section-title">Result Explorer</div>
-            <div class="section-subtitle">Compact dataset preview inside the live analytics workspace.</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.dataframe(df, width="stretch", height=height)
-
-
-def render_recommendation_card(recommendations: list[str]) -> None:
-    if not recommendations:
-        recommendations = ["Run another question to unlock recommendations from a richer result set."]
-
-    body = "".join([f'<div class="workspace-list-item">{item}</div>' for item in recommendations])
-    render_response_card(
-        "AI Recommendations",
-        "Suggested next actions based on the current result shape and workflow state.",
-        body,
-        tone="recommendation-module",
-    )
-
-
-def render_observability_card(telemetry: dict, trace: list[dict]) -> None:
-    latest_status = trace[-1]["status"] if trace else "pending"
-    latest_step = trace[-1]["step"] if trace else "Awaiting run"
-    telemetry_bits = [
-        ("Model", telemetry.get("model") or "Unavailable"),
-        ("Total Tokens", f'{telemetry.get("total_tokens", 0):,}'),
-        ("Latency", f'{telemetry.get("latency_ms", 0)} ms'),
-        ("Cost", f'${telemetry.get("cost_usd", 0.0):.6f}'),
-        ("Latest Step", latest_step),
-        ("Status", latest_status.title()),
-    ]
-    body = "".join(
-        [
-            f"""
-            <div class="observability-metric">
-                <div class="observability-label">{label}</div>
-                <div class="observability-value">{value}</div>
-            </div>
-            """
-            for label, value in telemetry_bits
-        ]
-    )
-    render_response_card(
-        "Observability",
-        "Operational telemetry across model usage, workflow state, and execution behavior.",
-        f'<div class="observability-grid">{body}</div>',
-        tone="observability-module",
-    )
-
-
-def render_executive_summary(question: str, df: pd.DataFrame, exec_time: float | None, telemetry: dict) -> None:
-    shape_text = f"{len(df):,} rows x {len(df.columns)} columns"
-    lead_column = df.columns[0] if not df.empty else "N/A"
-    body = f"""
-    <div class="summary-stat-strip">
-        <div class="summary-stat">
-            <div class="summary-stat-label">Question</div>
-            <div class="summary-stat-value">{question or "Awaiting prompt"}</div>
-        </div>
-        <div class="summary-stat">
-            <div class="summary-stat-label">Dataset Shape</div>
-            <div class="summary-stat-value">{shape_text}</div>
-        </div>
-        <div class="summary-stat">
-            <div class="summary-stat-label">Primary Dimension</div>
-            <div class="summary-stat-value">{lead_column}</div>
-        </div>
-    </div>
-    <div class="executive-callout">
-        Latest workflow completed in {exec_time:.2f}s with {telemetry.get("total_tokens", 0):,} tokens processed.
-        The current dataset is ready for executive review, SQL inspection, and follow-up analysis.
-    </div>
-    """
-    render_response_card(
-        "Executive Insight Summary",
-        "Top-level readout for operators, analysts, and decision-makers.",
-        body,
-        tone="summary-module",
-    )
-
-
-def render_activity_feed(items: list[dict]) -> None:
-    body = "".join(
-        [
-            f"""
-            <div class="activity-item">
-                <div class="activity-dot {item.get("tone", "live")}"></div>
-                <div class="activity-copy">
-                    <div class="activity-title">{item["title"]}</div>
-                    <div class="activity-subtitle">{item["subtitle"]}</div>
-                </div>
-                <div class="activity-time">{item["time"]}</div>
-            </div>
-            """
-            for item in items
-        ]
-    )
-    render_response_card(
-        "Recent AI Activity",
-        "Operational feed showing the last meaningful system and copilot events.",
-        body,
-        tone="default-module",
-    )
-
-
-def render_agent_row(agents: list[dict]) -> None:
-    body = '<div class="agent-row">' + "".join(
-        [
-            f"""
-            <div class="agent-pill {'agent-pill-active' if agent.get("active") else ''}">
-                <div class="agent-pill-top">
-                    <span class="agent-pill-name">{agent["name"]}</span>
-                    <span class="agent-pill-status">{agent["status"]}</span>
-                </div>
-                <div class="agent-pill-copy">{agent["caption"]}</div>
-            </div>
-            """
-            for agent in agents
-        ]
-    ) + "</div>"
-    render_response_card(
-        "Active Orchestration Agents",
-        "Default runtime posture across the orchestration stack before the next workflow begins.",
-        body,
-        tone="default-module",
-    )
+        markdown_html(progressive_telemetry_html(telemetry))
 
 
 def render_telemetry_panel(telemetry: dict) -> None:
-    st.markdown(
-        """
-        <div class="section-card compact-card">
-            <div class="section-title">Model Telemetry</div>
-            <div class="section-subtitle">Runtime visibility into token usage, latency, and model execution.</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    markdown_html(
+        section_header_html(
+            "Model Telemetry",
+            "Runtime visibility into token usage, latency, and model execution.",
+        )
     )
     if not telemetry:
         st.info("Run a database query to see model telemetry.")
@@ -766,39 +620,211 @@ def render_telemetry_panel(telemetry: dict) -> None:
         st.caption("Usage metadata was unavailable for one or more workflow steps.")
 
 
+# ---------------------------------------------------------------------------
+# Result, SQL, and dataset sections
+# ---------------------------------------------------------------------------
+
+
+def render_sql_and_results(sql: str, df: pd.DataFrame) -> None:
+    markdown_html(
+        section_header_html(
+            "Analytics Workspace",
+            "SQL generation and result exploration inside the same dark command surface.",
+            class_name="workspace-shell",
+        )
+    )
+    left, right = st.columns([1.05, 1.35])
+    with left:
+        markdown_html(
+            section_header_html(
+                "Generated SQL",
+                "Inspectable query output from the AI workflow.",
+                class_name="workspace-panel",
+            )
+        )
+        st.code(sql or "-- CSV mode: no SQL generated", language="sql")
+
+    with right:
+        markdown_html(
+            section_header_html(
+                "Result Explorer",
+                "Interactive preview of the returned dataset.",
+                class_name="workspace-panel",
+            )
+        )
+        if df.empty:
+            st.warning("No data found for this query.")
+        else:
+            st.dataframe(df, width="stretch", height=360)
+
+
+def render_sql_card(sql: str) -> None:
+    if not sql:
+        return
+    markdown_html(
+        section_header_html(
+            "SQL Generation",
+            "Collapsed by default to keep the workspace dense and operator-focused.",
+            class_name="workspace-shell compact-shell",
+        )
+    )
+    with st.expander("SQL Trace", expanded=False):
+        st.code(sql, language="sql")
+
+
+def render_result_table_card(df: pd.DataFrame, height: int = 240) -> None:
+    if df.empty:
+        return
+    markdown_html(
+        section_header_html(
+            "Result Explorer",
+            "Compact dataset preview inside the live analytics workspace.",
+            class_name="workspace-shell compact-shell",
+        )
+    )
+    st.dataframe(df, width="stretch", height=height)
+
+
+# ---------------------------------------------------------------------------
+# Recommendation and lower workspace cards
+# ---------------------------------------------------------------------------
+
+
+def render_recommendation_card(recommendations: list[str]) -> str:
+    if not recommendations:
+        recommendations = ["Run another question to unlock recommendations from a richer result set."]
+
+    body = "".join(f'<div class="workspace-list-item">{escape_html(item)}</div>' for item in recommendations)
+    return render_response_card(
+        "AI Recommendations",
+        "Suggested next actions based on the current result shape and workflow state.",
+        body,
+        tone="recommendation-module",
+    )
+
+
+def render_observability_card(telemetry: dict, trace: list[dict]) -> str:
+    latest_status = trace[-1]["status"] if trace else "pending"
+    latest_step = trace[-1]["step"] if trace else "Awaiting run"
+    telemetry_bits = [
+        ("Model", telemetry.get("model") or "Unavailable"),
+        ("Total Tokens", f'{telemetry.get("total_tokens", 0):,}'),
+        ("Latency", f'{telemetry.get("latency_ms", 0)} ms'),
+        ("Cost", f'${telemetry.get("cost_usd", 0.0):.6f}'),
+        ("Latest Step", latest_step),
+        ("Status", latest_status.title()),
+    ]
+    return render_response_card(
+        "Observability",
+        "Operational telemetry across model usage, workflow state, and execution behavior.",
+        f'<div class="observability-grid">{metric_grid_html(telemetry_bits)}</div>',
+        tone="observability-module",
+    )
+
+
+def render_executive_summary(question: str, df: pd.DataFrame, exec_time: float | None, telemetry: dict) -> str:
+    shape_text = f"{len(df):,} rows x {len(df.columns)} columns"
+    lead_column = df.columns[0] if not df.empty else "N/A"
+    exec_time_text = f"{exec_time:.2f}s" if exec_time is not None else "pending runtime"
+    body = (
+        f'<div class="summary-stat-strip">'
+        f'<div class="summary-stat">'
+        f'<div class="summary-stat-label">Question</div>'
+        f'<div class="summary-stat-value">{escape_html(question or "Awaiting prompt")}</div>'
+        f"</div>"
+        f'<div class="summary-stat">'
+        f'<div class="summary-stat-label">Dataset Shape</div>'
+        f'<div class="summary-stat-value">{escape_html(shape_text)}</div>'
+        f"</div>"
+        f'<div class="summary-stat">'
+        f'<div class="summary-stat-label">Primary Dimension</div>'
+        f'<div class="summary-stat-value">{escape_html(lead_column)}</div>'
+        f"</div>"
+        f"</div>"
+        f'<div class="executive-callout">'
+        f"Latest workflow completed in {escape_html(exec_time_text)} with "
+        f'{escape_html(f"{telemetry.get("total_tokens", 0):,}")} tokens processed. '
+        f"The current dataset is ready for executive review, SQL inspection, and follow-up analysis."
+        f"</div>"
+    )
+    return render_response_card(
+        "Executive Insight Summary",
+        "Top-level readout for operators, analysts, and decision-makers.",
+        body,
+        tone="summary-module",
+    )
+
+
+def render_activity_feed(items: list[dict]) -> str:
+    body = "".join(
+        (
+            f'<div class="activity-item">'
+            f'<div class="activity-dot {escape_html(item.get("tone", "live"))}"></div>'
+            f'<div class="activity-copy">'
+            f'<div class="activity-title">{escape_html(item["title"])}</div>'
+            f'<div class="activity-subtitle">{escape_html(item["subtitle"])}</div>'
+            f"</div>"
+            f'<div class="activity-time">{escape_html(item["time"])}</div>'
+            f"</div>"
+        )
+        for item in items
+    )
+    return render_response_card(
+        "Recent AI Activity",
+        "Operational feed showing the last meaningful system and copilot events.",
+        body,
+        tone="default-module",
+    )
+
+
+def render_agent_row(agents: list[dict]) -> str:
+    pills = []
+    for agent in agents:
+        active_class = "agent-pill-active" if agent.get("active") else ""
+        pills.append(
+            f'<div class="agent-pill {active_class}">'
+            f'<div class="agent-pill-top">'
+            f'<span class="agent-pill-name">{escape_html(agent["name"])}</span>'
+            f'<span class="agent-pill-status">{escape_html(agent["status"])}</span>'
+            f"</div>"
+            f'<div class="agent-pill-copy">{escape_html(agent["caption"])}</div>'
+            f"</div>"
+        )
+
+    return render_response_card(
+        "Active Orchestration Agents",
+        "Default runtime posture across the orchestration stack before the next workflow begins.",
+        f'<div class="agent-row">{"".join(pills)}</div>',
+        tone="default-module",
+    )
+
+
+# ---------------------------------------------------------------------------
+# History
+# ---------------------------------------------------------------------------
+
+
+def history_card_html(item: dict) -> str:
+    return (
+        f'<div class="timeline-card">'
+        f'<div class="timeline-step">Question</div>'
+        f'<div class="timeline-status" style="color:#f8fafc;">{escape_html(item["question"])}</div>'
+        f'<div class="timeline-detail">Rows: {escape_html(item["rows"])}<br/>SQL: '
+        f'<code>{escape_html(item["sql"] or "N/A")}</code></div>'
+        f"</div>"
+    )
+
+
 def render_history(history: list[dict]) -> None:
-    st.markdown(
-        """
-        <div class="section-card compact-card">
-            <div class="section-title">Query History</div>
-            <div class="section-subtitle">Recent workflow runs, generated SQL, and row counts.</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    markdown_html(
+        section_header_html(
+            "Query History",
+            "Recent workflow runs, generated SQL, and row counts.",
+        )
     )
     if not history:
         st.info("No query history yet.")
         return
 
     for item in reversed(history[-10:]):
-        st.markdown(
-            f"""
-            <div class="timeline-card">
-                <div class="timeline-step">Question</div>
-                <div class="timeline-status" style="color:#f8fafc;">{item["question"]}</div>
-                <div class="timeline-detail">Rows: {item["rows"]}<br/>SQL: <code>{item["sql"] or "N/A"}</code></div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-
-def render_footer() -> None:
-    st.markdown(
-        """
-        <div class="footer-note">
-            Built with Streamlit and OpenAI for AI-native analytics workflows.
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        markdown_html(history_card_html(item))

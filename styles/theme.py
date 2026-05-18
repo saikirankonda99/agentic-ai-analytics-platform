@@ -23,7 +23,7 @@ def get_theme_css() -> str:
             radial-gradient(circle at top right, rgba(86, 204, 242, 0.16), transparent 24%),
             linear-gradient(180deg, #0a0f1c 0%, #08111f 42%, #09111b 100%);
         color: var(--text);
-        min-height: 100vh;
+        min-height: auto;
     }
 
     html, body, #root, .stApp, [data-testid="stApp"], [data-testid="stAppViewContainer"] {
@@ -31,7 +31,7 @@ def get_theme_css() -> str:
         padding: 0;
         background: #0a0f1c !important;
         color: var(--text) !important;
-        min-height: 100vh;
+        min-height: auto;
     }
 
     html,
@@ -61,7 +61,25 @@ def get_theme_css() -> str:
             radial-gradient(circle at top right, rgba(86, 204, 242, 0.08), transparent 22%),
             linear-gradient(180deg, #0a0f1c 0%, #08111f 45%, #09111b 100%) !important;
         color: var(--text) !important;
-        min-height: 100vh;
+        }
+
+    [data-testid="stAppViewContainer"],
+    [data-testid="stMain"],
+    [data-testid="stMain"] > div,
+    section[data-testid="stMain"],
+    section[data-testid="stMain"] > div,
+    [data-testid="stMainBlockContainer"],
+    [data-testid="stMainBlockContainer"] > div,
+    [data-testid="stVerticalBlockBorderWrapper"],
+    [data-testid="stVerticalBlockBorderWrapper"] > div,
+    [data-testid="stVerticalBlock"],
+    [data-testid="stVerticalBlock"] > div,
+    [data-testid="stHorizontalBlock"],
+    [data-testid="stHorizontalBlock"] > div,
+    [data-testid="column"],
+    [data-testid="column"] > div {
+        min-height: 0 !important;
+        height: auto !important;
     }
 
     [data-testid="stMainBlockContainer"],
@@ -87,7 +105,7 @@ def get_theme_css() -> str:
 
     .block-container {
         padding-top: 0 !important;
-        padding-bottom: 0.08rem !important;
+        padding-bottom: 0 !important;
         padding-left: 1.25rem;
         padding-right: 1.25rem;
         max-width: 1380px;
@@ -163,7 +181,7 @@ def get_theme_css() -> str:
     .dashboard-shell {
         display: flex;
         flex-direction: column;
-        gap: 1rem;
+        gap: 0.72rem;
     }
 
     .hero-card,
@@ -183,7 +201,7 @@ def get_theme_css() -> str:
 
     .hero-card {
         border-radius: 24px;
-        padding: 1rem 1.25rem 1.1rem;
+        padding: clamp(0.75rem, 1.6vw, 1rem) clamp(0.9rem, 2vw, 1.25rem);
         background:
             linear-gradient(135deg, rgba(47, 128, 237, 0.18), rgba(14, 20, 35, 0.92) 45%),
             linear-gradient(180deg, rgba(18, 26, 43, 0.92), rgba(10, 15, 28, 0.94));
@@ -214,9 +232,9 @@ def get_theme_css() -> str:
 
     .hero-badges {
         display: flex;
-        gap: 0.65rem;
+        gap: 0.5rem;
         flex-wrap: wrap;
-        margin-top: 0.8rem;
+        margin-top: 0.65rem;
     }
 
     .hero-badge {
@@ -232,12 +250,12 @@ def get_theme_css() -> str:
     .chat-card,
     .table-card {
         border-radius: 22px;
-        padding: 0.95rem 1rem;
+        padding: 0.78rem 0.9rem;
     }
 
     .workspace-shell {
         border-radius: 26px;
-        padding: 0.78rem 0.9rem;
+        padding: 0.66rem 0.82rem;
         background:
             linear-gradient(180deg, rgba(11, 18, 31, 0.94), rgba(9, 16, 28, 0.96));
         transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
@@ -245,14 +263,14 @@ def get_theme_css() -> str:
 
     .workspace-panel {
         border-radius: 22px;
-        padding: 0.82rem 0.9rem;
+        padding: 0.68rem 0.82rem;
         background:
             linear-gradient(180deg, rgba(16, 24, 40, 0.9), rgba(10, 16, 29, 0.92));
         transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
     }
 
     .compact-shell {
-        margin-bottom: 0.45rem;
+        margin-bottom: 0.25rem;
     }
 
     .workspace-shell:hover,
@@ -266,7 +284,7 @@ def get_theme_css() -> str:
     }
 
     .compact-card {
-        padding-bottom: 0.95rem;
+        padding-bottom: 0.72rem;
     }
 
     .section-title {
@@ -278,13 +296,13 @@ def get_theme_css() -> str:
     .section-subtitle {
         color: var(--muted);
         font-size: 0.9rem;
-        margin-bottom: 1rem;
+        margin-bottom: 0.62rem;
     }
 
     .kpi-card {
         border-radius: 20px;
-        padding: 1rem 1.05rem;
-        min-height: 112px;
+        padding: 0.84rem 0.94rem;
+        min-height: 92px;
         background:
             linear-gradient(180deg, rgba(24, 35, 58, 0.95), rgba(14, 20, 35, 0.92));
     }
@@ -311,8 +329,8 @@ def get_theme_css() -> str:
 
     .glass-widget {
         border-radius: 22px;
-        padding: 1rem 1.05rem;
-        min-height: 132px;
+        padding: 0.84rem 0.94rem;
+        min-height: 104px;
         background:
             linear-gradient(180deg, rgba(12, 18, 34, 0.74), rgba(17, 27, 46, 0.58));
         position: relative;
@@ -325,6 +343,7 @@ def get_theme_css() -> str:
         inset: 0;
         background: linear-gradient(135deg, rgba(86, 204, 242, 0.1), transparent 48%);
         pointer-events: none;
+        z-index: 0;
     }
 
     .glass-widget-top {
@@ -403,7 +422,7 @@ def get_theme_css() -> str:
     .timeline-card {
         border-radius: 20px;
         padding: 0.85rem 1rem;
-        min-height: 94px;
+        min-height: 0;
         background:
             linear-gradient(180deg, rgba(18, 26, 43, 0.9), rgba(13, 20, 35, 0.84));
     }
@@ -430,13 +449,13 @@ def get_theme_css() -> str:
 
     .workflow-empty {
         color: var(--muted);
-        padding: 1rem 0;
+        padding: 0.55rem 0;
     }
 
     .workflow-rail-shell {
         overflow-x: auto;
-        padding-bottom: 0.2rem;
-        margin-bottom: 0.45rem;
+        padding-bottom: 0.12rem;
+        margin-bottom: 0.25rem;
     }
 
     .workflow-rail {
@@ -456,8 +475,8 @@ def get_theme_css() -> str:
     .workflow-node {
         position: relative;
         flex: 1 1 auto;
-        min-height: 178px;
-        padding: 0.95rem 1rem;
+        min-height: 164px;
+        padding: 0.82rem 0.9rem;
         border-radius: 22px;
         border: 1px solid rgba(148, 163, 184, 0.14);
         background:
@@ -473,6 +492,7 @@ def get_theme_css() -> str:
         inset: 0;
         background: linear-gradient(135deg, rgba(86, 204, 242, 0.08), transparent 45%);
         pointer-events: none;
+        z-index: 0;
     }
 
     .workflow-node-top {
@@ -480,7 +500,7 @@ def get_theme_css() -> str:
         align-items: flex-start;
         justify-content: space-between;
         gap: 0.75rem;
-        margin-bottom: 0.85rem;
+        margin-bottom: 0.65rem;
         position: relative;
         z-index: 1;
     }
@@ -525,7 +545,7 @@ def get_theme_css() -> str:
         color: #d8e7f8;
         font-size: 0.85rem;
         line-height: 1.45;
-        min-height: 60px;
+        min-height: 48px;
     }
 
     .workflow-node-metadata {
@@ -534,7 +554,7 @@ def get_theme_css() -> str:
         display: flex;
         flex-wrap: wrap;
         gap: 0.45rem;
-        margin-top: 0.85rem;
+        margin-top: 0.62rem;
     }
 
     .workflow-node-metadata span {
@@ -555,6 +575,7 @@ def get_theme_css() -> str:
         background: linear-gradient(90deg, rgba(86, 204, 242, 0.18), rgba(148, 163, 184, 0.26));
         position: relative;
         opacity: 0.9;
+        pointer-events: none;
     }
 
     .workflow-connector::after {
@@ -567,6 +588,7 @@ def get_theme_css() -> str:
         border-top: 2px solid rgba(148, 163, 184, 0.28);
         border-right: 2px solid rgba(148, 163, 184, 0.28);
         transform: rotate(45deg);
+        pointer-events: none;
     }
 
     .active-agent {
@@ -592,8 +614,8 @@ def get_theme_css() -> str:
 
     .response-card {
         border-radius: 20px;
-        padding: 1rem 1.05rem;
-        margin-bottom: 0.85rem;
+        padding: 0.82rem 0.94rem;
+        margin-bottom: 0.55rem;
         border: 1px solid rgba(148, 163, 184, 0.12);
         box-shadow: var(--shadow);
         backdrop-filter: blur(14px);
@@ -627,8 +649,8 @@ def get_theme_css() -> str:
 
     .workspace-module {
         border-radius: 24px;
-        padding: 0.88rem 0.94rem;
-        margin-bottom: 0.62rem;
+        padding: 0.72rem 0.84rem;
+        margin-bottom: 0.42rem;
         border: 1px solid rgba(148, 163, 184, 0.14);
         box-shadow: var(--shadow);
         backdrop-filter: blur(16px);
@@ -644,7 +666,7 @@ def get_theme_css() -> str:
     }
 
     .workspace-module-head {
-        margin-bottom: 0.58rem;
+        margin-bottom: 0.42rem;
     }
 
     .workspace-module .section-subtitle {
@@ -683,13 +705,13 @@ def get_theme_css() -> str:
     .summary-stat-strip {
         display: grid;
         grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 0.85rem;
-        margin-bottom: 0.9rem;
+        gap: 0.62rem;
+        margin-bottom: 0.62rem;
     }
 
     .summary-stat {
         border-radius: 18px;
-        padding: 0.85rem 0.9rem;
+        padding: 0.68rem 0.78rem;
         background: rgba(148, 163, 184, 0.06);
         border: 1px solid rgba(148, 163, 184, 0.12);
     }
@@ -716,16 +738,16 @@ def get_theme_css() -> str:
         color: #e6f0fb;
         font-size: 0.92rem;
         line-height: 1.6;
-        padding: 0.95rem 1rem;
+        padding: 0.72rem 0.82rem;
         border-radius: 18px;
         background: rgba(148, 163, 184, 0.05);
         border: 1px solid rgba(148, 163, 184, 0.1);
     }
 
     .workspace-list-item {
-        padding: 0.8rem 0.9rem;
+        padding: 0.62rem 0.76rem;
         border-radius: 16px;
-        margin-bottom: 0.55rem;
+        margin-bottom: 0.4rem;
         color: #ebf4ff;
         background: rgba(148, 163, 184, 0.05);
         border: 1px solid rgba(148, 163, 184, 0.1);
@@ -741,7 +763,7 @@ def get_theme_css() -> str:
         grid-template-columns: 14px 1fr auto;
         gap: 0.75rem;
         align-items: start;
-        padding: 0.75rem 0;
+        padding: 0.55rem 0;
         border-bottom: 1px solid rgba(148, 163, 184, 0.08);
     }
 
@@ -794,12 +816,12 @@ def get_theme_css() -> str:
     .agent-row {
         display: grid;
         grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 0.75rem;
+        gap: 0.55rem;
     }
 
     .agent-pill {
         border-radius: 18px;
-        padding: 0.85rem 0.9rem;
+        padding: 0.68rem 0.76rem;
         background: rgba(148, 163, 184, 0.05);
         border: 1px solid rgba(148, 163, 184, 0.1);
         transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
@@ -853,7 +875,7 @@ def get_theme_css() -> str:
         grid-template-columns: 56px 110px 1fr;
         gap: 0.7rem;
         align-items: start;
-        padding: 0.68rem 0.8rem;
+        padding: 0.52rem 0.68rem;
         border-radius: 16px;
         background: rgba(148, 163, 184, 0.05);
         border: 1px solid rgba(148, 163, 184, 0.08);
@@ -888,12 +910,12 @@ def get_theme_css() -> str:
     .observability-grid {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 0.8rem;
+        gap: 0.58rem;
     }
 
     .observability-metric {
         border-radius: 18px;
-        padding: 0.72rem 0.82rem;
+        padding: 0.56rem 0.68rem;
         background: rgba(148, 163, 184, 0.05);
         border: 1px solid rgba(148, 163, 184, 0.1);
     }
@@ -910,6 +932,27 @@ def get_theme_css() -> str:
         border: 1px solid rgba(148, 163, 184, 0.12);
         box-shadow: 0 16px 38px rgba(2, 6, 23, 0.26);
         backdrop-filter: blur(18px);
+    }
+
+    .stButton,
+    .stDownloadButton,
+    [data-testid="stFormSubmitButton"],
+    [data-testid="stFileUploader"],
+    [data-testid="stRadio"],
+    [data-testid="stToggle"],
+    [data-testid="stSelectbox"],
+    [data-testid="stMultiSelect"],
+    [data-testid="stTextInput"],
+    [data-testid="stTextArea"],
+    [data-testid="stChatInput"] button,
+    [data-testid="stChatInput"] textarea,
+    [data-testid="stChatInput"] input,
+    div[data-baseweb="select"],
+    div[data-baseweb="base-input"],
+    div[data-baseweb="input"] {
+        position: relative;
+        z-index: 36;
+        pointer-events: auto;
     }
 
     div[data-testid="stMetric"] {
@@ -991,6 +1034,7 @@ def get_theme_css() -> str:
         background:
             linear-gradient(180deg, rgba(15, 23, 42, 0.1), rgba(10, 15, 28, 0.3));
         pointer-events: none;
+        z-index: 0;
     }
 
     [data-testid="stChatInputContainer"],
@@ -1068,6 +1112,18 @@ def get_theme_css() -> str:
     [data-testid="stToolbarActions"] {
         background: transparent !important;
         color: var(--text) !important;
+    }
+
+    .element-container {
+        margin-bottom: 0.28rem !important;
+    }
+
+    [data-testid="stVerticalBlock"] {
+        gap: 0.45rem !important;
+    }
+
+    [data-testid="stHorizontalBlock"] {
+        gap: 0.65rem !important;
     }
 
     [data-testid="stAppViewBlockContainer"],
@@ -1159,12 +1215,13 @@ def get_theme_css() -> str:
         text-align: center;
         color: var(--muted);
         font-size: 0.84rem;
-        padding: 0.65rem 0 0.1rem;
+        padding: 0.4rem 0 0;
     }
 
     @media (max-width: 992px) {
         .block-container {
             padding-top: 0 !important;
+            padding-bottom: 0 !important;
             padding-left: 0.85rem;
             padding-right: 0.85rem;
         }
@@ -1173,7 +1230,7 @@ def get_theme_css() -> str:
         .section-card,
         .chat-card,
         .table-card {
-            padding: 1rem;
+            padding: 0.78rem;
         }
 
         .workflow-rail {
@@ -1181,7 +1238,7 @@ def get_theme_css() -> str:
         }
 
         .workflow-node {
-            min-height: 190px;
+            min-height: 176px;
         }
 
         .summary-stat-strip,
