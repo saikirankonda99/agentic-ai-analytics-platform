@@ -6,12 +6,19 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from backend.services import WorkflowEvent, WorkflowStageProgress, WorkflowTelemetry, orchestration_service
+from backend.services import (
+    AgentExecution,
+    WorkflowEvent,
+    WorkflowStageProgress,
+    WorkflowTelemetry,
+    orchestration_service,
+)
 
 
 SERVICE_NAME = "agentic-ai-analytics-backend"
 SERVICE_VERSION = "0.1.0"
 WorkflowStatus = Literal["queued", "running", "completed", "failed"]
+AgentStatus = Literal["queued", "running", "completed", "failed"]
 WorkflowStageName = Literal[
     "planning",
     "schema_analysis",
@@ -60,6 +67,13 @@ class WorkflowEventResponse(BaseModel):
     message: str
 
 
+class AgentExecutionResponse(BaseModel):
+    agent_name: str
+    agent_role: str
+    assigned_stage: WorkflowStageName
+    agent_status: AgentStatus
+
+
 class WorkflowEventsResponse(BaseModel):
     workflow_id: str
     events: list[WorkflowEventResponse]
@@ -73,6 +87,7 @@ class ExecuteResponse(BaseModel):
     telemetry: WorkflowTelemetryResponse
     current_stage: WorkflowStageName | None
     stage_progression: list[WorkflowStageProgressResponse]
+    agent_executions: list[AgentExecutionResponse]
 
 
 class WorkflowStatusResponse(BaseModel):
@@ -83,6 +98,7 @@ class WorkflowStatusResponse(BaseModel):
     telemetry: WorkflowTelemetryResponse
     current_stage: WorkflowStageName | None
     stage_progression: list[WorkflowStageProgressResponse]
+    agent_executions: list[AgentExecutionResponse]
 
 
 @router.get("/health")
@@ -106,6 +122,7 @@ def execute(payload: ExecuteRequest) -> ExecuteResponse:
         telemetry=_telemetry_response(execution.telemetry),
         current_stage=execution.current_stage,
         stage_progression=_stage_progression_response(execution.stage_progression),
+        agent_executions=_agent_executions_response(execution.agent_executions),
     )
 
 
@@ -123,6 +140,7 @@ def get_workflow(workflow_id: str) -> WorkflowStatusResponse:
         telemetry=_telemetry_response(workflow.telemetry),
         current_stage=workflow.current_stage,
         stage_progression=_stage_progression_response(workflow.stage_progression),
+        agent_executions=_agent_executions_response(workflow.agent_executions),
     )
 
 
@@ -173,6 +191,20 @@ def _events_response(events: tuple[WorkflowEvent, ...]) -> list[WorkflowEventRes
             message=event.message,
         )
         for event in events
+    ]
+
+
+def _agent_executions_response(
+    agent_executions: tuple[AgentExecution, ...],
+) -> list[AgentExecutionResponse]:
+    return [
+        AgentExecutionResponse(
+            agent_name=agent.agent_name,
+            agent_role=agent.agent_role,
+            assigned_stage=agent.assigned_stage,
+            agent_status=agent.agent_status,
+        )
+        for agent in agent_executions
     ]
 
 

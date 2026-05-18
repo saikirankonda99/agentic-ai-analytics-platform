@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 WorkflowCallback = Callable[[str, "WorkflowState", str, str], None]
 WorkflowLifecycleState = Literal["queued", "running", "completed", "failed"]
+AgentExecutionStatus = Literal["queued", "running", "completed", "failed"]
 WorkflowStage = Literal[
     "planning",
     "schema_analysis",
@@ -36,6 +37,14 @@ WORKFLOW_STAGES: tuple[WorkflowStage, ...] = (
     "execution",
     "insight_generation",
 )
+STAGE_AGENTS: dict[WorkflowStage, tuple[str, str]] = {
+    "planning": ("planner_agent", "Workflow planner"),
+    "schema_analysis": ("schema_agent", "Schema analyst"),
+    "sql_generation": ("sql_agent", "SQL generator"),
+    "validation": ("validation_agent", "Query validator"),
+    "execution": ("execution_agent", "Query executor"),
+    "insight_generation": ("insight_agent", "Insight generator"),
+}
 
 
 @dataclass(frozen=True)
@@ -62,6 +71,14 @@ class WorkflowStageProgress:
 
 
 @dataclass(frozen=True)
+class AgentExecution:
+    agent_name: str
+    agent_role: str
+    assigned_stage: WorkflowStage
+    agent_status: AgentExecutionStatus
+
+
+@dataclass(frozen=True)
 class WorkflowEvent:
     timestamp: str
     event_type: WorkflowEventType
@@ -77,6 +94,7 @@ class OrchestrationExecution:
     telemetry: WorkflowTelemetry
     current_stage: WorkflowStage | None = None
     stage_progression: tuple[WorkflowStageProgress, ...] = ()
+    agent_executions: tuple[AgentExecution, ...] = ()
 
 
 class OrchestrationService:
@@ -144,6 +162,7 @@ class OrchestrationService:
             telemetry=self._build_telemetry(workflow, status),
             current_stage=workflow.current_stage,
             stage_progression=workflow.stage_progression,
+            agent_executions=workflow.agent_executions,
         )
         self._save_workflow(updated)
         self._append_event(
@@ -183,6 +202,10 @@ class OrchestrationService:
                     timestamp=datetime.now(timezone.utc).isoformat(),
                 ),
             ),
+            agent_executions=(
+                *workflow.agent_executions,
+                self._simulate_agent_execution(stage),
+            ),
         )
         self._save_workflow(updated)
         self._append_event(
@@ -210,6 +233,15 @@ class OrchestrationService:
 
     def _events_key(self, workflow_id: str) -> str:
         return f"{workflow_id}:events"
+
+    def _simulate_agent_execution(self, stage: WorkflowStage) -> AgentExecution:
+        agent_name, agent_role = STAGE_AGENTS[stage]
+        return AgentExecution(
+            agent_name=agent_name,
+            agent_role=agent_role,
+            assigned_stage=stage,
+            agent_status="completed",
+        )
 
     def _build_telemetry(
         self,
