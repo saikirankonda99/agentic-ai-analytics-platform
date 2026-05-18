@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Literal
 from uuid import uuid4
 
 from backend.ports import BackendConfig, InMemoryCache, InlineWorker
@@ -13,13 +13,14 @@ if TYPE_CHECKING:
 
 
 WorkflowCallback = Callable[[str, "WorkflowState", str, str], None]
+WorkflowLifecycleState = Literal["queued", "running", "completed", "failed"]
 
 
 @dataclass(frozen=True)
 class OrchestrationExecution:
     workflow_id: str
     question: str
-    status: str
+    status: WorkflowLifecycleState
     created_at: str
 
 
@@ -33,18 +34,44 @@ class OrchestrationService:
         execution = OrchestrationExecution(
             workflow_id=f"workflow:{uuid4()}",
             question=question,
-            status="accepted",
+            status="queued",
             created_at=datetime.now(timezone.utc).isoformat(),
         )
-        self.cache.set(execution.workflow_id, execution)
-        self.cache.set("workflow:latest", execution)
-        return execution
+        self._save_workflow(execution)
+
+        try:
+            self._transition_workflow(execution.workflow_id, "running")
+            return self._transition_workflow(execution.workflow_id, "completed")
+        except Exception:
+            return self._transition_workflow(execution.workflow_id, "failed")
 
     def get_workflow(self, workflow_id: str) -> OrchestrationExecution | None:
         workflow = self.cache.get(workflow_id)
         if isinstance(workflow, OrchestrationExecution):
             return workflow
         return None
+
+    def _save_workflow(self, workflow: OrchestrationExecution) -> None:
+        self.cache.set(workflow.workflow_id, workflow)
+        self.cache.set("workflow:latest", workflow)
+
+    def _transition_workflow(
+        self,
+        workflow_id: str,
+        status: WorkflowLifecycleState,
+    ) -> OrchestrationExecution:
+        workflow = self.get_workflow(workflow_id)
+        if workflow is None:
+            raise ValueError(f"Workflow not found: {workflow_id}")
+
+        updated = OrchestrationExecution(
+            workflow_id=workflow.workflow_id,
+            question=workflow.question,
+            status=status,
+            created_at=workflow.created_at,
+        )
+        self._save_workflow(updated)
+        return updated
 
 
 class AnalyticsBackendService:

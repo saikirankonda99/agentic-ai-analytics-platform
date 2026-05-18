@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -10,6 +11,7 @@ from backend.services import orchestration_service
 
 SERVICE_NAME = "agentic-ai-analytics-backend"
 SERVICE_VERSION = "0.1.0"
+WorkflowStatus = Literal["queued", "running", "completed", "failed"]
 
 router = APIRouter(tags=["system"])
 
@@ -21,14 +23,14 @@ class ExecuteRequest(BaseModel):
 class ExecuteResponse(BaseModel):
     workflow_id: str
     question: str
-    status: str
+    status: WorkflowStatus
     timestamp: str
 
 
 class WorkflowStatusResponse(BaseModel):
     workflow_id: str
     question: str
-    status: str
+    status: WorkflowStatus
     created_at: str
 
 
