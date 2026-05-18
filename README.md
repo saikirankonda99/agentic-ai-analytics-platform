@@ -16,28 +16,36 @@ Current deployment supports SQLite and CSV-backed datasets with isolated user wo
 
 ---
 
-# Why This Project Exists
+# Why I Built This
 
-Most NL-to-SQL demos stop at query generation. Real systems fail after generation:
+I started this project after noticing that most text-to-SQL demos work for about 30 seconds before things start breaking.
 
-- queries hallucinate valid-looking but incorrect logic
-- generated SQL becomes unsafe
-- analytical context disappears between turns
-- no observability exists for debugging failures
-- no evaluation framework measures correctness
-- no isolation exists between users or datasets
+Simple prompts were usually fine:
+- "top customers by revenue"
+- "sales by country"
+- "monthly revenue trends"
 
-This project was built to explore the engineering problems that emerge when LLM-based analytics systems move from demos into production-style workflows.
+The problems started once queries became conversational.
 
-The architecture treats SQL generation as one component inside a broader analytical system that includes:
+Users would ask things like:
+> "Now compare that against last quarter"
 
-- semantic grounding
-- query guardrails
-- autonomous insight surfacing
-- conversational memory
-- multi-step investigations
-- evaluation harnesses
-- telemetry and cost monitoring
+or
+
+> "Only show the top regions from the previous result"
+
+and the system would completely lose context or generate SQL that technically executed but answered the wrong question.
+
+One of the more frustrating issues early on was GPT generating joins against columns that sounded reasonable but didn’t actually exist in the schema. In a few cases the SQL compiled successfully and returned believable-looking results, which was worse than failing outright because the mistake was harder to notice.
+
+At that point the project became less about prompt engineering and more about:
+- validation
+- debugging visibility
+- conversational state
+- evaluation
+- execution safety
+
+A surprising amount of the work ended up going into handling failure cases rather than improving generation quality itself.
 
 ---
 
@@ -196,17 +204,21 @@ The architecture intentionally abstracts execution logic to support PostgreSQL, 
 
 ---
 
-## Why Provider Abstraction
+## Why Provider Abstraction Exists
 
-`llm.py` isolates model providers from orchestration logic.
+I originally wired the project directly to the OpenAI SDK and quickly regretted it once the orchestration logic started growing.
 
-This prevents tight coupling to a single vendor and allows future migration toward:
-- OpenAI
-- Claude
-- Bedrock-hosted models
+Prompt formatting, retries, response parsing, token accounting, and provider-specific quirks were leaking into unrelated parts of the codebase. I hit a similar problem on an earlier Claude experiment where changing SDK versions forced changes across multiple files.
+
+`llm.py` exists mainly to keep provider-specific logic isolated.
+
+Right now the implementation still primarily targets OpenAI, but the abstraction layer makes it easier to experiment with:
+- Claude via Bedrock
 - local inference endpoints
+- fallback provider routing
+- provider-specific retry behavior
 
-without rewriting analytical workflows.
+without rewriting investigation or execution workflows.
 
 ---
 
@@ -517,17 +529,22 @@ CSV uploads are also supported for isolated custom dataset analysis.
 
 # Challenges Encountered During Development
 
-Some recurring engineering problems during implementation:
+Some of the harder problems were not the ones I expected going into the project.
 
-- controlling hallucinated joins
-- reducing invalid aggregation generation
-- handling malformed SQL correction loops
-- maintaining conversational context consistency
-- preventing schema drift during CSV uploads
-- balancing latency against deeper reasoning chains
-- keeping prompts deterministic across workflows
+One recurring issue was hallucinated columns. GPT would generate things like `customer_revenue` or `regional_sales_total` even when those columns didn’t exist. Schema grounding reduced this quite a bit, but it still showed up occasionally when prompts became long or conversational context drifted.
 
-These issues significantly influenced the architecture.
+Another annoying issue was malformed correction loops. Sometimes the retry flow would bounce between two different invalid SQL queries indefinitely because each correction introduced a new syntax problem. Retry limits and stricter validation logic were added after that started showing up repeatedly during testing.
+
+CSV uploads also introduced problems I didn’t initially think about. If a user uploaded a new dataset mid-session, conversational memory could reference tables or columns from the previous schema. That forced me to add memory invalidation logic tied to workspace state.
+
+Token growth became another issue once investigation chains got longer. Earlier versions kept appending too much historical context into prompts, which increased latency and cost pretty quickly.
+
+There are still cases where:
+- aggregation logic becomes overly complex
+- anomaly detection over-surfaces weak trends
+- long conversational chains drift semantically over time
+
+Those are still being worked on.
 
 ---
 
