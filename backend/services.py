@@ -22,6 +22,12 @@ WorkflowStage = Literal[
     "execution",
     "insight_generation",
 ]
+WorkflowEventType = Literal[
+    "workflow_created",
+    "lifecycle_transition",
+    "stage_transition",
+    "telemetry_update",
+]
 WORKFLOW_STAGES: tuple[WorkflowStage, ...] = (
     "planning",
     "schema_analysis",
@@ -56,6 +62,13 @@ class WorkflowStageProgress:
 
 
 @dataclass(frozen=True)
+class WorkflowEvent:
+    timestamp: str
+    event_type: WorkflowEventType
+    message: str
+
+
+@dataclass(frozen=True)
 class OrchestrationExecution:
     workflow_id: str
     question: str
@@ -81,6 +94,11 @@ class OrchestrationService:
             telemetry=WorkflowTelemetry(),
         )
         self._save_workflow(execution)
+        self._append_event(
+            execution.workflow_id,
+            "workflow_created",
+            f"Workflow created for question: {question}",
+        )
 
         try:
             self._transition_workflow(execution.workflow_id, "running")
@@ -95,6 +113,15 @@ class OrchestrationService:
         if isinstance(workflow, OrchestrationExecution):
             return workflow
         return None
+
+    def get_events(self, workflow_id: str) -> tuple[WorkflowEvent, ...] | None:
+        if self.get_workflow(workflow_id) is None:
+            return None
+
+        events = self.cache.get(self._events_key(workflow_id))
+        if isinstance(events, tuple):
+            return events
+        return ()
 
     def _save_workflow(self, workflow: OrchestrationExecution) -> None:
         self.cache.set(workflow.workflow_id, workflow)
@@ -119,6 +146,17 @@ class OrchestrationService:
             stage_progression=workflow.stage_progression,
         )
         self._save_workflow(updated)
+        self._append_event(
+            workflow_id,
+            "lifecycle_transition",
+            f"Workflow status changed to {status}.",
+        )
+        if updated.telemetry != workflow.telemetry:
+            self._append_event(
+                workflow_id,
+                "telemetry_update",
+                f"Workflow telemetry updated for {status} status.",
+            )
         return updated
 
     def _transition_stage(
@@ -147,7 +185,31 @@ class OrchestrationService:
             ),
         )
         self._save_workflow(updated)
+        self._append_event(
+            workflow_id,
+            "stage_transition",
+            f"Workflow stage completed: {stage}.",
+        )
         return updated
+
+    def _append_event(
+        self,
+        workflow_id: str,
+        event_type: WorkflowEventType,
+        message: str,
+    ) -> None:
+        event = WorkflowEvent(
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            event_type=event_type,
+            message=message,
+        )
+        events = self.cache.get(self._events_key(workflow_id))
+        if not isinstance(events, tuple):
+            events = ()
+        self.cache.set(self._events_key(workflow_id), (*events, event))
+
+    def _events_key(self, workflow_id: str) -> str:
+        return f"{workflow_id}:events"
 
     def _build_telemetry(
         self,

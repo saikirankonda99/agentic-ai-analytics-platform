@@ -6,7 +6,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from backend.services import WorkflowStageProgress, WorkflowTelemetry, orchestration_service
+from backend.services import WorkflowEvent, WorkflowStageProgress, WorkflowTelemetry, orchestration_service
 
 
 SERVICE_NAME = "agentic-ai-analytics-backend"
@@ -19,6 +19,12 @@ WorkflowStageName = Literal[
     "validation",
     "execution",
     "insight_generation",
+]
+WorkflowEventType = Literal[
+    "workflow_created",
+    "lifecycle_transition",
+    "stage_transition",
+    "telemetry_update",
 ]
 
 router = APIRouter(tags=["system"])
@@ -46,6 +52,17 @@ class WorkflowStageProgressResponse(BaseModel):
     stage: WorkflowStageName
     status: WorkflowStatus
     timestamp: str
+
+
+class WorkflowEventResponse(BaseModel):
+    timestamp: str
+    event_type: WorkflowEventType
+    message: str
+
+
+class WorkflowEventsResponse(BaseModel):
+    workflow_id: str
+    events: list[WorkflowEventResponse]
 
 
 class ExecuteResponse(BaseModel):
@@ -109,6 +126,18 @@ def get_workflow(workflow_id: str) -> WorkflowStatusResponse:
     )
 
 
+@router.get("/workflow/{workflow_id}/events", response_model=WorkflowEventsResponse)
+def get_workflow_events(workflow_id: str) -> WorkflowEventsResponse:
+    events = orchestration_service.get_events(workflow_id)
+    if events is None:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    return WorkflowEventsResponse(
+        workflow_id=workflow_id,
+        events=_events_response(events),
+    )
+
+
 def _telemetry_response(telemetry: WorkflowTelemetry) -> WorkflowTelemetryResponse:
     return WorkflowTelemetryResponse(
         started_at=telemetry.started_at,
@@ -133,6 +162,17 @@ def _stage_progression_response(
             timestamp=stage.timestamp,
         )
         for stage in stage_progression
+    ]
+
+
+def _events_response(events: tuple[WorkflowEvent, ...]) -> list[WorkflowEventResponse]:
+    return [
+        WorkflowEventResponse(
+            timestamp=event.timestamp,
+            event_type=event.event_type,
+            message=event.message,
+        )
+        for event in events
     ]
 
 
