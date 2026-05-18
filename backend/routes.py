@@ -9,6 +9,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse
 
+from backend.runtime import orchestration_runtime
 from backend.services import (
     AgentExecution,
     WorkflowEvent,
@@ -131,8 +132,7 @@ def health() -> dict[str, str]:
 
 @router.post("/execute", response_model=ExecuteResponse)
 def execute(payload: ExecuteRequest, background_tasks: BackgroundTasks) -> ExecuteResponse:
-    execution = orchestration_service.create_workflow(payload.question)
-    background_tasks.add_task(orchestration_service.run_workflow, execution.workflow_id)
+    execution = orchestration_runtime.submit(payload.question, background_tasks)
     return ExecuteResponse(
         workflow_id=execution.workflow_id,
         question=execution.question,

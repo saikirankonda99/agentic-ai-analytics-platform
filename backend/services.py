@@ -156,12 +156,24 @@ class OrchestrationService:
 
     def run_workflow(self, workflow_id: str) -> OrchestrationExecution:
         try:
-            self._transition_workflow(workflow_id, "running")
+            self.start_workflow(workflow_id)
             for stage in WORKFLOW_STAGES:
-                self._transition_stage(workflow_id, stage)
-            return self._transition_workflow(workflow_id, "completed")
+                self.complete_stage(workflow_id, stage)
+            return self.complete_workflow(workflow_id)
         except Exception:
-            return self._transition_workflow(workflow_id, "failed")
+            return self.fail_workflow(workflow_id)
+
+    def start_workflow(self, workflow_id: str) -> OrchestrationExecution:
+        return self._transition_workflow(workflow_id, "running")
+
+    def complete_workflow(self, workflow_id: str) -> OrchestrationExecution:
+        return self._transition_workflow(workflow_id, "completed")
+
+    def fail_workflow(self, workflow_id: str) -> OrchestrationExecution:
+        return self._transition_workflow(workflow_id, "failed")
+
+    def complete_stage(self, workflow_id: str, stage: WorkflowStage) -> OrchestrationExecution:
+        return self._transition_stage(workflow_id, stage)
 
     def get_workflow(self, workflow_id: str) -> OrchestrationExecution | None:
         return self.workflow_storage.get(workflow_id)
