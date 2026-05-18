@@ -1,78 +1,93 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-from openai import OpenAI
-import os
+from __future__ import annotations
 
-from db import run_query, get_schema
-from guardrails import is_safe_sql
-from llm import generate_sql
+from typing import Any
 
-app = FastAPI()
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+from backend.services import backend_service
 
 
-# ---------------- REQUEST MODEL ---------------- #
-class QueryRequest(BaseModel):
+app = FastAPI(
+    title="Agentic Analytics Backend",
+    version="0.2.0",
+    description="Service layer for query orchestration, telemetry, investigations, and executive briefings.",
+)
+
+
+class QueryExecutionRequest(BaseModel):
     question: str
+    semantic_context: dict[str, Any] | None = None
+    conversation_context: dict[str, Any] | None = None
+    workspace_context: dict[str, Any] | None = None
 
 
-# ---------------- SAFE RUN ---------------- #
-def safe_run(sql, schema):
-    try:
-        return run_query(sql)
-    except Exception as e:
-        fix_prompt = f"""
-Fix this SQL query.
-
-Schema:
-{schema}
-
-Broken SQL:
-{sql}
-
-Error:
-{str(e)}
-
-Return ONLY corrected SQL.
-"""
-        response = client.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=[{"role": "user", "content": fix_prompt}],
-            temperature=0
-        )
-
-        fixed_sql = response.choices[0].message.content.strip()
-        return run_query(fixed_sql)
+class InvestigationRequest(BaseModel):
+    question: str
+    sql: str
+    insight_state: dict[str, Any] = Field(default_factory=dict)
+    semantic_context: dict[str, Any] | None = None
+    max_queries: int = 3
 
 
-# ---------------- MAIN ENDPOINT ---------------- #
+class ExecutiveBriefingRequest(BaseModel):
+    targets: list[str] = Field(default_factory=lambda: ["revenue", "customers", "orders", "growth", "anomalies"])
+    semantic_context: dict[str, Any] | None = None
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
 @app.post("/query")
-def query_data(req: QueryRequest):
-    question = req.question
-
-    schema = get_schema()
-    sql = generate_sql(question, schema)
-
-    if not is_safe_sql(sql):
-        return {"error": "Unsafe SQL detected"}
-
+def execute_query(req: QueryExecutionRequest) -> dict[str, Any]:
     try:
-        cols, rows = safe_run(sql, schema)
-
-        return {
-            "question": question,
-            "sql": sql,
-            "columns": cols,
-            "rows": rows,
-            "count": len(rows)
-        }
-
-    except Exception as e:
-        return {"error": str(e)}
+        return backend_service.execute_query(
+            req.question,
+            semantic_context=req.semantic_context,
+            conversation_context=req.conversation_context,
+            workspace_context=req.workspace_context,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-# ---------------- HEALTH CHECK ---------------- #
+@app.get("/workflow/status")
+def workflow_status(run_id: str = "workflow:latest") -> dict[str, Any]:
+    return backend_service.workflow_status(run_id)
+
+
+@app.get("/telemetry")
+def telemetry(run_id: str = "workflow:latest") -> dict[str, Any]:
+    return backend_service.telemetry(run_id)
+
+
+@app.post("/investigations")
+def investigations(req: InvestigationRequest) -> dict[str, Any]:
+    try:
+        return backend_service.run_investigation(
+            question=req.question,
+            sql=req.sql,
+            insight_state=req.insight_state,
+            semantic_context=req.semantic_context,
+            max_queries=req.max_queries,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/briefings")
+def executive_briefings(req: ExecutiveBriefingRequest) -> dict[str, Any]:
+    try:
+        return backend_service.executive_briefing(
+            targets=req.targets,
+            semantic_context=req.semantic_context,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.get("/")
-def root():
-    return {"status": "API running"}
+def root() -> dict[str, str]:
+    return {"service": "agentic-analytics-backend", "status": "running"}

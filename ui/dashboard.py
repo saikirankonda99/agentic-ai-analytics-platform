@@ -15,6 +15,7 @@ STATUS_META = {
     "warning": {"label": "Warning", "color": "#fbbf24"},
     "error": {"label": "Error", "color": "#f87171"},
     "retry": {"label": "Warning", "color": "#fbbf24"},
+    "skipped": {"label": "Skipped", "color": "#94a3b8"},
     "pending": {"label": "Idle", "color": "#64748b"},
 }
 
@@ -22,20 +23,30 @@ WORKFLOW_STEPS = [
     "planner",
     "schema retrieval",
     "memory retrieval",
+    "monitoring",
     "sql generation",
     "validation",
     "reflection",
     "execution",
+    "autonomous insight",
+    "investigation",
+    "briefing",
+    "insight",
 ]
 
 STEP_META = {
     "planner": {"title": "Planner", "caption": "Intent routing"},
     "schema retrieval": {"title": "Schema", "caption": "Context retrieval"},
     "memory retrieval": {"title": "Memory", "caption": "History recall"},
+    "monitoring": {"title": "Monitoring", "caption": "Scheduled KPI checks"},
     "sql generation": {"title": "SQL Agent", "caption": "Query synthesis"},
     "validation": {"title": "Validation", "caption": "Guardrail checks"},
     "reflection": {"title": "Reflection", "caption": "Self-correction"},
     "execution": {"title": "Execution", "caption": "Warehouse run"},
+    "autonomous insight": {"title": "Insight Agent", "caption": "Signal detection"},
+    "investigation": {"title": "Investigation", "caption": "Root-cause drill-down"},
+    "briefing": {"title": "Briefing", "caption": "Executive summary"},
+    "insight": {"title": "Insight", "caption": "Executive readout"},
 }
 
 SAMPLE_PROMPTS = [
@@ -57,6 +68,12 @@ def escape_html(value: object) -> str:
 
 def markdown_html(html: str) -> None:
     st.markdown(html, unsafe_allow_html=True)
+
+
+def next_plotly_key(scope: str) -> str:
+    st.session_state.plotly_key_seq = st.session_state.get("plotly_key_seq", 0) + 1
+    run_id = st.session_state.get("run_id", "default")
+    return f"{scope}_{run_id}_{st.session_state.plotly_key_seq}"
 
 
 def section_header_html(title: str, subtitle: str, class_name: str = "section-card compact-card") -> str:
@@ -148,6 +165,18 @@ def render_sidebar() -> dict:
         clear_chat = st.button("Clear session", width="stretch")
         show_schema = st.toggle("Show database schema", value=False)
 
+        st.markdown("### Workspace")
+        current_identity = st.session_state.get("user_identity", {})
+        workspace_user = st.text_input("User", value=current_identity.get("user_id", "local.user"))
+        workspace_team = st.text_input("Team", value=current_identity.get("team_id", "default-team"))
+        workspace_role = st.selectbox(
+            "Role",
+            ["admin", "analyst", "viewer"],
+            index=["admin", "analyst", "viewer"].index(current_identity.get("role", "admin"))
+            if current_identity.get("role", "admin") in ["admin", "analyst", "viewer"]
+            else 0,
+        )
+
         st.markdown("### Sample Prompts")
         for query in SAMPLE_PROMPTS:
             markdown_html(f'<div class="sample-query">{escape_html(query)}</div>')
@@ -155,11 +184,43 @@ def render_sidebar() -> dict:
         st.markdown("### CSV Upload")
         uploaded_file = st.file_uploader("Upload CSV", type=["csv"], label_visibility="collapsed")
 
+        st.markdown("### Scheduled Monitoring")
+        monitoring_enabled = st.toggle(
+            "Enable scheduled checks",
+            value=st.session_state.get("monitoring_config", {}).get("enabled", False),
+        )
+        monitoring_targets = st.multiselect(
+            "KPI targets",
+            ["revenue", "customers", "orders", "growth", "anomalies"],
+            default=st.session_state.get("monitoring_config", {}).get(
+                "targets",
+                ["revenue", "customers", "orders", "growth", "anomalies"],
+            ),
+        )
+        monitoring_interval = st.selectbox(
+            "Cadence",
+            [15, 30, 60, 240, 1440],
+            index=[15, 30, 60, 240, 1440].index(
+                st.session_state.get("monitoring_config", {}).get("interval_minutes", 60)
+                if st.session_state.get("monitoring_config", {}).get("interval_minutes", 60) in [15, 30, 60, 240, 1440]
+                else 60
+            ),
+            format_func=lambda value: f"{value} min" if value < 1440 else "Daily",
+        )
+        run_monitoring = st.button("Run scheduled check", width="stretch")
+
         return {
             "nav": nav,
             "clear_chat": clear_chat,
             "show_schema": show_schema,
             "uploaded_file": uploaded_file,
+            "workspace_user": workspace_user,
+            "workspace_team": workspace_team,
+            "workspace_role": workspace_role,
+            "monitoring_enabled": monitoring_enabled,
+            "monitoring_targets": monitoring_targets,
+            "monitoring_interval": monitoring_interval,
+            "run_monitoring": run_monitoring,
         }
 
 
@@ -419,6 +480,8 @@ def active_workflow_step(latest_by_step: dict[str, dict]) -> str | None:
 
 def workflow_step_metadata(item: dict) -> str:
     telemetry_bits = []
+    if item.get("timestamp"):
+        telemetry_bits.append(f'<span>{escape_html(str(item["timestamp"])[11:19] or item["timestamp"])}</span>')
     if item.get("model"):
         telemetry_bits.append(f'<span>{escape_html(item["model"])}</span>')
     if item.get("latency_ms") is not None:
@@ -432,7 +495,8 @@ def workflow_node_html(step: str, item: dict, active_step: str | None, show_conn
     status = item.get("status", "idle")
     meta = STATUS_META.get(status, STATUS_META["pending"])
     step_info = STEP_META.get(step, {"title": step.title(), "caption": "Workflow step"})
-    is_active = status == "active" or (step == active_step and status not in {"success", "error", "warning"})
+    terminal_states = {"success", "error", "warning", "skipped"}
+    is_active = status == "active" or (step == active_step and status not in terminal_states)
     active_class = "active-agent" if is_active else ""
     connector = '<div class="workflow-connector"></div>' if show_connector else ""
 
@@ -513,7 +577,7 @@ def render_workflow_timeline(trace: list[dict], chart_key: str | None = None) ->
     if not trace:
         return
 
-    workflow_chart_key = chart_key or f"workflow_chart_{st.session_state.get('live_render_seq', 0)}"
+    workflow_chart_key = chart_key or next_plotly_key("workflow_chart")
     st.plotly_chart(
         build_workflow_chart(status_values),
         width="stretch",
@@ -578,12 +642,35 @@ def progressive_telemetry_html(telemetry: dict) -> str:
     )
 
 
+def assistant_stream_html(streams: dict | None) -> str:
+    active_streams = {key: value for key, value in (streams or {}).items() if value}
+    if not active_streams:
+        return ""
+
+    body = "".join(
+        (
+            f'<div class="workspace-list-item">'
+            f'<div class="observability-label">{escape_html(phase)}</div>'
+            f'<div class="workspace-body-copy">{escape_html(content).replace(chr(10), "<br/>")}</div>'
+            f"</div>"
+        )
+        for phase, content in active_streams.items()
+    )
+    return render_response_card(
+        "Streaming Assistant Output",
+        "Partial model responses are displayed as tokens arrive.",
+        body,
+        tone="insight-module",
+    )
+
+
 def render_live_execution_panel(
     question: str,
     trace: list[dict],
     logs: list[dict],
     telemetry: dict,
     chart_key: str | None = None,
+    assistant_streams: dict | None = None,
 ) -> None:
     markdown_html(live_execution_summary_html(question))
     render_workflow_timeline(trace, chart_key=chart_key)
@@ -591,6 +678,9 @@ def render_live_execution_panel(
     left, right = st.columns([1.2, 0.8])
     with left:
         markdown_html(execution_log_html(logs))
+        stream_html = assistant_stream_html(assistant_streams)
+        if stream_html:
+            markdown_html(stream_html)
     with right:
         markdown_html(progressive_telemetry_html(telemetry))
 
@@ -719,6 +809,220 @@ def render_observability_card(telemetry: dict, trace: list[dict]) -> str:
         "Operational telemetry across model usage, workflow state, and execution behavior.",
         f'<div class="observability-grid">{metric_grid_html(telemetry_bits)}</div>',
         tone="observability-module",
+    )
+
+
+def render_semantic_profile_card(context: dict | None) -> str:
+    if not context:
+        return render_response_card(
+            "Semantic Profile",
+            "Dataset roles inferred for orchestration agents.",
+            '<div class="workspace-body-copy">No active semantic profile yet.</div>',
+            tone="default-module",
+        )
+
+    items = [
+        ("Rows", f'{context.get("row_count"):,}' if context.get("row_count") is not None else "Schema"),
+        ("Columns", context.get("column_count", 0)),
+        ("Metrics", len(context.get("metrics", []))),
+        ("Dimensions", len(context.get("dimensions", [])) + len(context.get("categorical_fields", []))),
+        ("Time", len(context.get("time_columns", []))),
+        ("IDs", len(context.get("identifiers", []))),
+    ]
+    body = (
+        f'<div class="observability-grid">{metric_grid_html(items)}</div>'
+        f'<div class="workspace-body-copy">{escape_html(context.get("summary", ""))}</div>'
+    )
+    return render_response_card(
+        "Semantic Profile",
+        "Inferred metrics, dimensions, time fields, and identifiers for agent context.",
+        body,
+        tone="default-module",
+    )
+
+
+def render_analytics_memory_card(memory: dict | None) -> str:
+    memory = memory or {}
+    previous_chart = memory.get("previous_chart") or {}
+    items = [
+        ("Turns", len(memory.get("turns", []))),
+        ("Dimensions", len(memory.get("previous_dimensions", []))),
+        ("Metrics", len(memory.get("previous_metrics", []))),
+        ("Filters", len(memory.get("previous_filters", []))),
+        ("Chart", previous_chart.get("chart_type") or "Unset"),
+        ("Semantic", len(memory.get("semantic_summaries", []))),
+    ]
+    body = (
+        f'<div class="observability-grid">{metric_grid_html(items)}</div>'
+        f'<div class="workspace-body-copy">'
+        f'{escape_html(memory.get("previous_intent") or "No conversational analytics context captured yet.")}'
+        f"</div>"
+    )
+    return render_response_card(
+        "Analytics Memory",
+        "Session context available to follow-up planning, SQL generation, insights, and chart recommendations.",
+        body,
+        tone="default-module",
+    )
+
+
+def render_autonomous_insight_card(insight_state: dict | None) -> str:
+    insight_state = insight_state or {}
+    findings = insight_state.get("findings", [])
+    severity = insight_state.get("severity", "info")
+    if findings:
+        body = "".join(
+            (
+                f'<div class="workspace-list-item">'
+                f'<div class="observability-label">{escape_html(item.get("severity", "info")).upper()} · {escape_html(item.get("type", "signal"))}</div>'
+                f'<div class="workspace-body-copy"><strong>{escape_html(item.get("title", ""))}</strong><br/>{escape_html(item.get("detail", ""))}</div>'
+                f"</div>"
+            )
+            for item in findings[:5]
+        )
+    else:
+        body = '<div class="workspace-body-copy">No autonomous insight scan has run yet.</div>'
+    body = (
+        f'<div class="observability-grid">{metric_grid_html([("Severity", severity.title()), ("Findings", len(findings))])}</div>'
+        f"{body}"
+    )
+    return render_response_card(
+        "Autonomous Insights",
+        "Detected trends, anomalies, spikes, drops, outliers, and dominant categories.",
+        body,
+        tone="insight-module",
+    )
+
+
+def render_investigation_card(investigation_state: dict | None) -> str:
+    investigation_state = investigation_state or {}
+    queries = investigation_state.get("queries", [])
+    status = investigation_state.get("status", "idle")
+    telemetry = investigation_state.get("telemetry", {}) or {}
+    if queries:
+        body = "".join(
+            (
+                f'<div class="workspace-list-item">'
+                f'<div class="observability-label">{escape_html(item.get("status", "pending")).upper()} · {escape_html(item.get("finding_type", "signal"))}</div>'
+                f'<div class="workspace-body-copy"><strong>{escape_html(item.get("finding_title", ""))}</strong><br/>'
+                f'{escape_html(item.get("summary", ""))}</div>'
+                f"</div>"
+            )
+            for item in queries[:4]
+        )
+    else:
+        body = '<div class="workspace-body-copy">No autonomous drill-down investigation has run yet.</div>'
+    metric_items = [
+        ("Status", status.title()),
+        ("Queries", len(queries)),
+        ("Tokens", f'{telemetry.get("total_tokens", 0):,}'),
+        ("Cost", f'${telemetry.get("cost_usd", 0.0):.6f}'),
+    ]
+    body = (
+        f'<div class="observability-grid">{metric_grid_html(metric_items)}</div>'
+        f'<div class="workspace-body-copy">{escape_html(investigation_state.get("summary", ""))}</div>'
+        f"{body}"
+    )
+    return render_response_card(
+        "Drill-Down Investigation",
+        "Autonomous follow-up SQL probes for likely root-cause analysis.",
+        body,
+        tone="insight-module",
+    )
+
+
+def render_monitoring_card(monitoring_state: dict | None, config: dict | None = None) -> str:
+    monitoring_state = monitoring_state or {}
+    config = config or {}
+    checks = monitoring_state.get("checks", [])
+    items = [
+        ("Status", monitoring_state.get("status", "idle").title()),
+        ("Targets", len(config.get("targets", []))),
+        ("Checks", len(checks)),
+        ("Severity", monitoring_state.get("severity", "info").title()),
+        ("Cadence", f'{config.get("interval_minutes", 60)} min'),
+        ("Enabled", "Yes" if config.get("enabled") else "No"),
+    ]
+    check_html = "".join(
+        (
+            f'<div class="workspace-list-item">'
+            f'<div class="observability-label">{escape_html(item.get("severity", "info")).upper()} · {escape_html(item.get("target", ""))}</div>'
+            f'<div class="workspace-body-copy">{escape_html((item.get("insight") or {}).get("summary", ""))}</div>'
+            f"</div>"
+        )
+        for item in checks[:5]
+    )
+    if not check_html:
+        check_html = '<div class="workspace-body-copy">No scheduled monitoring run has executed yet.</div>'
+    body = (
+        f'<div class="observability-grid">{metric_grid_html(items)}</div>'
+        f'<div class="workspace-body-copy">{escape_html(monitoring_state.get("summary", ""))}</div>'
+        f"{check_html}"
+    )
+    return render_response_card(
+        "Scheduled AI Monitoring",
+        "Automated KPI checks for revenue, customers, orders, growth, and anomalies.",
+        body,
+        tone="observability-module",
+    )
+
+
+def render_executive_briefing_card(briefing_state: dict | None) -> str:
+    briefing_state = briefing_state or {}
+    sections = briefing_state.get("sections", [])
+    items = [
+        ("Status", briefing_state.get("status", "idle").title()),
+        ("Severity", briefing_state.get("severity", "info").title()),
+        ("Sections", len(sections)),
+        ("Generated", briefing_state.get("generated_at") or "Pending"),
+    ]
+    section_html = "".join(
+        (
+            f'<div class="workspace-list-item">'
+            f'<div class="observability-label">{escape_html(item.get("severity", "info")).upper()} · {escape_html(item.get("target", ""))}</div>'
+            f'<div class="workspace-body-copy"><strong>{escape_html(item.get("trend", ""))}</strong><br/>'
+            f'{escape_html(item.get("investigation", ""))}</div>'
+            f"</div>"
+        )
+        for item in sections[:5]
+    )
+    if not section_html:
+        section_html = '<div class="workspace-body-copy">No executive briefing has been generated yet.</div>'
+    body = (
+        f'<div class="observability-grid">{metric_grid_html(items)}</div>'
+        f'<div class="workspace-body-copy">{escape_html(briefing_state.get("summary", ""))}</div>'
+        f"{section_html}"
+    )
+    return render_response_card(
+        "Executive Briefing",
+        "KPI status, anomalies, trends, investigations, and severity levels from scheduled monitoring.",
+        body,
+        tone="summary-module",
+    )
+
+
+def render_workspace_card(identity: dict | None, memory: dict | None) -> str:
+    identity = identity or {}
+    memory = memory or {}
+    items = [
+        ("Workspace", identity.get("workspace_id", "default")),
+        ("Role", identity.get("role", "viewer").title()),
+        ("Queries", len(memory.get("query_history", []))),
+        ("Runs", len(memory.get("workflow_runs", []))),
+        ("Insights", len(memory.get("generated_insights", []))),
+        ("Datasets", len(memory.get("semantic_dataset_memory", {}))),
+    ]
+    body = (
+        f'<div class="observability-grid">{metric_grid_html(items)}</div>'
+        f'<div class="workspace-body-copy">Team {escape_html(identity.get("team_id", "default-team"))} '
+        f'is isolated for {escape_html(identity.get("display_name", identity.get("user_id", "user")))}. '
+        f'Auth provider is {escape_html(identity.get("auth_provider", "unconfigured"))}; role capabilities are ready for external auth integration.</div>'
+    )
+    return render_response_card(
+        "Enterprise Workspace",
+        "Authentication-ready user, team, RBAC, and persistent workspace memory.",
+        body,
+        tone="default-module",
     )
 
 

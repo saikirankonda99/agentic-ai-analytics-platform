@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime
 from typing import Any, Callable, TypedDict
 
+from analytics_memory import contextualize_followup, memory_prompt_block
 from db import get_schema, run_query
 from graph.cost_tracker import log_query_cost
 from graph.history_store import retrieve_similar_queries, save_query_to_history
 from guardrails import is_safe_sql
-from llm import DEFAULT_SQL_MODEL, generate_sql_with_telemetry
+from llm import DEFAULT_SQL_MODEL, generate_sql_with_telemetry, stream_sql_with_telemetry
+from workspace import workspace_prompt_block
 
 try:
     from langgraph.graph import END, StateGraph
@@ -26,6 +29,8 @@ class WorkflowTrace(TypedDict):
     step: str
     status: str
     detail: str
+    timestamp: str
+    phase: str
 
 
 class StepTelemetry(TypedDict):
@@ -47,6 +52,11 @@ class WorkflowState(TypedDict, total=False):
     sql: str
     columns: list[str]
     rows: list[Any]
+    semantic_context: dict[str, Any]
+    conversation_context: dict[str, Any]
+    workspace_context: dict[str, Any]
+    effective_question: str
+    followup_context: dict[str, Any]
     error: str | None
     retry_count: int
     last_error: str | None
@@ -54,6 +64,7 @@ class WorkflowState(TypedDict, total=False):
     last_failed_sql: str
     trace: list[WorkflowTrace]
     telemetry: dict[str, Any]
+    event: dict[str, Any]
 
 
 WorkflowEventCallback = Callable[[str, WorkflowState, str, str], None]
@@ -101,6 +112,12 @@ def _record_telemetry(state: WorkflowState, step_data: StepTelemetry) -> dict[st
     return telemetry
 
 
+def _merge_state(state: WorkflowState, update: WorkflowState) -> WorkflowState:
+    merged = WorkflowState(state)
+    merged.update(update)
+    return merged
+
+
 def _append_trace(
     state: WorkflowState,
     step: str,
@@ -108,8 +125,35 @@ def _append_trace(
     detail: str,
 ) -> list[WorkflowTrace]:
     trace = list(state.get("trace", []))
-    trace.append({"step": step, "status": status, "detail": detail})
+    trace.append(
+        {
+            "step": step,
+            "status": status,
+            "detail": detail,
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "phase": step,
+        }
+    )
     return trace
+
+
+def _skip_optional_reflection(state: WorkflowState) -> WorkflowState:
+    return {
+        "telemetry": _record_telemetry(
+            state,
+            _new_step_telemetry(
+                step="reflection",
+                model="workflow",
+                usage_available=False,
+            ),
+        ),
+        "trace": _append_trace(
+            state,
+            "reflection",
+            "skipped",
+            "No self-correction required after successful validation.",
+        ),
+    }
 
 
 def _emit_event(
@@ -121,18 +165,71 @@ def _emit_event(
 ) -> None:
     if callback is None:
         return
-    callback(phase, WorkflowState(state), step, detail)
+    event = {
+        "phase": step,
+        "status": phase,
+        "step": step,
+        "detail": detail,
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "perf_counter": time.perf_counter(),
+    }
+    snapshot = WorkflowState(state)
+    snapshot["event"] = event
+    callback(phase, snapshot, step, detail)
+
+
+def _emit_token_event(
+    callback: WorkflowEventCallback | None,
+    state: WorkflowState,
+    step: str,
+    token: str,
+    accumulated: str,
+    started: float,
+) -> None:
+    if callback is None:
+        return
+    approx_completion_tokens = max(1, len(accumulated.split()))
+    base_telemetry = dict(state.get("telemetry", {}))
+    base_steps = list(base_telemetry.get("steps", []))
+    partial_telemetry = {
+        **base_telemetry,
+        "steps": base_steps,
+        "model": base_telemetry.get("model") or DEFAULT_SQL_MODEL,
+        "completion_tokens": base_telemetry.get("completion_tokens", 0) + approx_completion_tokens,
+        "total_tokens": base_telemetry.get("total_tokens", 0) + approx_completion_tokens,
+        "latency_ms": base_telemetry.get("latency_ms", 0) + int((time.perf_counter() - started) * 1000),
+        "usage_available": base_telemetry.get("usage_available", False),
+    }
+    event = {
+        "phase": step,
+        "status": "streaming",
+        "step": step,
+        "detail": "Streaming assistant response.",
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "token": token,
+        "content": accumulated,
+        "telemetry": partial_telemetry,
+    }
+    snapshot = WorkflowState(state)
+    snapshot["event"] = event
+    snapshot["telemetry"] = partial_telemetry
+    callback("streaming", snapshot, step, "Streaming assistant response.")
 
 
 def planner_node(state: WorkflowState) -> WorkflowState:
     question = state["question"].strip()
+    followup_context = contextualize_followup(question, state.get("conversation_context"))
+    effective_question = followup_context.get("effective_question") or question
+    detail = "Follow-up prompt contextualized from analytics memory." if followup_context.get("is_followup") else "Question analyzed for SQL planning."
     return {
-        "plan": {"intent": question},
+        "effective_question": effective_question,
+        "followup_context": followup_context,
+        "plan": {"intent": effective_question, "original_question": question},
         "trace": _append_trace(
             state,
             "planner",
             "success",
-            "Question analyzed for SQL planning.",
+            detail,
         ),
     }
 
@@ -163,7 +260,7 @@ def schema_node(state: WorkflowState) -> WorkflowState:
 
 def memory_node(state: WorkflowState) -> WorkflowState:
     started = time.perf_counter()
-    examples = retrieve_similar_queries(state["question"], top_k=3)
+    examples = retrieve_similar_queries(state.get("effective_question") or state["question"], top_k=3)
     latency_ms = int((time.perf_counter() - started) * 1000)
     if examples:
         detail = f"Retrieved {len(examples)} similar example(s)."
@@ -191,7 +288,7 @@ def memory_node(state: WorkflowState) -> WorkflowState:
 
 
 def _build_generation_prompt(state: WorkflowState) -> str:
-    question = state["question"]
+    question = state.get("effective_question") or state["question"]
     memory_examples = state.get("memory_examples", [])
     memory_block = ""
     if memory_examples:
@@ -203,6 +300,10 @@ def _build_generation_prompt(state: WorkflowState) -> str:
         )
         memory_block = f"\n\nSimilar successful examples:\n{formatted_examples}"
 
+    semantic_block = state.get("semantic_context", {}).get("prompt_block", "")
+    conversation_block = memory_prompt_block(state.get("conversation_context"))
+    workspace_block = workspace_prompt_block(state.get("workspace_context"), question)
+
     if state.get("last_error") and state.get("last_failed_sql"):
         return f"""{question}
 
@@ -212,8 +313,8 @@ Previous SQL failed:
 Database error:
 {state['last_error']}
 
-Generate a corrected read-only SQL query.{memory_block}"""
-    return f"{question}{memory_block}"
+Generate a corrected read-only SQL query.{memory_block}{semantic_block}{conversation_block}{workspace_block}"""
+    return f"{question}{memory_block}{semantic_block}{conversation_block}{workspace_block}"
 
 
 def _build_reflection_prompt(state: WorkflowState) -> str:
@@ -231,7 +332,7 @@ def _build_reflection_prompt(state: WorkflowState) -> str:
     return f"""You are fixing a failed SQL query for a SQLite database.
 
 User question:
-{state['question']}
+{state.get('effective_question') or state['question']}
 
 Database schema:
 {state['schema']}
@@ -245,14 +346,29 @@ Database/runtime error:
 Error source:
 {state.get('last_error_source', 'unknown')}
 
-Return ONLY corrected read-only SQL. Do not explain anything.{memory_block}"""
+Return ONLY corrected read-only SQL. Do not explain anything.{memory_block}{state.get("semantic_context", {}).get("prompt_block", "")}{memory_prompt_block(state.get("conversation_context"))}{workspace_prompt_block(state.get("workspace_context"), state.get("effective_question") or state["question"])}"""
 
 
-def sql_generation_node(state: WorkflowState) -> WorkflowState:
+def sql_generation_node(
+    state: WorkflowState,
+    callback: WorkflowEventCallback | None = None,
+) -> WorkflowState:
     if state.get("error") and state.get("retry_count", 0) > MAX_RETRIES:
         return {}
 
-    generation_result = generate_sql_with_telemetry(_build_generation_prompt(state), state["schema"])
+    started = time.perf_counter()
+
+    def on_token(token: str, accumulated: str) -> None:
+        _emit_token_event(callback, state, "sql generation", token, accumulated, started)
+
+    if callback is not None:
+        generation_result = stream_sql_with_telemetry(
+            _build_generation_prompt(state),
+            state["schema"],
+            token_callback=on_token,
+        )
+    else:
+        generation_result = generate_sql_with_telemetry(_build_generation_prompt(state), state["schema"])
     sql = generation_result["sql"].strip()
     step_telemetry = _new_step_telemetry(step="sql generation", **generation_result["telemetry"])
     if not sql or sql.startswith("ERROR:"):
@@ -315,9 +431,24 @@ def validation_node(state: WorkflowState) -> WorkflowState:
     }
 
 
-def reflection_node(state: WorkflowState) -> WorkflowState:
+def reflection_node(
+    state: WorkflowState,
+    callback: WorkflowEventCallback | None = None,
+) -> WorkflowState:
     retry_count = state.get("retry_count", 0) + 1
-    reflection_result = generate_sql_with_telemetry(_build_reflection_prompt(state), state["schema"])
+    started = time.perf_counter()
+
+    def on_token(token: str, accumulated: str) -> None:
+        _emit_token_event(callback, state, "reflection", token, accumulated, started)
+
+    if callback is not None:
+        reflection_result = stream_sql_with_telemetry(
+            _build_reflection_prompt(state),
+            state["schema"],
+            token_callback=on_token,
+        )
+    else:
+        reflection_result = generate_sql_with_telemetry(_build_reflection_prompt(state), state["schema"])
     corrected_sql = reflection_result["sql"].strip()
     step_telemetry = _new_step_telemetry(step="reflection", **reflection_result["telemetry"])
 
@@ -420,6 +551,12 @@ def _route_after_validation(state: WorkflowState) -> str:
     return "execution"
 
 
+def reflection_skip_node(state: WorkflowState) -> WorkflowState:
+    if any(item.get("step") == "reflection" for item in state.get("trace", [])):
+        return {}
+    return _skip_optional_reflection(state)
+
+
 def _route_after_execution(state: WorkflowState) -> str:
     if state.get("error") and state.get("retry_count", 0) < MAX_RETRIES:
         return "reflection"
@@ -436,6 +573,7 @@ def build_workflow():
     graph.add_node("memory", memory_node)
     graph.add_node("sql_generation", sql_generation_node)
     graph.add_node("validation", validation_node)
+    graph.add_node("reflection_skip", reflection_skip_node)
     graph.add_node("reflection", reflection_node)
     graph.add_node("execution", execution_node)
 
@@ -449,10 +587,11 @@ def build_workflow():
         _route_after_validation,
         {
             "reflection": "reflection",
-            "execution": "execution",
+            "execution": "reflection_skip",
             "end": END,
         },
     )
+    graph.add_edge("reflection_skip", "execution")
     graph.add_conditional_edges(
         "execution",
         _route_after_execution,
@@ -469,7 +608,13 @@ def build_workflow():
 workflow = build_workflow()
 
 
-def _run_linear(question: str, callback: WorkflowEventCallback | None = None) -> WorkflowState:
+def _run_linear(
+    question: str,
+    callback: WorkflowEventCallback | None = None,
+    semantic_context: dict[str, Any] | None = None,
+    conversation_context: dict[str, Any] | None = None,
+    workspace_context: dict[str, Any] | None = None,
+) -> WorkflowState:
     state: WorkflowState = {
         "question": question,
         "error": None,
@@ -477,6 +622,9 @@ def _run_linear(question: str, callback: WorkflowEventCallback | None = None) ->
         "last_error": None,
         "last_error_source": None,
         "last_failed_sql": "",
+        "semantic_context": semantic_context or {},
+        "conversation_context": conversation_context or {},
+        "workspace_context": workspace_context or {},
         "telemetry": {
             "steps": [],
             "prompt_tokens": 0,
@@ -522,7 +670,7 @@ def _run_linear(question: str, callback: WorkflowEventCallback | None = None) ->
 
     while True:
         _emit_event(callback, "active", state, "sql generation", "Generating SQL candidate.")
-        state.update(sql_generation_node(state))
+        state.update(sql_generation_node(state, callback=callback))
         _emit_event(
             callback,
             "completed" if not state.get("error") else "warning",
@@ -545,10 +693,10 @@ def _run_linear(question: str, callback: WorkflowEventCallback | None = None) ->
         if state.get("error"):
             if state.get("retry_count", 0) < MAX_RETRIES:
                 _emit_event(callback, "active", state, "reflection", "Repairing SQL after validation failure.")
-                state.update(reflection_node(state))
+                state.update(reflection_node(state, callback=callback))
                 _emit_event(
                     callback,
-                    "warning" if not state.get("error") else "warning",
+                    "completed" if not state.get("error") else "warning",
                     state,
                     "reflection",
                     state.get("trace", [{}])[-1].get("detail", "Reflection finished."),
@@ -557,6 +705,16 @@ def _run_linear(question: str, callback: WorkflowEventCallback | None = None) ->
                     return state
                 continue
             return state
+
+        if not any(item.get("step") == "reflection" for item in state.get("trace", [])):
+            state.update(_skip_optional_reflection(state))
+            _emit_event(
+                callback,
+                "skipped",
+                state,
+                "reflection",
+                "No self-correction required after successful validation.",
+            )
 
         _emit_event(callback, "active", state, "execution", "Executing SQL against the database.")
         state.update(execution_node(state))
@@ -569,10 +727,10 @@ def _run_linear(question: str, callback: WorkflowEventCallback | None = None) ->
         )
         if state.get("error") and state.get("retry_count", 0) < MAX_RETRIES:
             _emit_event(callback, "active", state, "reflection", "Repairing SQL after execution failure.")
-            state.update(reflection_node(state))
+            state.update(reflection_node(state, callback=callback))
             _emit_event(
                 callback,
-                "warning" if not state.get("error") else "warning",
+                "completed" if not state.get("error") else "warning",
                 state,
                 "reflection",
                 state.get("trace", [{}])[-1].get("detail", "Reflection finished."),
@@ -583,7 +741,13 @@ def _run_linear(question: str, callback: WorkflowEventCallback | None = None) ->
         return state
 
 
-def run_workflow(question: str, callback: WorkflowEventCallback | None = None) -> WorkflowState:
+def run_workflow(
+    question: str,
+    callback: WorkflowEventCallback | None = None,
+    semantic_context: dict[str, Any] | None = None,
+    conversation_context: dict[str, Any] | None = None,
+    workspace_context: dict[str, Any] | None = None,
+) -> WorkflowState:
     initial_state: WorkflowState = {
         "question": question,
         "error": None,
@@ -592,6 +756,9 @@ def run_workflow(question: str, callback: WorkflowEventCallback | None = None) -
         "last_error_source": None,
         "last_failed_sql": "",
         "memory_examples": [],
+        "semantic_context": semantic_context or {},
+        "conversation_context": conversation_context or {},
+        "workspace_context": workspace_context or {},
         "telemetry": {
             "steps": [],
             "prompt_tokens": 0,
@@ -606,7 +773,13 @@ def run_workflow(question: str, callback: WorkflowEventCallback | None = None) -
     }
 
     if callback is not None or workflow is None:
-        return _run_linear(question, callback=callback)
+        return _run_linear(
+            question,
+            callback=callback,
+            semantic_context=semantic_context,
+            conversation_context=conversation_context,
+            workspace_context=workspace_context,
+        )
 
     result = workflow.invoke(initial_state)
     return WorkflowState(result)

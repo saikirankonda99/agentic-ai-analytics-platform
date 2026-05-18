@@ -1,11 +1,45 @@
 import os
 import time
+from datetime import datetime
 
 import pandas as pd
 import streamlit as st
 from openai import OpenAI
 
+from analytics_memory import (
+    contextualize_followup,
+    empty_analytics_memory,
+    is_chart_only_followup,
+    memory_prompt_block,
+    update_analytics_memory,
+)
+from autonomous_insights import analyze_result_set, empty_insight_state, insight_prompt_block
+from backend.services import execute_query_workflow
 from db import get_schema
+from investigation import (
+    empty_investigation_state,
+    investigation_prompt_block,
+    run_investigation,
+    should_investigate,
+)
+from llm import DEFAULT_SQL_MODEL, stream_text_with_telemetry
+from monitoring import (
+    default_monitoring_config,
+    empty_briefing_state,
+    empty_monitoring_state,
+    monitoring_due,
+    run_monitoring_checks,
+)
+from workspace import (
+    build_user_session,
+    default_user_session,
+    default_workspace_memory,
+    load_workspace_memory,
+    save_workspace_memory,
+    snapshot_workspace_run,
+    user_can,
+)
+from semantic import profile_dataframe, profile_schema, recommend_chart_fields, semantic_prompt_block
 from styles.theme import get_theme_css
 from ui.dashboard import (
     build_plotly_figure,
@@ -21,9 +55,17 @@ from ui.dashboard import (
     render_hero,
     render_history,
     render_kpi_cards,
+    next_plotly_key,
+    render_analytics_memory_card,
+    render_autonomous_insight_card,
+    render_investigation_card,
+    render_executive_briefing_card,
+    render_monitoring_card,
+    render_workspace_card,
     render_recommendation_card,
     render_result_table_card,
     render_response_card,
+    render_semantic_profile_card,
     render_sidebar,
     render_live_execution_panel,
     render_observability_card,
@@ -31,12 +73,6 @@ from ui.dashboard import (
     render_telemetry_panel,
     render_workflow_timeline,
 )
-
-try:
-    from graph.workflow import run_workflow
-except Exception:
-    run_workflow = None
-
 
 def get_openai_api_key():
     api_key = os.getenv("OPENAI_API_KEY")
@@ -109,8 +145,188 @@ Sample:
     return res.choices[0].message.content
 
 
+def build_insight_prompt(question, df):
+    sample = df.head(5).to_string()
+    semantic_block = semantic_prompt_block(st.session_state.get("semantic_context"))
+    conversation_block = memory_prompt_block(st.session_state.get("analytics_memory"))
+    autonomous_block = insight_prompt_block(st.session_state.get("autonomous_insights"))
+    investigation_block = investigation_prompt_block(st.session_state.get("investigation_state"))
+    scheduled_briefing_block = briefing_prompt_block(st.session_state.get("executive_briefing"))
+    return f"""
+Explain this SQL result in simple business terms for an analytics operator.
+
+Question:
+{question}
+
+Sample:
+{sample}
+{semantic_block}
+{conversation_block}
+{autonomous_block}
+{investigation_block}
+{scheduled_briefing_block}
+
+Write an executive-style insight brief. Prioritize critical or warning findings when present, and keep it concise and actionable.
+"""
+
+
+def stream_insight_narration(question, df, sql="", live_placeholder=None):
+    stream = st.session_state.streaming_workflow
+    base_trace = enrich_trace_with_telemetry(
+        st.session_state.workflow_trace,
+        st.session_state.workflow_telemetry,
+    )
+    stream["current_phase"] = "autonomous insight"
+    stream["trace"] = base_trace + [
+        {
+            "step": "autonomous insight",
+            "status": "active",
+            "detail": "Scanning result set for autonomous insights.",
+            "timestamp": current_timestamp(),
+            "phase": "autonomous insight",
+        }
+    ]
+    st.session_state.streaming_workflow = stream
+    append_live_log("autonomous insight", "Scanning result set for trends, anomalies, and concentration.", status="active")
+    st.session_state.autonomous_insights = analyze_result_set(df, question)
+    insight_severity = st.session_state.autonomous_insights.get("severity", "info")
+    scan_completed_at = current_timestamp()
+    stream = st.session_state.streaming_workflow
+    stream["trace"] = base_trace + [
+        {
+            "step": "autonomous insight",
+            "status": "success",
+            "detail": f"Insight scan completed with {insight_severity} severity.",
+            "timestamp": scan_completed_at,
+            "phase": "autonomous insight",
+            "severity": insight_severity,
+        },
+    ]
+    stream["current_phase"] = "autonomous insight"
+    stream.setdefault("assistant_streams", {})["autonomous insight"] = insight_prompt_block(
+        st.session_state.autonomous_insights
+    ).strip()
+    st.session_state.streaming_workflow = stream
+    sync_live_state_from_stream()
+    if live_placeholder is not None:
+        render_live_workspace_snapshot(question, live_placeholder)
+    append_live_log(
+        "autonomous insight",
+        f'Insight scan completed with {st.session_state.autonomous_insights.get("severity", "info")} severity.',
+    )
+    investigation_base_trace = stream["trace"]
+    post_investigation_trace = run_autonomous_investigation_phase(
+        question,
+        sql,
+        investigation_base_trace,
+        live_placeholder=live_placeholder,
+    )
+    insight_started_at = current_timestamp()
+    stream = st.session_state.streaming_workflow
+    stream["current_phase"] = "insight"
+    stream["trace"] = post_investigation_trace + [
+        {
+            "step": "insight",
+            "status": "active",
+            "detail": "Narrating executive insight brief.",
+            "timestamp": insight_started_at,
+            "phase": "insight",
+        }
+    ]
+    st.session_state.streaming_workflow = stream
+    append_live_log("insight", "Narrating executive insight brief.", status="active")
+
+    def on_token(token, accumulated):
+        stream = st.session_state.streaming_workflow
+        stream.setdefault("assistant_streams", {})["insight"] = accumulated
+        stream["updated_at"] = current_timestamp()
+        st.session_state.streaming_workflow = stream
+        sync_live_state_from_stream()
+        if live_placeholder is not None:
+            now = time.perf_counter()
+            if now - st.session_state.last_stream_render >= 0.08:
+                st.session_state.last_stream_render = now
+                st.session_state.live_render_seq += 1
+                render_live_workspace_snapshot(question, live_placeholder)
+
+    result = stream_text_with_telemetry(
+        build_insight_prompt(question, df),
+        model=DEFAULT_SQL_MODEL,
+        temperature=0.2,
+        token_callback=on_token,
+    )
+    insight = (result.get("text") or "").strip()
+    telemetry = result.get("telemetry", {})
+    st.session_state.latest_insight = "" if insight.startswith("ERROR:") else insight
+    if telemetry:
+        workflow_telemetry = dict(st.session_state.workflow_telemetry or {})
+        steps = list(workflow_telemetry.get("steps", []))
+        steps.append({"step": "insight", **telemetry})
+        workflow_telemetry.update(
+            {
+                "steps": steps,
+                "prompt_tokens": sum(item.get("prompt_tokens", 0) for item in steps),
+                "completion_tokens": sum(item.get("completion_tokens", 0) for item in steps),
+                "total_tokens": sum(item.get("total_tokens", 0) for item in steps),
+                "cost_usd": sum(item.get("cost_usd", 0.0) for item in steps),
+                "latency_ms": sum(item.get("latency_ms", 0) for item in steps),
+                "model": telemetry.get("model") or workflow_telemetry.get("model", ""),
+                "usage_available": any(item.get("usage_available", False) for item in steps),
+            }
+        )
+        st.session_state.workflow_telemetry = workflow_telemetry
+        stream = st.session_state.streaming_workflow
+        stream["telemetry"] = workflow_telemetry
+        st.session_state.streaming_workflow = stream
+
+    if insight.startswith("ERROR:"):
+        append_live_log("insight", insight, status="warning")
+    else:
+        stream = st.session_state.streaming_workflow
+        completed_at = current_timestamp()
+        trace_without_active = [
+            item
+            for item in stream.get("trace", [])
+            if not (item.get("step") == "insight" and item.get("status") == "active")
+        ]
+        stream["trace"] = trace_without_active + [
+            {
+                "step": "insight",
+                "status": "success",
+                "detail": "Executive insight brief completed.",
+                "timestamp": completed_at,
+                "phase": "insight",
+                "severity": insight_severity,
+            }
+        ]
+        stream.setdefault("assistant_streams", {})["insight"] = insight
+        st.session_state.streaming_workflow = stream
+        append_live_log("insight", "Insight narration completed.")
+
+    sync_live_state_from_stream()
+    if live_placeholder is not None:
+        st.session_state.live_render_seq += 1
+        render_live_workspace_snapshot(question, live_placeholder)
+    return st.session_state.latest_insight
+
+
 def build_ai_recommendations(df, telemetry, trace):
     recommendations = []
+    context = st.session_state.get("semantic_context", {})
+    memory = st.session_state.get("analytics_memory", {})
+    insight_state = st.session_state.get("autonomous_insights", {})
+    investigation_state = st.session_state.get("investigation_state", {})
+    if insight_state.get("severity") in {"warning", "critical"} and insight_state.get("findings"):
+        top_finding = insight_state["findings"][0]
+        recommendations.append(f"Prioritize the {top_finding.get('type', 'signal')} finding: {top_finding.get('title', '')}.")
+    if investigation_state.get("status") == "completed":
+        recommendations.append("Review the drill-down investigation summary before deciding whether to refine the query further.")
+    if context.get("metrics") and context.get("time_columns"):
+        recommendations.append("Trend the primary metric over the detected time field to identify momentum changes.")
+    if context.get("categorical_fields") and context.get("metrics"):
+        recommendations.append("Segment the leading metric by a categorical field to find concentration or outliers.")
+    if memory.get("previous_dimensions") and memory.get("previous_metrics"):
+        recommendations.append("Ask a focused follow-up by filtering the previous dimension or changing the chart type.")
     if not df.empty and len(df.columns) >= 2:
         recommendations.append("Compare the leading dimension against a secondary metric to identify outliers or concentration risk.")
     if len(df) > 20:
@@ -151,15 +367,34 @@ def init_session_state():
         "latest_sql": "",
         "latest_question": "",
         "latest_exec_time": None,
+        "latest_insight": "",
         "latest_mode": "database",
         "uploaded_name": None,
         "command_text": "",
         "run_id": "default",
         "run_counter": 0,
         "live_render_seq": 0,
+        "plotly_key_seq": 0,
         "live_trace": [],
         "live_logs": [],
         "live_telemetry": {},
+        "live_assistant_streams": {},
+        "streaming_workflow": {},
+        "semantic_context": {},
+        "semantic_memory": {},
+        "analytics_memory": empty_analytics_memory(),
+        "autonomous_insights": empty_insight_state(),
+        "investigation_state": empty_investigation_state(),
+        "monitoring_config": default_monitoring_config(),
+        "monitoring_state": empty_monitoring_state(),
+        "executive_briefing": empty_briefing_state(),
+        "monitoring_runs": [],
+        "pending_monitoring_run": False,
+        "user_identity": default_user_session(),
+        "workspace_memory": default_workspace_memory(default_user_session()),
+        "workspace_loaded": False,
+        "active_intent": "",
+        "last_stream_render": 0.0,
         "is_executing": False,
         "x_col": None,
         "y_col": None,
@@ -179,21 +414,190 @@ def clear_session():
     st.session_state.latest_sql = ""
     st.session_state.latest_question = ""
     st.session_state.latest_exec_time = None
+    st.session_state.latest_insight = ""
     st.session_state.latest_mode = "database"
     st.session_state.uploaded_name = None
     st.session_state.command_text = ""
     st.session_state.run_id = "default"
     st.session_state.run_counter = 0
     st.session_state.live_render_seq = 0
+    st.session_state.plotly_key_seq = 0
     st.session_state.live_trace = []
     st.session_state.live_logs = []
     st.session_state.live_telemetry = {}
+    st.session_state.live_assistant_streams = {}
+    st.session_state.streaming_workflow = {}
+    st.session_state.semantic_context = {}
+    st.session_state.semantic_memory = {}
+    st.session_state.analytics_memory = empty_analytics_memory()
+    st.session_state.autonomous_insights = empty_insight_state()
+    st.session_state.investigation_state = empty_investigation_state()
+    st.session_state.monitoring_config = default_monitoring_config()
+    st.session_state.monitoring_state = empty_monitoring_state()
+    st.session_state.executive_briefing = empty_briefing_state()
+    st.session_state.monitoring_runs = []
+    st.session_state.pending_monitoring_run = False
+    st.session_state.workspace_memory = default_workspace_memory(st.session_state.get("user_identity", default_user_session()))
+    st.session_state.workspace_loaded = False
+    st.session_state.active_intent = ""
+    st.session_state.last_stream_render = 0.0
     st.session_state.is_executing = False
     st.session_state.x_col = None
     st.session_state.y_col = None
     st.session_state.chart_type = "Bar"
     if "uploaded_df" in st.session_state:
         del st.session_state["uploaded_df"]
+
+
+def current_timestamp():
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def configure_workspace_session(user_id, team_id, role):
+    identity = build_user_session(user_id, team_id, role)
+    previous_workspace = st.session_state.get("user_identity", {}).get("workspace_id")
+    st.session_state.user_identity = identity
+    if not st.session_state.get("workspace_loaded") or previous_workspace != identity["workspace_id"]:
+        memory = load_workspace_memory(identity)
+        st.session_state.workspace_memory = memory
+        st.session_state.workspace_loaded = True
+        st.session_state.history = list(memory.get("query_history", []))[-10:]
+        st.session_state.semantic_memory = dict(memory.get("semantic_dataset_memory", {}))
+        if st.session_state.semantic_memory and not st.session_state.get("semantic_context"):
+            st.session_state.semantic_context = next(reversed(st.session_state.semantic_memory.values()))
+
+
+def persist_workspace_memory():
+    identity = st.session_state.get("user_identity", default_user_session())
+    st.session_state.workspace_memory = save_workspace_memory(identity, st.session_state.get("workspace_memory", {}))
+
+
+def persist_workspace_snapshot(question, intent, sql, df):
+    memory = snapshot_workspace_run(
+        st.session_state.get("workspace_memory", default_workspace_memory(st.session_state.get("user_identity"))),
+        question=question,
+        intent=intent,
+        sql=sql,
+        rows=len(df) if df is not None and not df.empty else 0,
+        workflow_trace=st.session_state.get("workflow_trace", []),
+        telemetry=st.session_state.get("workflow_telemetry", {}),
+        insights=st.session_state.get("autonomous_insights", {}),
+        investigation=st.session_state.get("investigation_state", {}),
+        semantic_memory=st.session_state.get("semantic_memory", {}),
+    )
+    st.session_state.workspace_memory = memory
+    persist_workspace_memory()
+
+
+def display_timestamp(value=None):
+    raw_value = value or current_timestamp()
+    try:
+        return datetime.fromisoformat(raw_value).strftime("%H:%M:%S")
+    except ValueError:
+        return time.strftime("%H:%M:%S")
+
+
+def initial_streaming_workflow(question):
+    started_at = current_timestamp()
+    return {
+        "question": question,
+        "run_id": st.session_state.run_id,
+        "status": "running",
+        "current_phase": "planner",
+        "started_at": started_at,
+        "updated_at": started_at,
+        "completed_at": None,
+        "events": [],
+        "trace": [],
+        "assistant_streams": {},
+        "telemetry": {
+            "steps": [],
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cost_usd": 0.0,
+            "latency_ms": 0,
+            "model": "",
+            "usage_available": False,
+        },
+    }
+
+
+def store_semantic_context(key, context):
+    if not context:
+        return
+    st.session_state.semantic_context = context
+    memory = dict(st.session_state.get("semantic_memory", {}))
+    memory[key] = context
+    st.session_state.semantic_memory = memory
+
+
+def ensure_schema_semantics():
+    memory = st.session_state.get("semantic_memory", {})
+    if "sql_schema" not in memory:
+        store_semantic_context("sql_schema", profile_schema(get_schema(), name="Chinook SQL schema"))
+    return st.session_state.semantic_memory["sql_schema"]
+
+
+def profile_active_dataframe(df, name):
+    context = profile_dataframe(df, name=name)
+    store_semantic_context(name, context)
+    return context
+
+
+def apply_chart_followup(question):
+    followup = contextualize_followup(question, st.session_state.get("analytics_memory"))
+    chart_type = followup.get("chart_type")
+    if chart_type:
+        st.session_state.chart_type = chart_type
+    return followup
+
+
+def current_chart_state():
+    return {
+        "x_col": st.session_state.get("x_col"),
+        "y_col": st.session_state.get("y_col"),
+        "chart_type": st.session_state.get("chart_type"),
+    }
+
+
+def remember_analytics_turn(question, effective_question, sql, df):
+    st.session_state.analytics_memory = update_analytics_memory(
+        st.session_state.get("analytics_memory"),
+        question=question,
+        effective_question=effective_question,
+        sql=sql,
+        df=df,
+        semantic_context=st.session_state.get("semantic_context"),
+        chart_state=current_chart_state(),
+    )
+
+
+def complete_chart_only_followup(question, followup):
+    st.session_state.messages.append({"role": "user", "content": question})
+    st.session_state.latest_question = question
+    st.session_state.active_intent = followup.get("effective_question", question)
+    st.session_state.streaming_workflow = initial_streaming_workflow(question)
+    append_live_log("planner", "Applied follow-up request to the existing visualization context.")
+    completed_at = current_timestamp()
+    stream = st.session_state.streaming_workflow
+    stream["status"] = "completed"
+    stream["completed_at"] = completed_at
+    stream["updated_at"] = completed_at
+    st.session_state.streaming_workflow = stream
+    sync_live_state_from_stream()
+    st.session_state.messages.append(
+        {
+            "role": "assistant",
+            "content": f"Updated the current visualization to {st.session_state.chart_type.lower()} chart mode.",
+        }
+    )
+    remember_analytics_turn(
+        question,
+        followup.get("effective_question", question),
+        st.session_state.get("latest_sql", ""),
+        st.session_state.get("latest_df"),
+    )
 
 
 def enrich_trace_with_telemetry(trace, telemetry):
@@ -209,28 +613,409 @@ def enrich_trace_with_telemetry(trace, telemetry):
     return enriched
 
 
-def append_live_log(step, message):
-    st.session_state.live_logs.append(
+def sync_live_state_from_stream():
+    stream = st.session_state.streaming_workflow or {}
+    st.session_state.live_trace = enrich_trace_with_telemetry(
+        stream.get("trace", []),
+        stream.get("telemetry", {}),
+    )
+    st.session_state.live_logs = [
         {
-            "time": time.strftime("%H:%M:%S"),
+            "time": display_timestamp(event.get("timestamp")),
+            "step": event.get("step") or event.get("phase") or "system",
+            "message": event.get("detail") or "",
+        }
+        for event in stream.get("events", [])
+    ]
+    st.session_state.live_telemetry = stream.get("telemetry", {})
+    st.session_state.live_assistant_streams = stream.get("assistant_streams", {})
+
+
+def persist_streaming_event(phase, state_snapshot, step, detail):
+    stream = st.session_state.streaming_workflow or initial_streaming_workflow(
+        st.session_state.get("latest_question") or st.session_state.get("command_text") or ""
+    )
+    event = dict(state_snapshot.get("event", {}))
+    timestamp = event.get("timestamp") or current_timestamp()
+    status = event.get("status") or phase
+    event.update(
+        {
+            "phase": event.get("phase") or step,
+            "status": status,
             "step": step,
-            "message": message,
+            "detail": detail,
+            "timestamp": timestamp,
         }
     )
 
+    if status == "streaming":
+        stream.setdefault("assistant_streams", {})[step] = event.get("content", "")
+        stream["telemetry"] = event.get("telemetry") or state_snapshot.get("telemetry") or stream.get("telemetry") or {}
+        stream["current_phase"] = step
+        stream["updated_at"] = timestamp
+        events = stream.setdefault("events", [])
+        streaming_detail = f"Streaming {step} tokens..."
+        if events and events[-1].get("status") == "streaming" and events[-1].get("step") == step:
+            events[-1].update({**event, "detail": streaming_detail})
+        else:
+            events.append({**event, "detail": streaming_detail})
+        st.session_state.streaming_workflow = stream
+        sync_live_state_from_stream()
+        return
+
+    stream["status"] = "running" if status == "active" else stream.get("status", "running")
+    stream["current_phase"] = step
+    stream["updated_at"] = timestamp
+    stream.setdefault("events", []).append(event)
+
+    telemetry = state_snapshot.get("telemetry") or stream.get("telemetry") or {}
+    stream["telemetry"] = telemetry
+
+    trace = enrich_trace_with_telemetry(state_snapshot.get("trace", []), telemetry)
+    if status == "active":
+        active_item = {
+            "step": step,
+            "status": "active",
+            "detail": detail,
+            "timestamp": timestamp,
+            "phase": step,
+        }
+        trace = trace + [active_item]
+    stream["trace"] = trace
+
+    st.session_state.streaming_workflow = stream
+    sync_live_state_from_stream()
+
+
+def append_live_log(step, message, timestamp=None, status="completed"):
+    event = {
+        "phase": step,
+        "status": status,
+        "step": step,
+        "detail": message,
+        "timestamp": timestamp or current_timestamp(),
+    }
+    stream = st.session_state.streaming_workflow or initial_streaming_workflow(
+        st.session_state.get("latest_question") or st.session_state.get("command_text") or ""
+    )
+    stream.setdefault("events", []).append(event)
+    stream["updated_at"] = event["timestamp"]
+    st.session_state.streaming_workflow = stream
+    sync_live_state_from_stream()
+
+
+def merge_investigation_telemetry(investigation_state):
+    investigation_telemetry = (investigation_state or {}).get("telemetry", {})
+    if not investigation_telemetry:
+        return
+    workflow_telemetry = dict(st.session_state.workflow_telemetry or {})
+    steps = list(workflow_telemetry.get("steps", [])) + list(investigation_telemetry.get("steps", []))
+    workflow_telemetry.update(
+        {
+            "steps": steps,
+            "prompt_tokens": sum(item.get("prompt_tokens", 0) for item in steps),
+            "completion_tokens": sum(item.get("completion_tokens", 0) for item in steps),
+            "total_tokens": sum(item.get("total_tokens", 0) for item in steps),
+            "cost_usd": sum(item.get("cost_usd", 0.0) for item in steps),
+            "latency_ms": sum(item.get("latency_ms", 0) for item in steps),
+            "model": investigation_telemetry.get("model") or workflow_telemetry.get("model", ""),
+            "usage_available": any(item.get("usage_available", False) for item in steps),
+        }
+    )
+    st.session_state.workflow_telemetry = workflow_telemetry
+    stream = st.session_state.streaming_workflow
+    stream["telemetry"] = workflow_telemetry
+    st.session_state.streaming_workflow = stream
+
+
+def merge_monitoring_telemetry(monitoring_state):
+    monitoring_telemetry = (monitoring_state or {}).get("telemetry", {})
+    if not monitoring_telemetry:
+        return
+    workflow_telemetry = dict(st.session_state.workflow_telemetry or {})
+    steps = list(workflow_telemetry.get("steps", [])) + list(monitoring_telemetry.get("steps", []))
+    workflow_telemetry.update(
+        {
+            "steps": steps,
+            "prompt_tokens": sum(item.get("prompt_tokens", 0) for item in steps),
+            "completion_tokens": sum(item.get("completion_tokens", 0) for item in steps),
+            "total_tokens": sum(item.get("total_tokens", 0) for item in steps),
+            "cost_usd": sum(item.get("cost_usd", 0.0) for item in steps),
+            "latency_ms": sum(item.get("latency_ms", 0) for item in steps),
+            "model": monitoring_telemetry.get("model") or workflow_telemetry.get("model", ""),
+            "usage_available": any(item.get("usage_available", False) for item in steps),
+        }
+    )
+    st.session_state.workflow_telemetry = workflow_telemetry
+    stream = st.session_state.streaming_workflow
+    stream["telemetry"] = workflow_telemetry
+    st.session_state.streaming_workflow = stream
+
+
+def briefing_prompt_block(briefing_state):
+    if not briefing_state or briefing_state.get("status") == "idle":
+        return ""
+    sections = briefing_state.get("sections", [])
+    section_text = "\n".join(
+        f"- [{item.get('severity', 'info')}] {item.get('target', '')}: {item.get('trend', '')}; {item.get('investigation', '')}"
+        for item in sections
+    )
+    return (
+        "\n\nScheduled executive briefing:\n"
+        f"{briefing_state.get('summary', '')}\n"
+        f"{section_text or '- No briefing sections'}"
+    )
+
+
+def run_monitoring_workflow(live_placeholder=None):
+    config = st.session_state.get("monitoring_config", default_monitoring_config())
+    targets = config.get("targets") or []
+    if not targets:
+        st.warning("Select at least one monitoring target.")
+        return
+    if not user_can(st.session_state.get("user_identity"), "monitor"):
+        st.warning("Your current workspace role does not allow scheduled monitoring.")
+        return
+
+    st.session_state.run_counter += 1
+    st.session_state.run_id = f"monitor_{st.session_state.run_counter}"
+    question = f"Scheduled monitoring: {', '.join(targets)}"
+    st.session_state.latest_question = question
+    st.session_state.latest_mode = "monitoring"
+    st.session_state.latest_insight = ""
+    st.session_state.streaming_workflow = initial_streaming_workflow(question)
+    st.session_state.live_trace = []
+    st.session_state.live_logs = []
+    st.session_state.live_telemetry = {}
+    st.session_state.live_assistant_streams = {}
+    st.session_state.workflow_trace = []
+    st.session_state.workflow_telemetry = {}
+    sync_live_state_from_stream()
+    append_live_log("monitoring", "Scheduled monitoring workflow started.", status="active")
+
+    started_at = current_timestamp()
+    stream = st.session_state.streaming_workflow
+    stream["current_phase"] = "monitoring"
+    stream["trace"] = [
+        {
+            "step": "monitoring",
+            "status": "active",
+            "detail": "Running scheduled KPI checks.",
+            "timestamp": started_at,
+            "phase": "monitoring",
+        }
+    ]
+    st.session_state.streaming_workflow = stream
+    if live_placeholder is not None:
+        render_live_workspace_snapshot(question, live_placeholder)
+
+    def on_monitoring_event(status, step, detail):
+        append_live_log(step, detail, status=status)
+        stream = st.session_state.streaming_workflow
+        stream.setdefault("assistant_streams", {})[step] = detail
+        stream["updated_at"] = current_timestamp()
+        st.session_state.streaming_workflow = stream
+        sync_live_state_from_stream()
+        if live_placeholder is not None:
+            render_live_workspace_snapshot(question, live_placeholder)
+
+    monitoring_state, briefing = run_monitoring_checks(
+        targets,
+        st.session_state.get("semantic_context"),
+        callback=on_monitoring_event,
+    )
+    st.session_state.monitoring_state = monitoring_state
+    st.session_state.executive_briefing = briefing
+    merge_monitoring_telemetry(monitoring_state)
+
+    completed_at = current_timestamp()
+    trace = [
+        {
+            "step": "monitoring",
+            "status": "success",
+            "detail": monitoring_state.get("summary", "Monitoring completed."),
+            "timestamp": completed_at,
+            "phase": "monitoring",
+            "severity": monitoring_state.get("severity", "info"),
+        },
+        {
+            "step": "autonomous insight",
+            "status": "success",
+            "detail": "Monitoring targets scanned for anomalies and trends.",
+            "timestamp": completed_at,
+            "phase": "autonomous insight",
+            "severity": monitoring_state.get("severity", "info"),
+        },
+        {
+            "step": "investigation",
+            "status": "success"
+            if any((check.get("investigation") or {}).get("status") == "completed" for check in monitoring_state.get("checks", []))
+            else "skipped",
+            "detail": "Autonomous investigations completed for eligible monitoring signals.",
+            "timestamp": completed_at,
+            "phase": "investigation",
+        },
+        {
+            "step": "briefing",
+            "status": "success",
+            "detail": briefing.get("summary", "Executive briefing generated."),
+            "timestamp": completed_at,
+            "phase": "briefing",
+            "severity": briefing.get("severity", "info"),
+        },
+    ]
+    stream = st.session_state.streaming_workflow
+    stream["trace"] = trace
+    stream["status"] = "completed"
+    stream["completed_at"] = completed_at
+    stream["updated_at"] = completed_at
+    stream.setdefault("assistant_streams", {})["briefing"] = briefing_prompt_block(briefing)
+    st.session_state.streaming_workflow = stream
+    sync_live_state_from_stream()
+    st.session_state.workflow_trace = st.session_state.live_trace
+    st.session_state.workflow_telemetry = st.session_state.live_telemetry
+    st.session_state.monitoring_config = {**config, "last_run_at": completed_at}
+    st.session_state.monitoring_runs = (
+        st.session_state.get("monitoring_runs", [])
+        + [
+            {
+                "time": completed_at,
+                "targets": targets,
+                "severity": monitoring_state.get("severity", "info"),
+                "summary": briefing.get("summary", ""),
+            }
+        ]
+    )[-10:]
+    st.session_state.history.append(
+        {
+            "question": question,
+            "intent": "Scheduled KPI monitoring and executive briefing",
+            "sql": "Scheduled monitoring targets",
+            "rows": sum(check.get("row_count", 0) for check in monitoring_state.get("checks", [])),
+        }
+    )
+    memory = st.session_state.get("workspace_memory", default_workspace_memory(st.session_state.get("user_identity")))
+    memory = snapshot_workspace_run(
+        memory,
+        question=question,
+        intent="Scheduled KPI monitoring and executive briefing",
+        sql="Scheduled monitoring targets",
+        rows=sum(check.get("row_count", 0) for check in monitoring_state.get("checks", [])),
+        workflow_trace=st.session_state.get("workflow_trace", []),
+        telemetry=st.session_state.get("workflow_telemetry", {}),
+        insights={"findings": [section for section in briefing.get("sections", [])], "severity": briefing.get("severity", "info")},
+        investigation={"status": "completed", "summary": "Monitoring investigations persisted with briefing.", "queries": []},
+        semantic_memory=st.session_state.get("semantic_memory", {}),
+    )
+    st.session_state.workspace_memory = memory
+    persist_workspace_memory()
+    append_live_log("briefing", briefing.get("summary", "Executive briefing generated."))
+    if live_placeholder is not None:
+        render_live_workspace_snapshot(question, live_placeholder)
+
+
+def run_autonomous_investigation_phase(question, sql, base_trace, live_placeholder=None):
+    if not sql or st.session_state.get("latest_mode") == "csv" or not should_investigate(st.session_state.autonomous_insights):
+        skipped_at = current_timestamp()
+        st.session_state.investigation_state = {
+            **empty_investigation_state(),
+            "status": "skipped",
+            "summary": "Investigation skipped because this run has no database-backed warning or critical signal.",
+        }
+        skipped_trace = base_trace + [
+            {
+                "step": "investigation",
+                "status": "skipped",
+                "detail": st.session_state.investigation_state["summary"],
+                "timestamp": skipped_at,
+                "phase": "investigation",
+            }
+        ]
+        stream = st.session_state.streaming_workflow
+        stream["trace"] = skipped_trace
+        st.session_state.streaming_workflow = stream
+        append_live_log("investigation", st.session_state.investigation_state["summary"], status="skipped")
+        return skipped_trace
+
+    started_at = current_timestamp()
+    stream = st.session_state.streaming_workflow
+    stream["current_phase"] = "investigation"
+    stream["trace"] = base_trace + [
+        {
+            "step": "investigation",
+            "status": "active",
+            "detail": "Generating autonomous drill-down queries.",
+            "timestamp": started_at,
+            "phase": "investigation",
+        }
+    ]
+    st.session_state.streaming_workflow = stream
+    append_live_log("investigation", "Starting autonomous root-cause investigation.", status="active")
+
+    def on_investigation_event(status, step, detail):
+        append_live_log(step, detail, status=status)
+        stream = st.session_state.streaming_workflow
+        stream.setdefault("assistant_streams", {})["investigation"] = detail
+        stream["updated_at"] = current_timestamp()
+        st.session_state.streaming_workflow = stream
+        sync_live_state_from_stream()
+        if live_placeholder is not None:
+            render_live_workspace_snapshot(question, live_placeholder)
+
+    investigation_state = run_investigation(
+        question,
+        sql,
+        st.session_state.autonomous_insights,
+        st.session_state.get("semantic_context"),
+        max_queries=3,
+        callback=on_investigation_event,
+    )
+    st.session_state.investigation_state = investigation_state
+    merge_investigation_telemetry(investigation_state)
+    completed_at = current_timestamp()
+    status = "success" if investigation_state.get("status") == "completed" else "warning"
+    completed_trace = base_trace + [
+        {
+            "step": "investigation",
+            "status": status,
+            "detail": investigation_state.get("summary", "Investigation finished."),
+            "timestamp": completed_at,
+            "phase": "investigation",
+            "severity": investigation_state.get("severity", "info"),
+        }
+    ]
+    stream = st.session_state.streaming_workflow
+    stream["trace"] = completed_trace
+    stream.setdefault("assistant_streams", {})["investigation"] = investigation_prompt_block(investigation_state).strip()
+    st.session_state.streaming_workflow = stream
+    append_live_log("investigation", investigation_state.get("summary", "Investigation finished."), status=status)
+    if live_placeholder is not None:
+        render_live_workspace_snapshot(question, live_placeholder)
+    return completed_trace
+
 
 def render_live_workspace_snapshot(question, placeholder):
+    sync_live_state_from_stream()
     with placeholder.container():
         render_live_execution_panel(
             question,
             st.session_state.live_trace,
             st.session_state.live_logs,
             st.session_state.live_telemetry,
-            chart_key=f"workflow_chart_{st.session_state.run_id}_{st.session_state.live_render_seq}",
+            chart_key=next_plotly_key("workflow_chart_live"),
+            assistant_streams=st.session_state.live_assistant_streams,
         )
 
 
 def run_query(question, live_placeholder=None):
+    if not user_can(st.session_state.get("user_identity"), "query"):
+        st.warning("Your current workspace role does not allow query execution.")
+        return
+    followup = apply_chart_followup(question)
+    if st.session_state.get("latest_df") is not None and is_chart_only_followup(question, st.session_state.get("analytics_memory")):
+        complete_chart_only_followup(question, followup)
+        return
+
     st.session_state.messages.append({"role": "user", "content": question})
     start = time.time()
     sql = ""
@@ -239,43 +1024,55 @@ def run_query(question, live_placeholder=None):
     st.session_state.run_id = f"run_{st.session_state.run_counter}"
     st.session_state.live_render_seq = 0
     st.session_state.is_executing = True
+    st.session_state.latest_question = question
+    st.session_state.active_intent = followup.get("effective_question", question)
+    st.session_state.latest_insight = ""
+    st.session_state.autonomous_insights = empty_insight_state()
+    st.session_state.investigation_state = empty_investigation_state()
+    st.session_state.streaming_workflow = initial_streaming_workflow(question)
     st.session_state.live_trace = []
     st.session_state.live_logs = []
     st.session_state.live_telemetry = {}
+    st.session_state.live_assistant_streams = {}
+    sync_live_state_from_stream()
 
     def workflow_callback(phase, state_snapshot, step, detail):
-        telemetry = state_snapshot.get("telemetry", {})
-        trace = state_snapshot.get("trace", [])
-        if phase == "active":
-            live_trace = enrich_trace_with_telemetry(trace, telemetry)
-            live_trace.append({"step": step, "status": "active", "detail": detail})
-            st.session_state.live_trace = live_trace
-        else:
-            st.session_state.live_trace = enrich_trace_with_telemetry(trace, telemetry)
-        st.session_state.live_telemetry = telemetry
-        append_live_log(step, detail)
+        persist_streaming_event(phase, state_snapshot, step, detail)
         if live_placeholder is not None:
+            now = time.perf_counter()
+            if phase == "streaming" and now - st.session_state.last_stream_render < 0.08:
+                return
+            st.session_state.last_stream_render = now
             st.session_state.live_render_seq += 1
             render_live_workspace_snapshot(question, live_placeholder)
 
     try:
         if "uploaded_df" in st.session_state:
             df = st.session_state.uploaded_df
+            profile_active_dataframe(df, f"Uploaded CSV: {st.session_state.get('uploaded_name') or 'dataset'}")
             st.session_state.workflow_trace = []
             st.session_state.workflow_telemetry = {}
             mode = "csv"
-            append_live_log("ingestion", "Uploaded CSV loaded into the analytics workspace.")
+            append_live_log("schema retrieval", "Uploaded CSV loaded into the analytics workspace.")
             if live_placeholder is not None:
                 render_live_workspace_snapshot(question, live_placeholder)
         else:
-            if run_workflow is None:
-                st.error("Workflow is unavailable.")
-                return
-
             if live_placeholder is not None:
                 render_live_workspace_snapshot(question, live_placeholder)
 
-            workflow_result = run_workflow(question, callback=workflow_callback)
+            schema_context = ensure_schema_semantics()
+            workflow_context = {
+                **schema_context,
+                "prompt_block": semantic_prompt_block(schema_context),
+            }
+            workflow_result = execute_query_workflow(
+                question,
+                callback=workflow_callback,
+                semantic_context=workflow_context,
+                conversation_context=st.session_state.get("analytics_memory"),
+                workspace_context=st.session_state.get("workspace_memory"),
+            )
+            st.session_state.active_intent = workflow_result.get("effective_question") or st.session_state.active_intent
             st.session_state.workflow_trace = workflow_result.get("trace", [])
             st.session_state.workflow_telemetry = workflow_result.get("telemetry", {})
             sql = (workflow_result.get("sql") or "").strip()
@@ -283,6 +1080,16 @@ def run_query(question, live_placeholder=None):
 
             if workflow_error:
                 st.error(workflow_error)
+                append_live_log("system", workflow_error, status="error")
+                stream = st.session_state.streaming_workflow
+                failed_at = current_timestamp()
+                stream["status"] = "failed"
+                stream["completed_at"] = failed_at
+                stream["updated_at"] = failed_at
+                st.session_state.streaming_workflow = stream
+                sync_live_state_from_stream()
+                if live_placeholder is not None:
+                    render_live_workspace_snapshot(question, live_placeholder)
                 if sql:
                     st.code(sql, language="sql")
                 return
@@ -291,8 +1098,12 @@ def run_query(question, live_placeholder=None):
             rows = workflow_result.get("rows", [])
             if not cols:
                 st.warning("No columns returned or query failed.")
+                append_live_log("system", "No columns returned or query failed.", status="warning")
+                if live_placeholder is not None:
+                    render_live_workspace_snapshot(question, live_placeholder)
                 return
             df = pd.DataFrame(rows, columns=cols)
+            profile_active_dataframe(df, f"SQL result: {question[:48]}")
             mode = "database"
 
         exec_time = time.time() - start
@@ -301,29 +1112,47 @@ def run_query(question, live_placeholder=None):
         st.session_state.latest_question = question
         st.session_state.latest_exec_time = exec_time
         st.session_state.latest_mode = mode
-        st.session_state.live_trace = enrich_trace_with_telemetry(
-            st.session_state.workflow_trace,
-            st.session_state.workflow_telemetry,
-        )
-        st.session_state.live_telemetry = st.session_state.workflow_telemetry
+        stream_insight_narration(question, df, sql=sql, live_placeholder=live_placeholder)
+        remember_analytics_turn(question, st.session_state.get("active_intent") or question, sql, df)
         st.session_state.messages.append(
             {
                 "role": "assistant",
-                "content": f"Query executed successfully. Returned {len(df)} rows.",
+                "content": st.session_state.latest_insight
+                or f"Query executed successfully. Returned {len(df)} rows.",
             }
         )
         append_live_log("system", f"Workflow completed successfully in {exec_time:.2f}s.")
+        stream = st.session_state.streaming_workflow
+        completed_at = current_timestamp()
+        stream["status"] = "completed"
+        stream["completed_at"] = completed_at
+        stream["updated_at"] = completed_at
+        st.session_state.streaming_workflow = stream
+        sync_live_state_from_stream()
+        st.session_state.workflow_trace = st.session_state.live_trace
+        st.session_state.workflow_telemetry = st.session_state.live_telemetry
+        if live_placeholder is not None:
+            render_live_workspace_snapshot(question, live_placeholder)
         st.session_state.history.append(
             {
                 "question": question,
+                "intent": st.session_state.get("active_intent") or question,
                 "sql": sql,
                 "rows": len(df) if not df.empty else 0,
             }
         )
+        persist_workspace_snapshot(question, st.session_state.get("active_intent") or question, sql, df)
     except Exception as exc:
         st.error("Query failed. Try rephrasing.")
         st.code(str(exc))
         append_live_log("system", f"Workflow failed: {str(exc)}")
+        stream = st.session_state.streaming_workflow
+        failed_at = current_timestamp()
+        stream["status"] = "failed"
+        stream["completed_at"] = failed_at
+        stream["updated_at"] = failed_at
+        st.session_state.streaming_workflow = stream
+        sync_live_state_from_stream()
         if sql:
             st.code(sql, language="sql")
     finally:
@@ -332,6 +1161,7 @@ def run_query(question, live_placeholder=None):
 
 def render_schema(schema_visible):
     if schema_visible:
+        ensure_schema_semantics()
         with st.expander("Database Schema", expanded=False):
             st.code(get_schema())
 
@@ -342,6 +1172,8 @@ def render_analytics_workspace(client):
     exec_time = st.session_state.latest_exec_time
     history = st.session_state.history
     active_mode = "CSV Workspace" if st.session_state.latest_mode == "csv" and df is not None else "Live SQL"
+    if df is None and not st.session_state.get("semantic_context"):
+        ensure_schema_semantics()
 
     top_metrics = [
         {
@@ -390,7 +1222,12 @@ def render_analytics_workspace(client):
     render_glass_widgets(widget_data)
     question = render_command_bar()
     live_panel_placeholder = st.empty()
-    if question:
+    if st.session_state.get("pending_monitoring_run") or monitoring_due(st.session_state.get("monitoring_config", {})):
+        st.session_state.pending_monitoring_run = False
+        run_monitoring_workflow(live_placeholder=live_panel_placeholder)
+        telemetry = st.session_state.workflow_telemetry
+        exec_time = st.session_state.latest_exec_time
+    elif question:
         run_query(question, live_placeholder=live_panel_placeholder)
         df = st.session_state.latest_df
         telemetry = st.session_state.workflow_telemetry
@@ -402,7 +1239,7 @@ def render_analytics_workspace(client):
                 st.session_state.live_trace or st.session_state.workflow_trace,
                 st.session_state.live_logs,
                 st.session_state.live_telemetry or st.session_state.workflow_telemetry,
-                chart_key=f"workflow_chart_{st.session_state.run_id}_summary",
+                chart_key=next_plotly_key("workflow_chart_summary"),
             )
 
     if df is None:
@@ -427,7 +1264,7 @@ def render_analytics_workspace(client):
             st.plotly_chart(
                 build_default_operations_figure(),
                 width="stretch",
-                key=f"default_ops_chart_{st.session_state.run_id}",
+                key=next_plotly_key("default_ops_chart"),
             )
             st.markdown(render_agent_row(build_default_agent_states()), unsafe_allow_html=True)
         with status_right:
@@ -463,6 +1300,25 @@ def render_analytics_workspace(client):
                 ),
                 unsafe_allow_html=True,
             )
+            st.markdown(render_semantic_profile_card(st.session_state.get("semantic_context")), unsafe_allow_html=True)
+            st.markdown(
+                render_workspace_card(
+                    st.session_state.get("user_identity"),
+                    st.session_state.get("workspace_memory"),
+                ),
+                unsafe_allow_html=True,
+            )
+            st.markdown(render_analytics_memory_card(st.session_state.get("analytics_memory")), unsafe_allow_html=True)
+            st.markdown(render_autonomous_insight_card(st.session_state.get("autonomous_insights")), unsafe_allow_html=True)
+            st.markdown(render_investigation_card(st.session_state.get("investigation_state")), unsafe_allow_html=True)
+            st.markdown(
+                render_monitoring_card(
+                    st.session_state.get("monitoring_state"),
+                    st.session_state.get("monitoring_config"),
+                ),
+                unsafe_allow_html=True,
+            )
+            st.markdown(render_executive_briefing_card(st.session_state.get("executive_briefing")), unsafe_allow_html=True)
         return
     main_left, main_right = st.columns([1.42, 0.92], gap="medium")
     with main_left:
@@ -470,6 +1326,15 @@ def render_analytics_workspace(client):
             render_executive_summary(st.session_state.latest_question, df, exec_time, telemetry),
             unsafe_allow_html=True,
         )
+        st.markdown(render_semantic_profile_card(st.session_state.get("semantic_context")), unsafe_allow_html=True)
+        st.markdown(
+            render_workspace_card(
+                st.session_state.get("user_identity"),
+                st.session_state.get("workspace_memory"),
+            ),
+            unsafe_allow_html=True,
+        )
+        st.markdown(render_analytics_memory_card(st.session_state.get("analytics_memory")), unsafe_allow_html=True)
 
         chart_rendered = False
         if is_scalar_result(df):
@@ -499,6 +1364,11 @@ def render_analytics_workspace(client):
             numeric_labels = [option["label"] for option in numeric_options]
             all_labels = [option["label"] for option in all_options]
             option_lookup = {option["label"]: option for option in all_options}
+            recommended_x, recommended_y = recommend_chart_fields(df, st.session_state.get("semantic_context"))
+            if st.session_state.x_col not in all_labels and recommended_x in all_labels:
+                st.session_state.x_col = recommended_x
+            if st.session_state.y_col not in numeric_labels and recommended_y in numeric_labels:
+                st.session_state.y_col = recommended_y
 
             c1, c2, c3 = st.columns(3, gap="small")
             with c1:
@@ -532,6 +1402,10 @@ def render_analytics_workspace(client):
                     index=["Bar", "Line", "Area"].index(st.session_state.chart_type),
                 )
                 st.session_state.chart_type = chart_type
+                if st.session_state.get("analytics_memory"):
+                    memory = dict(st.session_state.analytics_memory)
+                    memory["previous_chart"] = current_chart_state()
+                    st.session_state.analytics_memory = memory
 
             x_option = option_lookup[x_col]
             y_option = option_lookup[y_col] if y_col else None
@@ -559,7 +1433,7 @@ def render_analytics_workspace(client):
                     st.plotly_chart(
                         fig,
                         width="stretch",
-                        key=f"insight_chart_{st.session_state.run_id}",
+                        key=next_plotly_key("insight_chart"),
                     )
                     chart_rendered = True
             if not chart_rendered:
@@ -570,11 +1444,21 @@ def render_analytics_workspace(client):
     with main_right:
         recommendations = build_ai_recommendations(df, telemetry, st.session_state.workflow_trace)
         st.markdown(render_recommendation_card(recommendations), unsafe_allow_html=True)
+        st.markdown(render_autonomous_insight_card(st.session_state.get("autonomous_insights")), unsafe_allow_html=True)
+        st.markdown(render_investigation_card(st.session_state.get("investigation_state")), unsafe_allow_html=True)
+        st.markdown(
+            render_monitoring_card(
+                st.session_state.get("monitoring_state"),
+                st.session_state.get("monitoring_config"),
+            ),
+            unsafe_allow_html=True,
+        )
+        st.markdown(render_executive_briefing_card(st.session_state.get("executive_briefing")), unsafe_allow_html=True)
         st.markdown(render_observability_card(telemetry, st.session_state.workflow_trace), unsafe_allow_html=True)
 
         if not df.empty:
-            try:
-                explanation = explain_result(client, st.session_state.latest_question, df)
+            explanation = st.session_state.get("latest_insight", "")
+            if explanation:
                 st.markdown(
                     render_response_card(
                         "AI Insight Brief",
@@ -584,12 +1468,12 @@ def render_analytics_workspace(client):
                     ),
                     unsafe_allow_html=True,
                 )
-            except Exception as exc:
+            else:
                 st.markdown(
                     render_response_card(
                         "AI Insight Brief",
                         "Natural-language interpretation of the current result set.",
-                        f'<div class="workspace-body-copy">AI explanation is temporarily unavailable.<br/>{escape_html(exc)}</div>',
+                        '<div class="workspace-body-copy">Insight narration is unavailable for this run.</div>',
                         tone="insight-module",
                     ),
                     unsafe_allow_html=True,
@@ -625,7 +1509,7 @@ def render_copilot_workspace():
     with right:
         render_workflow_timeline(
             st.session_state.workflow_trace,
-            chart_key=f"workflow_chart_copilot_{st.session_state.run_id}",
+            chart_key=next_plotly_key("workflow_chart_copilot"),
         )
         render_telemetry_panel(st.session_state.workflow_telemetry)
 
@@ -654,6 +1538,19 @@ init_session_state()
 
 render_hero()
 sidebar_state = render_sidebar()
+configure_workspace_session(
+    sidebar_state["workspace_user"],
+    sidebar_state["workspace_team"],
+    sidebar_state["workspace_role"],
+)
+st.session_state.monitoring_config = {
+    **st.session_state.get("monitoring_config", default_monitoring_config()),
+    "enabled": sidebar_state["monitoring_enabled"],
+    "targets": sidebar_state["monitoring_targets"],
+    "interval_minutes": sidebar_state["monitoring_interval"],
+}
+if sidebar_state["run_monitoring"]:
+    st.session_state.pending_monitoring_run = True
 
 if sidebar_state["clear_chat"]:
     clear_session()
@@ -664,6 +1561,7 @@ if sidebar_state["uploaded_file"] is not None:
     st.session_state.uploaded_df = pd.read_csv(sidebar_state["uploaded_file"])
     if st.session_state.uploaded_name != uploaded_name:
         st.session_state.uploaded_name = uploaded_name
+        profile_active_dataframe(st.session_state.uploaded_df, f"Uploaded CSV: {uploaded_name}")
         st.success("CSV uploaded successfully. The workspace is now using uploaded data.")
 
 render_schema(sidebar_state["show_schema"])
