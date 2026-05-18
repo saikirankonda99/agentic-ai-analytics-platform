@@ -8,6 +8,7 @@ from threading import RLock
 from typing import Protocol
 
 from backend.models import (
+    DEFAULT_WORKSPACE_ID,
     AgentExecution,
     OrchestrationExecution,
     TokenUsage,
@@ -29,15 +30,15 @@ class WorkflowStorage(Protocol):
 
 
 class EventStorage(Protocol):
-    def append(self, workflow_id: str, event: WorkflowEvent) -> None:
+    def append(self, workflow_id: str, event: WorkflowEvent, *, workspace_id: str) -> None:
         """Append an event to a workflow event stream."""
 
-    def list(self, workflow_id: str) -> tuple[WorkflowEvent, ...]:
+    def list(self, workflow_id: str, *, workspace_id: str | None = None) -> tuple[WorkflowEvent, ...]:
         """List events for a workflow."""
 
 
 class TelemetryStorage(Protocol):
-    def save(self, workflow_id: str, telemetry: WorkflowTelemetry) -> None:
+    def save(self, workflow_id: str, telemetry: WorkflowTelemetry, *, workspace_id: str) -> None:
         """Persist workflow telemetry."""
 
     def get(self, workflow_id: str) -> WorkflowTelemetry | None:
@@ -45,10 +46,10 @@ class TelemetryStorage(Protocol):
 
 
 class AgentExecutionStorage(Protocol):
-    def save_all(self, workflow_id: str, agents: tuple[AgentExecution, ...]) -> None:
+    def save_all(self, workflow_id: str, agents: tuple[AgentExecution, ...], *, workspace_id: str) -> None:
         """Persist agent execution metadata for a workflow."""
 
-    def list(self, workflow_id: str) -> tuple[AgentExecution, ...]:
+    def list(self, workflow_id: str, *, workspace_id: str | None = None) -> tuple[AgentExecution, ...]:
         """List agent execution metadata for a workflow."""
 
 
@@ -75,11 +76,11 @@ class InMemoryEventStorage:
         self._events: dict[str, tuple[WorkflowEvent, ...]] = {}
         self._lock = RLock()
 
-    def append(self, workflow_id: str, event: WorkflowEvent) -> None:
+    def append(self, workflow_id: str, event: WorkflowEvent, *, workspace_id: str) -> None:
         with self._lock:
             self._events[workflow_id] = (*self._events.get(workflow_id, ()), event)
 
-    def list(self, workflow_id: str) -> tuple[WorkflowEvent, ...]:
+    def list(self, workflow_id: str, *, workspace_id: str | None = None) -> tuple[WorkflowEvent, ...]:
         with self._lock:
             return self._events.get(workflow_id, ())
 
@@ -89,7 +90,7 @@ class InMemoryTelemetryStorage:
         self._telemetry: dict[str, WorkflowTelemetry] = {}
         self._lock = RLock()
 
-    def save(self, workflow_id: str, telemetry: WorkflowTelemetry) -> None:
+    def save(self, workflow_id: str, telemetry: WorkflowTelemetry, *, workspace_id: str) -> None:
         with self._lock:
             self._telemetry[workflow_id] = telemetry
 
@@ -103,11 +104,11 @@ class InMemoryAgentExecutionStorage:
         self._agents: dict[str, tuple[AgentExecution, ...]] = {}
         self._lock = RLock()
 
-    def save_all(self, workflow_id: str, agents: tuple[AgentExecution, ...]) -> None:
+    def save_all(self, workflow_id: str, agents: tuple[AgentExecution, ...], *, workspace_id: str) -> None:
         with self._lock:
             self._agents[workflow_id] = agents
 
-    def list(self, workflow_id: str) -> tuple[AgentExecution, ...]:
+    def list(self, workflow_id: str, *, workspace_id: str | None = None) -> tuple[AgentExecution, ...]:
         with self._lock:
             return self._agents.get(workflow_id, ())
 
@@ -130,6 +131,7 @@ class SQLiteStore:
                 """
                 CREATE TABLE IF NOT EXISTS workflows (
                     workflow_id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL DEFAULT 'workspace:default',
                     question TEXT NOT NULL,
                     status TEXT NOT NULL,
                     created_at TEXT NOT NULL,
@@ -141,6 +143,7 @@ class SQLiteStore:
                 CREATE TABLE IF NOT EXISTS workflow_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     workflow_id TEXT NOT NULL,
+                    workspace_id TEXT NOT NULL DEFAULT 'workspace:default',
                     timestamp TEXT NOT NULL,
                     event_type TEXT NOT NULL,
                     message TEXT NOT NULL
@@ -150,6 +153,7 @@ class SQLiteStore:
 
                 CREATE TABLE IF NOT EXISTS workflow_telemetry (
                     workflow_id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL DEFAULT 'workspace:default',
                     started_at TEXT,
                     completed_at TEXT,
                     latency_ms INTEGER,
@@ -162,6 +166,7 @@ class SQLiteStore:
                 CREATE TABLE IF NOT EXISTS workflow_agents (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     workflow_id TEXT NOT NULL,
+                    workspace_id TEXT NOT NULL DEFAULT 'workspace:default',
                     agent_name TEXT NOT NULL,
                     agent_role TEXT NOT NULL,
                     assigned_stage TEXT NOT NULL,
@@ -171,6 +176,24 @@ class SQLiteStore:
                     ON workflow_agents(workflow_id, id);
                 """
             )
+            self._ensure_column(connection, "workflows", "workspace_id", "TEXT NOT NULL DEFAULT 'workspace:default'")
+            self._ensure_column(connection, "workflow_events", "workspace_id", "TEXT NOT NULL DEFAULT 'workspace:default'")
+            self._ensure_column(connection, "workflow_telemetry", "workspace_id", "TEXT NOT NULL DEFAULT 'workspace:default'")
+            self._ensure_column(connection, "workflow_agents", "workspace_id", "TEXT NOT NULL DEFAULT 'workspace:default'")
+
+    def _ensure_column(
+        self,
+        connection: sqlite3.Connection,
+        table_name: str,
+        column_name: str,
+        definition: str,
+    ) -> None:
+        columns = {
+            row["name"]
+            for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        if column_name not in columns:
+            connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
 
 
 class SQLiteWorkflowStorage(SQLiteStore):
@@ -180,10 +203,11 @@ class SQLiteWorkflowStorage(SQLiteStore):
             connection.execute(
                 """
                 INSERT INTO workflows (
-                    workflow_id, question, status, created_at, current_stage, stage_progression_json
+                    workflow_id, workspace_id, question, status, created_at, current_stage, stage_progression_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(workflow_id) DO UPDATE SET
+                    workspace_id = excluded.workspace_id,
                     question = excluded.question,
                     status = excluded.status,
                     created_at = excluded.created_at,
@@ -193,6 +217,7 @@ class SQLiteWorkflowStorage(SQLiteStore):
                 """,
                 (
                     workflow.workflow_id,
+                    workflow.workspace_id,
                     workflow.question,
                     workflow.status,
                     workflow.created_at,
@@ -220,6 +245,7 @@ class SQLiteWorkflowStorage(SQLiteStore):
         )
         return OrchestrationExecution(
             workflow_id=row["workflow_id"],
+            workspace_id=row["workspace_id"] or DEFAULT_WORKSPACE_ID,
             question=row["question"],
             status=row["status"],
             created_at=row["created_at"],
@@ -231,41 +257,44 @@ class SQLiteWorkflowStorage(SQLiteStore):
 
 
 class SQLiteEventStorage(SQLiteStore):
-    def append(self, workflow_id: str, event: WorkflowEvent) -> None:
+    def append(self, workflow_id: str, event: WorkflowEvent, *, workspace_id: str) -> None:
         with self._lock, self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO workflow_events (workflow_id, timestamp, event_type, message)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO workflow_events (workflow_id, workspace_id, timestamp, event_type, message)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (workflow_id, event.timestamp, event.event_type, event.message),
+                (workflow_id, workspace_id, event.timestamp, event.event_type, event.message),
             )
 
-    def list(self, workflow_id: str) -> tuple[WorkflowEvent, ...]:
+    def list(self, workflow_id: str, *, workspace_id: str | None = None) -> tuple[WorkflowEvent, ...]:
+        query = """
+            SELECT timestamp, event_type, message
+            FROM workflow_events
+            WHERE workflow_id = ?
+        """
+        params: tuple[str, ...] = (workflow_id,)
+        if workspace_id is not None:
+            query += " AND workspace_id = ?"
+            params = (workflow_id, workspace_id)
+        query += " ORDER BY id ASC"
         with self._lock, self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT timestamp, event_type, message
-                FROM workflow_events
-                WHERE workflow_id = ?
-                ORDER BY id ASC
-                """,
-                (workflow_id,),
-            ).fetchall()
+            rows = connection.execute(query, params).fetchall()
         return tuple(WorkflowEvent(**dict(row)) for row in rows)
 
 
 class SQLiteTelemetryStorage(SQLiteStore):
-    def save(self, workflow_id: str, telemetry: WorkflowTelemetry) -> None:
+    def save(self, workflow_id: str, telemetry: WorkflowTelemetry, *, workspace_id: str) -> None:
         with self._lock, self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO workflow_telemetry (
-                    workflow_id, started_at, completed_at, latency_ms, estimated_cost_usd,
+                    workflow_id, workspace_id, started_at, completed_at, latency_ms, estimated_cost_usd,
                     prompt_tokens, completion_tokens, total_tokens
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(workflow_id) DO UPDATE SET
+                    workspace_id = excluded.workspace_id,
                     started_at = excluded.started_at,
                     completed_at = excluded.completed_at,
                     latency_ms = excluded.latency_ms,
@@ -276,6 +305,7 @@ class SQLiteTelemetryStorage(SQLiteStore):
                 """,
                 (
                     workflow_id,
+                    workspace_id,
                     telemetry.started_at,
                     telemetry.completed_at,
                     telemetry.latency_ms,
@@ -308,19 +338,20 @@ class SQLiteTelemetryStorage(SQLiteStore):
 
 
 class SQLiteAgentExecutionStorage(SQLiteStore):
-    def save_all(self, workflow_id: str, agents: tuple[AgentExecution, ...]) -> None:
+    def save_all(self, workflow_id: str, agents: tuple[AgentExecution, ...], *, workspace_id: str) -> None:
         with self._lock, self._connect() as connection:
             connection.execute("DELETE FROM workflow_agents WHERE workflow_id = ?", (workflow_id,))
             connection.executemany(
                 """
                 INSERT INTO workflow_agents (
-                    workflow_id, agent_name, agent_role, assigned_stage, agent_status
+                    workflow_id, workspace_id, agent_name, agent_role, assigned_stage, agent_status
                 )
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
                         workflow_id,
+                        workspace_id,
                         agent.agent_name,
                         agent.agent_role,
                         agent.assigned_stage,
@@ -330,17 +361,19 @@ class SQLiteAgentExecutionStorage(SQLiteStore):
                 ],
             )
 
-    def list(self, workflow_id: str) -> tuple[AgentExecution, ...]:
+    def list(self, workflow_id: str, *, workspace_id: str | None = None) -> tuple[AgentExecution, ...]:
+        query = """
+            SELECT agent_name, agent_role, assigned_stage, agent_status
+            FROM workflow_agents
+            WHERE workflow_id = ?
+        """
+        params: tuple[str, ...] = (workflow_id,)
+        if workspace_id is not None:
+            query += " AND workspace_id = ?"
+            params = (workflow_id, workspace_id)
+        query += " ORDER BY id ASC"
         with self._lock, self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT agent_name, agent_role, assigned_stage, agent_status
-                FROM workflow_agents
-                WHERE workflow_id = ?
-                ORDER BY id ASC
-                """,
-                (workflow_id,),
-            ).fetchall()
+            rows = connection.execute(query, params).fetchall()
         return tuple(AgentExecution(**dict(row)) for row in rows)
 
 

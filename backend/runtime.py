@@ -4,7 +4,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
-from backend.services import WORKFLOW_STAGES, OrchestrationExecution, OrchestrationService, orchestration_service
+from backend.models import DEFAULT_WORKSPACE_ID, WORKFLOW_STAGES, OrchestrationExecution
+from backend.services import OrchestrationService, orchestration_service
 
 
 class RuntimeScheduler(Protocol):
@@ -16,8 +17,13 @@ class RuntimeScheduler(Protocol):
 class OrchestrationRuntime:
     service: OrchestrationService
 
-    def submit(self, question: str, scheduler: RuntimeScheduler) -> OrchestrationExecution:
-        workflow = self.service.create_workflow(question)
+    def submit(
+        self,
+        question: str,
+        scheduler: RuntimeScheduler,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
+    ) -> OrchestrationExecution:
+        workflow = self.service.create_workflow(question, workspace_id=workspace_id)
         scheduler.add_task(self.run, workflow.workflow_id)
         return workflow
 

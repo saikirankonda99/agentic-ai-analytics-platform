@@ -4,6 +4,9 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 
+DEFAULT_USER_ID = "user:anonymous"
+DEFAULT_WORKSPACE_ID = "workspace:default"
+
 WorkflowLifecycleState = Literal["queued", "running", "completed", "failed"]
 AgentExecutionStatus = Literal["queued", "running", "completed", "failed"]
 WorkflowStage = Literal[
@@ -43,6 +46,34 @@ STAGE_AGENTS: dict[WorkflowStage, tuple[str, str]] = {
     "execution": ("execution_agent", "Query executor"),
     "insight_generation": ("insight_agent", "Insight generator"),
 }
+
+
+@dataclass(frozen=True)
+class User:
+    user_id: str
+    email: str | None = None
+    display_name: str | None = None
+
+
+@dataclass(frozen=True)
+class Workspace:
+    workspace_id: str
+    name: str
+
+
+@dataclass(frozen=True)
+class RequestSession:
+    user: User
+    workspace: Workspace
+    roles: tuple[str, ...] = ()
+
+    @property
+    def user_id(self) -> str:
+        return self.user.user_id
+
+    @property
+    def workspace_id(self) -> str:
+        return self.workspace.workspace_id
 
 
 @dataclass(frozen=True)
@@ -94,6 +125,7 @@ class WorkflowStreamUpdate:
 @dataclass(frozen=True)
 class OrchestrationExecution:
     workflow_id: str
+    workspace_id: str
     question: str
     status: WorkflowLifecycleState
     created_at: str
@@ -106,10 +138,15 @@ class OrchestrationExecution:
 __all__ = [
     "AgentExecution",
     "AgentExecutionStatus",
+    "DEFAULT_USER_ID",
+    "DEFAULT_WORKSPACE_ID",
     "OrchestrationExecution",
+    "RequestSession",
     "STAGE_AGENTS",
     "TokenUsage",
+    "User",
     "WORKFLOW_STAGES",
+    "Workspace",
     "WorkflowEvent",
     "WorkflowEventType",
     "WorkflowLifecycleState",

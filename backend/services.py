@@ -4,8 +4,9 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
 from uuid import uuid4
 
-from backend.memory import InMemoryVectorMemoryStore, VectorMemoryStore
+from backend.memory import InMemoryVectorMemoryStore, MemoryDocument, VectorMemoryStore
 from backend.models import (
+    DEFAULT_WORKSPACE_ID,
     STAGE_AGENTS,
     WORKFLOW_STAGES,
     AgentExecution,
@@ -61,9 +62,10 @@ class OrchestrationService:
         execution = self.create_workflow(question)
         return self.run_workflow(execution.workflow_id)
 
-    def create_workflow(self, question: str) -> OrchestrationExecution:
+    def create_workflow(self, question: str, workspace_id: str = DEFAULT_WORKSPACE_ID) -> OrchestrationExecution:
         execution = OrchestrationExecution(
             workflow_id=f"workflow:{uuid4()}",
+            workspace_id=workspace_id,
             question=question,
             status="queued",
             created_at=datetime.now(timezone.utc).isoformat(),
@@ -74,6 +76,15 @@ class OrchestrationService:
             execution.workflow_id,
             "workflow_created",
             f"Workflow created for question: {question}",
+            workspace_id=execution.workspace_id,
+        )
+        self.vector_memory_store.upsert(
+            MemoryDocument(
+                namespace="workflow_context",
+                text=question,
+                workspace_id=execution.workspace_id,
+                metadata={"workflow_id": execution.workflow_id},
+            )
         )
         return execution
 
@@ -104,9 +115,13 @@ class OrchestrationService:
             return None
 
         telemetry = self.telemetry_storage.get(workflow.workflow_id) or workflow.telemetry
-        agent_executions = self.agent_execution_storage.list(workflow.workflow_id)
+        agent_executions = self.agent_execution_storage.list(
+            workflow.workflow_id,
+            workspace_id=workflow.workspace_id,
+        )
         return OrchestrationExecution(
             workflow_id=workflow.workflow_id,
+            workspace_id=workflow.workspace_id,
             question=workflow.question,
             status=workflow.status,
             created_at=workflow.created_at,
@@ -117,10 +132,11 @@ class OrchestrationService:
         )
 
     def get_events(self, workflow_id: str) -> tuple[WorkflowEvent, ...] | None:
-        if self.get_workflow(workflow_id) is None:
+        workflow = self.get_workflow(workflow_id)
+        if workflow is None:
             return None
 
-        return self.event_storage.list(workflow_id)
+        return self.event_storage.list(workflow_id, workspace_id=workflow.workspace_id)
 
     def get_stream_updates(self, workflow_id: str) -> tuple[WorkflowStreamUpdate, ...] | None:
         workflow = self.get_workflow(workflow_id)
@@ -139,8 +155,12 @@ class OrchestrationService:
 
     def _save_workflow(self, workflow: OrchestrationExecution) -> None:
         self.workflow_storage.save(workflow)
-        self.telemetry_storage.save(workflow.workflow_id, workflow.telemetry)
-        self.agent_execution_storage.save_all(workflow.workflow_id, workflow.agent_executions)
+        self.telemetry_storage.save(workflow.workflow_id, workflow.telemetry, workspace_id=workflow.workspace_id)
+        self.agent_execution_storage.save_all(
+            workflow.workflow_id,
+            workflow.agent_executions,
+            workspace_id=workflow.workspace_id,
+        )
 
     def _transition_workflow(
         self,
@@ -153,6 +173,7 @@ class OrchestrationService:
 
         updated = OrchestrationExecution(
             workflow_id=workflow.workflow_id,
+            workspace_id=workflow.workspace_id,
             question=workflow.question,
             status=status,
             created_at=workflow.created_at,
@@ -166,12 +187,14 @@ class OrchestrationService:
             workflow_id,
             "lifecycle_transition",
             f"Workflow status changed to {status}.",
+            workspace_id=workflow.workspace_id,
         )
         if updated.telemetry != workflow.telemetry:
             self._append_event(
                 workflow_id,
                 "telemetry_update",
                 f"Workflow telemetry updated for {status} status.",
+                workspace_id=workflow.workspace_id,
             )
         return updated
 
@@ -186,6 +209,7 @@ class OrchestrationService:
 
         updated = OrchestrationExecution(
             workflow_id=workflow.workflow_id,
+            workspace_id=workflow.workspace_id,
             question=workflow.question,
             status=workflow.status,
             created_at=workflow.created_at,
@@ -209,6 +233,7 @@ class OrchestrationService:
             workflow_id,
             "stage_transition",
             f"Workflow stage completed: {stage}.",
+            workspace_id=workflow.workspace_id,
         )
         return updated
 
@@ -217,13 +242,14 @@ class OrchestrationService:
         workflow_id: str,
         event_type: WorkflowEventType,
         message: str,
+        workspace_id: str,
     ) -> None:
         event = WorkflowEvent(
             timestamp=datetime.now(timezone.utc).isoformat(),
             event_type=event_type,
             message=message,
         )
-        self.event_storage.append(workflow_id, event)
+        self.event_storage.append(workflow_id, event, workspace_id=workspace_id)
 
     def _event_stream_updates(self, events: tuple[WorkflowEvent, ...]) -> list[WorkflowStreamUpdate]:
         return [
@@ -412,11 +438,26 @@ class AnalyticsBackendService:
     def telemetry(self, run_id: str = "workflow:latest") -> dict[str, Any]:
         return (self.workflow_status(run_id) or {}).get("telemetry", {})
 
-    def profile_result(self, columns: list[str], rows: list[Any], name: str) -> dict[str, Any]:
+    def profile_result(
+        self,
+        columns: list[str],
+        rows: list[Any],
+        name: str,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
+    ) -> dict[str, Any]:
         import pandas as pd
         from semantic import profile_dataframe
 
-        return profile_dataframe(pd.DataFrame(rows, columns=columns), name=name)
+        profile = profile_dataframe(pd.DataFrame(rows, columns=columns), name=name)
+        self.vector_memory_store.upsert(
+            MemoryDocument(
+                namespace="semantic_dataset_summary",
+                text=f"{name}: {profile}",
+                workspace_id=workspace_id,
+                metadata={"dataset_name": name},
+            )
+        )
+        return profile
 
     def run_investigation(
         self,
@@ -426,11 +467,20 @@ class AnalyticsBackendService:
         insight_state: dict[str, Any],
         semantic_context: dict[str, Any] | None = None,
         max_queries: int = 3,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
     ) -> dict[str, Any]:
         from investigation import run_investigation
 
         result = run_investigation(question, sql, insight_state, semantic_context, max_queries=max_queries)
         self.cache.set("investigation:latest", result)
+        self.vector_memory_store.upsert(
+            MemoryDocument(
+                namespace="investigation",
+                text=f"{question}: {result}",
+                workspace_id=workspace_id,
+                metadata={"sql": sql},
+            )
+        )
         return result
 
     def executive_briefing(
@@ -438,12 +488,21 @@ class AnalyticsBackendService:
         *,
         targets: list[str],
         semantic_context: dict[str, Any] | None = None,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
     ) -> dict[str, Any]:
         from monitoring import run_monitoring_checks
 
         monitoring_state, briefing = run_monitoring_checks(targets, semantic_context)
         self.cache.set("monitoring:latest", monitoring_state)
         self.cache.set("briefing:latest", briefing)
+        self.vector_memory_store.upsert(
+            MemoryDocument(
+                namespace="executive_insight",
+                text=f"{targets}: {briefing}",
+                workspace_id=workspace_id,
+                metadata={"targets": targets},
+            )
+        )
         return {"monitoring": monitoring_state, "briefing": briefing}
 
     def briefing_from_monitoring(self, monitoring_state: dict[str, Any]) -> dict[str, Any]:

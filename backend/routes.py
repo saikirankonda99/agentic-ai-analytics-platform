@@ -5,10 +5,12 @@ from datetime import datetime, timezone
 from json import dumps
 from typing import Literal
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse
 
+from backend.auth_context import get_request_session
+from backend.models import RequestSession
 from backend.runtime import orchestration_runtime
 from backend.services import (
     AgentExecution,
@@ -131,8 +133,16 @@ def health() -> dict[str, str]:
 
 
 @router.post("/execute", response_model=ExecuteResponse)
-def execute(payload: ExecuteRequest, background_tasks: BackgroundTasks) -> ExecuteResponse:
-    execution = orchestration_runtime.submit(payload.question, background_tasks)
+def execute(
+    payload: ExecuteRequest,
+    background_tasks: BackgroundTasks,
+    session: RequestSession = Depends(get_request_session),
+) -> ExecuteResponse:
+    execution = orchestration_runtime.submit(
+        payload.question,
+        background_tasks,
+        workspace_id=session.workspace_id,
+    )
     return ExecuteResponse(
         workflow_id=execution.workflow_id,
         question=execution.question,

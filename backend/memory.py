@@ -5,6 +5,8 @@ from math import sqrt
 from typing import Any, Literal, Protocol
 from uuid import uuid4
 
+from backend.models import DEFAULT_WORKSPACE_ID
+
 
 MemoryNamespace = Literal[
     "semantic_dataset_summary",
@@ -18,12 +20,14 @@ MemoryNamespace = Literal[
 class MemoryDocument:
     namespace: MemoryNamespace
     text: str
+    workspace_id: str = DEFAULT_WORKSPACE_ID
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class MemoryRecord:
     memory_id: str
+    workspace_id: str
     namespace: MemoryNamespace
     text: str
     embedding: tuple[float, ...]
@@ -33,6 +37,7 @@ class MemoryRecord:
 @dataclass(frozen=True)
 class MemorySearchResult:
     memory_id: str
+    workspace_id: str
     namespace: MemoryNamespace
     text: str
     score: float
@@ -52,6 +57,7 @@ class VectorMemoryStore(Protocol):
         self,
         query: str,
         *,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
         namespace: MemoryNamespace | None = None,
         top_k: int = 5,
     ) -> tuple[MemorySearchResult, ...]:
@@ -78,6 +84,7 @@ class InMemoryVectorMemoryStore:
     def upsert(self, document: MemoryDocument) -> MemoryRecord:
         record = MemoryRecord(
             memory_id=f"memory:{uuid4()}",
+            workspace_id=document.workspace_id,
             namespace=document.namespace,
             text=document.text,
             embedding=self.embedding_service.embed(document.text),
@@ -90,6 +97,7 @@ class InMemoryVectorMemoryStore:
         self,
         query: str,
         *,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
         namespace: MemoryNamespace | None = None,
         top_k: int = 5,
     ) -> tuple[MemorySearchResult, ...]:
@@ -97,11 +105,12 @@ class InMemoryVectorMemoryStore:
         candidates = [
             record
             for record in self._records.values()
-            if namespace is None or record.namespace == namespace
+            if record.workspace_id == workspace_id and (namespace is None or record.namespace == namespace)
         ]
         results = [
             MemorySearchResult(
                 memory_id=record.memory_id,
+                workspace_id=record.workspace_id,
                 namespace=record.namespace,
                 text=record.text,
                 score=_cosine_similarity(query_embedding, record.embedding),
