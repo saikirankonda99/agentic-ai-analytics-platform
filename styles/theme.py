@@ -909,6 +909,7 @@ def get_theme_css() -> str:
         background:
             linear-gradient(180deg, rgba(14, 20, 35, 0.9), rgba(10, 15, 28, 0.94));
         transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+        overflow: hidden;
     }
 
     .default-module {
@@ -994,6 +995,7 @@ def get_theme_css() -> str:
         border-radius: 18px;
         background: rgba(148, 163, 184, 0.05);
         border: 1px solid rgba(148, 163, 184, 0.1);
+        overflow-wrap: anywhere;
     }
 
     .workspace-list-item {
@@ -1004,6 +1006,7 @@ def get_theme_css() -> str:
         background: rgba(148, 163, 184, 0.05);
         border: 1px solid rgba(148, 163, 184, 0.1);
         line-height: 1.5;
+        overflow-wrap: anywhere;
     }
 
     .workspace-list-item:last-child {
@@ -1376,6 +1379,26 @@ def get_theme_css() -> str:
 
     [data-testid="stHorizontalBlock"] {
         gap: 0.65rem !important;
+    }
+
+    div[data-testid="stDownloadButton"] button {
+        min-height: 42px;
+    }
+
+    .workspace-module,
+    .workflow-timeline-card,
+    .agent-monitor-panel,
+    .orchestration-badge,
+    .observability-metric {
+        transition: transform 180ms ease, border-color 180ms ease, background 180ms ease, box-shadow 180ms ease;
+    }
+
+    .workflow-timeline-card:hover,
+    .agent-monitor-panel:hover,
+    .orchestration-badge:hover,
+    .observability-metric:hover {
+        transform: translateY(-1px);
+        border-color: rgba(86, 204, 242, 0.22);
     }
 
     [data-testid="stAppViewBlockContainer"],

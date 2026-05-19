@@ -147,7 +147,7 @@ def render_hero() -> None:
 
 
 def render_top_navigation(active_nav: str = "Overview") -> str:
-    nav_options = ["Overview", "Copilot", "History"]
+    nav_options = ["Overview", "Operations", "Copilot", "Investigations", "Monitoring", "Agents", "API", "History"]
     if active_nav not in nav_options:
         active_nav = "Overview"
 
@@ -155,7 +155,7 @@ def render_top_navigation(active_nav: str = "Overview") -> str:
         """
         <div class="top-nav-shell">
             <div>
-                <div class="top-nav-title">Analytics Operations</div>
+                <div class="top-nav-title">Analytics Operations Workspace</div>
                 <div class="top-nav-subtitle">Unified workspace for query execution, orchestration, monitoring, and audit trails.</div>
             </div>
         </div>
@@ -182,53 +182,54 @@ def render_sidebar() -> dict:
             """
         )
 
-        st.markdown("### Control Center")
-        clear_chat = st.button("Clear session", width="stretch")
-        show_schema = st.toggle("Show database schema", value=False)
+        with st.expander("Orchestration Controls", expanded=True):
+            clear_chat = st.button("Clear session", width="stretch")
+            show_schema = st.toggle("Show database schema", value=False)
 
-        st.markdown("### Workspace")
-        current_identity = st.session_state.get("user_identity", {})
-        workspace_user = st.text_input("User", value=current_identity.get("user_id", "local.user"))
-        workspace_team = st.text_input("Team", value=current_identity.get("team_id", "default-team"))
-        workspace_role = st.selectbox(
-            "Role",
-            ["admin", "analyst", "viewer"],
-            index=["admin", "analyst", "viewer"].index(current_identity.get("role", "admin"))
-            if current_identity.get("role", "admin") in ["admin", "analyst", "viewer"]
-            else 0,
-        )
+        with st.expander("Workspace Context", expanded=True):
+            current_identity = st.session_state.get("user_identity", {})
+            workspace_user = st.text_input("User", value=current_identity.get("user_id", "local.user"))
+            workspace_team = st.text_input("Team", value=current_identity.get("team_id", "default-team"))
+            workspace_role = st.selectbox(
+                "Role",
+                ["admin", "analyst", "viewer"],
+                index=["admin", "analyst", "viewer"].index(current_identity.get("role", "admin"))
+                if current_identity.get("role", "admin") in ["admin", "analyst", "viewer"]
+                else 0,
+            )
 
-        st.markdown("### Sample Prompts")
-        for query in SAMPLE_PROMPTS:
-            markdown_html(f'<div class="sample-query">{escape_html(query)}</div>')
+        with st.expander("Launch Templates", expanded=False):
+            for query in SAMPLE_PROMPTS:
+                markdown_html(f'<div class="sample-query">{escape_html(query)}</div>')
 
-        st.markdown("### CSV Upload")
-        uploaded_file = st.file_uploader("Upload CSV", type=["csv"], label_visibility="collapsed")
+        with st.expander("Dataset Upload", expanded=False):
+            uploaded_file = st.file_uploader("Upload CSV", type=["csv"], label_visibility="collapsed")
 
-        st.markdown("### Scheduled Monitoring")
-        monitoring_enabled = st.toggle(
-            "Enable scheduled checks",
-            value=st.session_state.get("monitoring_config", {}).get("enabled", False),
-        )
-        monitoring_targets = st.multiselect(
-            "KPI targets",
-            ["revenue", "customers", "orders", "growth", "anomalies"],
-            default=st.session_state.get("monitoring_config", {}).get(
-                "targets",
+        with st.expander("Scheduled Monitoring", expanded=False):
+            monitoring_enabled = st.toggle(
+                "Enable scheduled checks",
+                value=st.session_state.get("monitoring_config", {}).get("enabled", False),
+            )
+            monitoring_targets = st.multiselect(
+                "KPI targets",
                 ["revenue", "customers", "orders", "growth", "anomalies"],
-            ),
-        )
-        monitoring_interval = st.selectbox(
-            "Cadence",
-            [15, 30, 60, 240, 1440],
-            index=[15, 30, 60, 240, 1440].index(
-                st.session_state.get("monitoring_config", {}).get("interval_minutes", 60)
-                if st.session_state.get("monitoring_config", {}).get("interval_minutes", 60) in [15, 30, 60, 240, 1440]
-                else 60
-            ),
-            format_func=lambda value: f"{value} min" if value < 1440 else "Daily",
-        )
-        run_monitoring = st.button("Run scheduled check", width="stretch")
+                default=st.session_state.get("monitoring_config", {}).get(
+                    "targets",
+                    ["revenue", "customers", "orders", "growth", "anomalies"],
+                ),
+            )
+            monitoring_interval = st.selectbox(
+                "Cadence",
+                [15, 30, 60, 240, 1440],
+                index=[15, 30, 60, 240, 1440].index(
+                    st.session_state.get("monitoring_config", {}).get("interval_minutes", 60)
+                    if st.session_state.get("monitoring_config", {}).get("interval_minutes", 60)
+                    in [15, 30, 60, 240, 1440]
+                    else 60
+                ),
+                format_func=lambda value: f"{value} min" if value < 1440 else "Daily",
+            )
+            run_monitoring = st.button("Run scheduled check", width="stretch")
 
         return {
             "nav": st.session_state.get("top_navigation", "Overview"),

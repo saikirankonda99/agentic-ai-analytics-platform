@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from datetime import datetime
+from datetime import UTC, datetime
 
 _DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "cost_log.db")
 
@@ -53,7 +53,7 @@ def log_query_cost(
     conn.execute(
         "INSERT INTO query_log (ts, question, model, input_tok, output_tok, cost_usd, latency_ms) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (datetime.utcnow().isoformat(), question, model, tokens, 0, cost_usd, latency_ms),
+        (datetime.now(UTC).isoformat(), question, model, tokens, 0, cost_usd, latency_ms),
     )
     conn.commit()
     conn.close()

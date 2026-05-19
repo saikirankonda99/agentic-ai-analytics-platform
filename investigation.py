@@ -18,6 +18,10 @@ def empty_investigation_state() -> dict[str, Any]:
         "severity": "info",
         "queries": [],
         "summary": "No autonomous investigation has run yet.",
+        "lifecycle": [],
+        "evidence": [],
+        "score": 0.0,
+        "reasoning_trace": [],
         "telemetry": {
             "steps": [],
             "prompt_tokens": 0,
@@ -29,6 +33,25 @@ def empty_investigation_state() -> dict[str, Any]:
             "usage_available": False,
         },
     }
+
+
+def investigation_lifecycle_event(stage: str, status: str, detail: str) -> dict[str, Any]:
+    return {
+        "stage": stage,
+        "status": status,
+        "detail": detail,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+
+
+def score_investigation(state: dict[str, Any]) -> float:
+    queries = state.get("queries", [])
+    if not queries:
+        return 0.0
+    successful = len([item for item in queries if item.get("status") == "success"])
+    evidence = len(state.get("evidence", []))
+    severity_weight = {"info": 0.1, "warning": 0.2, "critical": 0.3}.get(state.get("severity", "info"), 0.1)
+    return round(min(1.0, successful / max(len(queries), 1) * 0.55 + min(evidence, 4) * 0.05 + severity_weight), 2)
 
 
 def should_investigate(insight_state: dict[str, Any] | None) -> bool:
@@ -148,6 +171,14 @@ def run_investigation(
         "severity": insight_state.get("severity", "warning"),
         "summary": "Autonomous investigation is running.",
     }
+    state["lifecycle"].append(investigation_lifecycle_event("planning", "completed", "Investigation plan created from insight findings."))
+    state["reasoning_trace"].append(
+        {
+            "stage": "planning",
+            "summary": "Prioritized warning and critical findings, then generated narrow SQL probes.",
+            "findings_considered": len(insight_state.get("findings", [])),
+        }
+    )
     findings = _finding_priority(insight_state.get("findings", []))[:max_queries]
     schema = get_schema()
 
@@ -174,6 +205,7 @@ def run_investigation(
         if not sql or sql.startswith("ERROR:"):
             query_record.update({"status": "error", "summary": sql or "SQL generation failed."})
             state["queries"].append(query_record)
+            state["lifecycle"].append(investigation_lifecycle_event("query_generation", "failed", query_record["summary"]))
             if callback:
                 callback("warning", "investigation", query_record["summary"])
             continue
@@ -181,6 +213,7 @@ def run_investigation(
         if not is_safe_sql(sql):
             query_record.update({"status": "blocked", "summary": "Investigation query blocked by SQL guardrails."})
             state["queries"].append(query_record)
+            state["lifecycle"].append(investigation_lifecycle_event("guardrails", "blocked", query_record["summary"]))
             if callback:
                 callback("warning", "investigation", query_record["summary"])
             continue
@@ -197,10 +230,20 @@ def run_investigation(
                     "summary": _result_summary(columns, rows),
                 }
             )
+            state["evidence"].append(
+                {
+                    "finding_title": query_record["finding_title"],
+                    "row_count": len(rows),
+                    "columns": columns,
+                    "summary": query_record["summary"],
+                }
+            )
+            state["lifecycle"].append(investigation_lifecycle_event("evidence_collection", "completed", query_record["summary"]))
             if callback:
                 callback("completed", "investigation", query_record["summary"])
         except Exception as exc:
             query_record.update({"status": "error", "summary": str(exc)})
+            state["lifecycle"].append(investigation_lifecycle_event("evidence_collection", "failed", str(exc)))
             if callback:
                 callback("warning", "investigation", str(exc))
         state["queries"].append(query_record)
@@ -213,4 +256,6 @@ def run_investigation(
         state["summary"] = f"Investigation completed with {len(successful)} successful drill-down query(s)."
     else:
         state["summary"] = "Investigation ran but did not produce a successful drill-down query."
+    state["score"] = score_investigation(state)
+    state["lifecycle"].append(investigation_lifecycle_event("summary", state["status"], state["summary"]))
     return state

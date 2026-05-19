@@ -14,8 +14,8 @@ UsageEventType = Literal[
     "estimated_ai_cost",
 ]
 
-WorkflowLifecycleState = Literal["queued", "running", "completed", "failed"]
-AgentExecutionStatus = Literal["queued", "running", "completed", "failed"]
+WorkflowLifecycleState = Literal["queued", "running", "retrying", "completed", "failed", "skipped"]
+AgentExecutionStatus = Literal["queued", "running", "retrying", "completed", "failed", "skipped"]
 WorkflowStage = Literal[
     "planning",
     "schema_analysis",
@@ -191,6 +191,55 @@ class OrchestrationExecution:
 
 
 @dataclass(frozen=True)
+class AnalyticsWorkflowResult:
+    question: str
+    effective_question: str
+    sql: str
+    columns: tuple[str, ...]
+    rows: tuple[Any, ...]
+    error: str | None
+    trace: tuple[dict[str, Any], ...]
+    telemetry: dict[str, Any]
+    execution_graph: dict[str, Any] = field(default_factory=dict)
+    stage_confidence: dict[str, float] = field(default_factory=dict)
+    recovery: dict[str, Any] = field(default_factory=dict)
+    policy_decision: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_mapping(cls, payload: dict[str, Any]) -> "AnalyticsWorkflowResult":
+        return cls(
+            question=payload.get("question", ""),
+            effective_question=payload.get("effective_question", payload.get("question", "")),
+            sql=payload.get("sql", ""),
+            columns=tuple(payload.get("columns", [])),
+            rows=tuple(payload.get("rows", [])),
+            error=payload.get("error"),
+            trace=tuple(payload.get("trace", [])),
+            telemetry=dict(payload.get("telemetry", {})),
+            execution_graph=dict(payload.get("execution_graph", {})),
+            stage_confidence=dict(payload.get("stage_confidence", {})),
+            recovery=dict(payload.get("recovery", {})),
+            policy_decision=dict(payload.get("policy_decision", {})),
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "question": self.question,
+            "effective_question": self.effective_question,
+            "sql": self.sql,
+            "columns": list(self.columns),
+            "rows": list(self.rows),
+            "error": self.error,
+            "trace": list(self.trace),
+            "telemetry": self.telemetry,
+            "execution_graph": self.execution_graph,
+            "stage_confidence": self.stage_confidence,
+            "recovery": self.recovery,
+            "policy_decision": self.policy_decision,
+        }
+
+
+@dataclass(frozen=True)
 class UsageRecord:
     usage_id: str
     organization_id: str
@@ -211,6 +260,7 @@ __all__ = [
     "DEFAULT_ORGANIZATION_ID",
     "DEFAULT_USER_ID",
     "DEFAULT_WORKSPACE_ID",
+    "AnalyticsWorkflowResult",
     "OrchestrationExecution",
     "Organization",
     "RequestSession",

@@ -8,6 +8,7 @@ from backend.agents import MultiAgentCoordinator
 from backend.logging import get_logger
 from backend.memory import MemoryDocument, VectorMemoryStore, build_vector_memory_store
 from backend.models import (
+    AnalyticsWorkflowResult,
     DEFAULT_ORGANIZATION_ID,
     DEFAULT_USER_ID,
     DEFAULT_WORKSPACE_ID,
@@ -42,6 +43,7 @@ from backend.storage import (
     WorkflowStorage,
 )
 from backend.usage import UsageService, usage_service
+from backend.telemetry import validate_telemetry_payload
 
 
 if TYPE_CHECKING:
@@ -599,13 +601,15 @@ class AnalyticsBackendService:
 
         schema_context = semantic_context or profile_schema(get_schema(), name="Chinook SQL schema")
         workflow_context = {**schema_context, "prompt_block": semantic_prompt_block(schema_context)}
-        result = run_workflow(
+        raw_result = run_workflow(
             question,
             callback=callback,
             semantic_context=workflow_context,
             conversation_context=conversation_context,
             workspace_context=workspace_context,
         )
+        raw_result["telemetry"] = validate_telemetry_payload(raw_result.get("telemetry", {}))
+        result = AnalyticsWorkflowResult.from_mapping(raw_result).as_dict()
         run_id = f"workflow:{datetime.now().isoformat(timespec='seconds')}"
         self.cache.set(run_id, result)
         self.cache.set("workflow:latest", result)

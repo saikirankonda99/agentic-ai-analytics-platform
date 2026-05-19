@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse
 
 from backend.auth_context import get_request_session
+from backend.diagnostics import runtime_diagnostics
 from backend.logging import get_logger
 from backend.models import DEFAULT_ORGANIZATION_ID, DEFAULT_WORKSPACE_ID, RequestSession
 from backend.runtime import orchestration_runtime
@@ -20,16 +21,20 @@ from backend.services import (
     WorkflowStageProgress,
     WorkflowStreamUpdate,
     WorkflowTelemetry,
+    backend_service,
     orchestration_service,
 )
+from backend.telemetry import RUNTIME_EVENT_TYPES, TELEMETRY_SCHEMA_VERSION, filter_telemetry_events
+from backend.workspace_inspection import saved_sql_history, workflow_transcripts, workspace_summary
 from backend.websocket import websocket_manager, workflow_channel
+from workspace import load_workspace_memory_by_id
 
 logger = get_logger(__name__)
 
 SERVICE_NAME = "agentic-ai-analytics-backend"
 SERVICE_VERSION = "0.1.0"
-WorkflowStatus = Literal["queued", "running", "completed", "failed"]
-AgentStatus = Literal["queued", "running", "completed", "failed"]
+WorkflowStatus = Literal["queued", "running", "retrying", "completed", "failed", "skipped"]
+AgentStatus = Literal["queued", "running", "retrying", "completed", "failed", "skipped"]
 WorkflowStageName = Literal[
     "planning",
     "schema_analysis",
@@ -151,6 +156,18 @@ class WorkflowStatusResponse(BaseModel):
     agent_traces: list[AgentCoordinationTraceResponse]
 
 
+class WorkflowReplayResponse(BaseModel):
+    workflow_id: str
+    updates: list[WorkflowStreamUpdateResponse]
+
+
+class OperationsSummaryResponse(BaseModel):
+    status: str
+    readiness: dict[str, str]
+    workflow_storage: str
+    telemetry_schema_version: str
+
+
 @router.get("/health")
 def health() -> dict[str, str]:
     return {
@@ -164,6 +181,23 @@ def health() -> dict[str, str]:
 @router.get("/ready")
 def readiness() -> dict[str, str]:
     return orchestration_service.readiness()
+
+
+@router.get("/diagnostics")
+def diagnostics() -> dict[str, object]:
+    ready = orchestration_service.readiness()
+    return runtime_diagnostics(ready)
+
+
+@router.get("/operations/summary", response_model=OperationsSummaryResponse)
+def operations_summary_endpoint() -> OperationsSummaryResponse:
+    ready = orchestration_service.readiness()
+    return OperationsSummaryResponse(
+        status=ready.get("status", "unknown"),
+        readiness=ready,
+        workflow_storage=ready.get("workflow_storage", "unknown"),
+        telemetry_schema_version=TELEMETRY_SCHEMA_VERSION,
+    )
 
 
 @router.post("/execute", response_model=ExecuteResponse)
@@ -227,6 +261,84 @@ def get_workflow_events(workflow_id: str) -> WorkflowEventsResponse:
         workflow_id=workflow_id,
         events=_events_response(events),
     )
+
+
+@router.get("/workflow/{workflow_id}/telemetry", response_model=WorkflowTelemetryResponse)
+def get_workflow_telemetry(workflow_id: str) -> WorkflowTelemetryResponse:
+    workflow = orchestration_service.get_workflow(workflow_id)
+    if workflow is None:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    return _telemetry_response(workflow.telemetry)
+
+
+@router.get("/workflow/{workflow_id}/replay", response_model=WorkflowReplayResponse)
+def replay_workflow(workflow_id: str) -> WorkflowReplayResponse:
+    updates = orchestration_service.get_stream_updates(workflow_id)
+    if updates is None:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    return WorkflowReplayResponse(
+        workflow_id=workflow_id,
+        updates=[WorkflowStreamUpdateResponse(**_stream_update_payload(update)) for update in updates],
+    )
+
+
+@router.get("/telemetry/schema")
+def telemetry_schema() -> dict[str, object]:
+    return {
+        "schema_version": TELEMETRY_SCHEMA_VERSION,
+        "event_types": list(RUNTIME_EVENT_TYPES),
+    }
+
+
+@router.get("/workflow/{workflow_id}/telemetry/events")
+def workflow_telemetry_events(workflow_id: str, q: str = "", phase: str = "", status: str = "") -> dict[str, object]:
+    updates = orchestration_service.get_stream_updates(workflow_id)
+    if updates is None:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    events = [
+        {
+            "timestamp": update.timestamp,
+            "phase": update.payload.get("stage") or update.payload.get("event_type") or update.update_type,
+            "status": update.payload.get("status") or update.payload.get("agent_status") or update.update_type,
+            "message": update.message,
+            "payload": update.payload,
+        }
+        for update in updates
+    ]
+    return {"workflow_id": workflow_id, "events": filter_telemetry_events(events, query=q, phase=phase, status=status)}
+
+
+@router.get("/investigations/latest")
+def latest_investigation() -> dict[str, object]:
+    return backend_service.cache.get("investigation:latest") or {
+        "status": "empty",
+        "summary": "No investigation has been persisted in the current backend process.",
+    }
+
+
+@router.get("/workspace/{workspace_id}/inspection")
+def inspect_workspace(workspace_id: str) -> dict[str, object]:
+    memory = load_workspace_memory_by_id(workspace_id)
+    return workspace_summary(memory)
+
+
+@router.get("/workspace/{workspace_id}/transcripts")
+def export_workspace_transcripts(workspace_id: str, session_id: str = "") -> dict[str, object]:
+    memory = load_workspace_memory_by_id(workspace_id)
+    return {
+        "workspace_id": memory.get("workspace_id", workspace_id),
+        "session_id": session_id or None,
+        "transcripts": workflow_transcripts(memory, session_id=session_id or None),
+    }
+
+
+@router.get("/workspace/{workspace_id}/sql-history")
+def export_workspace_sql_history(workspace_id: str, limit: int = 25) -> dict[str, object]:
+    memory = load_workspace_memory_by_id(workspace_id)
+    return {
+        "workspace_id": memory.get("workspace_id", workspace_id),
+        "items": saved_sql_history(memory, limit=max(1, min(limit, 100))),
+    }
 
 
 @router.get("/workflow/{workflow_id}/stream")
@@ -349,7 +461,7 @@ def _stream_update_payload(update: WorkflowStreamUpdate) -> dict[str, object]:
         message=update.message,
         payload=update.payload,
     )
-    return event.dict()
+    return event.model_dump()
 
 
 __all__ = ["router"]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from os import getenv
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -42,7 +43,23 @@ def get_settings() -> AppSettings:
     )
 
 
+def validate_settings(config: AppSettings | None = None) -> dict[str, Any]:
+    config = config or settings
+    warnings = []
+    if not config.workflow_database_url.startswith("sqlite:///") and not config.postgres_url:
+        warnings.append("Non-sqlite workflow storage requires POSTGRES_URL for production deployment.")
+    if config.environment == "production" and not config.redis_url:
+        warnings.append("Production orchestration should configure REDIS_URL or another durable worker backend.")
+    return {
+        "environment": config.environment,
+        "valid": not warnings,
+        "warnings": warnings,
+        "workflow_database_url": config.workflow_database_url,
+        "queue": config.orchestration_queue,
+    }
+
+
 settings = get_settings()
 
 
-__all__ = ["AppSettings", "get_settings", "settings"]
+__all__ = ["AppSettings", "get_settings", "settings", "validate_settings"]

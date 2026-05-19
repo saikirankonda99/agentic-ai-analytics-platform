@@ -158,6 +158,45 @@ This observability layer exists to make debugging and evaluation possible.
 
 ---
 
+# Production Workspace Evolution
+
+The current workspace is organized as an AI analytics operations console rather than a single chat demo.
+
+Primary sections:
+- `Overview`: natural-language analytics execution, charts, SQL inspection, and insight summaries
+- `Operations`: AI operations center with runtime health, workflow queue visibility, agent utilization, trends, and recommendations
+- `Copilot`: conversation history, workflow timeline, and model telemetry
+- `Investigations`: autonomous drill-down sessions, persisted investigation memory, and recommendation follow-ups
+- `Monitoring`: scheduled KPI checks, executive briefing state, and monitoring run history
+- `Agents`: active agent panels, reasoning snapshots, latency breakdowns, and telemetry exports
+- `API`: runtime diagnostics, endpoint map, OpenAI posture, and exportable observability payloads
+- `History`: recent workflow runs and generated SQL
+
+Operational improvements:
+- workflow correlation IDs across UI, telemetry, and logs
+- centralized telemetry schema in `backend.telemetry`
+- coordinator execution graph with agent dependencies, transition timestamps, confidence, and recovery state
+- execution policy diagnostics with retry, confidence, degradation, and escalation decisions
+- persisted workspace sessions with replayable transcripts
+- OpenAI request diagnostics with exception chains and retry metadata
+- JSON/CSV telemetry export for support and debugging
+- FastAPI `/diagnostics` endpoint for runtime posture
+- workflow inspection endpoints for telemetry, replay, and investigation retrieval
+- workspace inspection endpoints for session transcripts, saved SQL history, and report exports
+- operations endpoints for telemetry event filtering and control-plane summaries
+
+Detailed control-plane notes are available in [docs/platform-control-plane.md](docs/platform-control-plane.md).
+
+Recommended local validation:
+
+```bash
+python -m ruff check
+python -m pytest
+python -m streamlit run app.py --server.port 8501 --server.headless true
+```
+
+---
+
 # Repository Structure
 
 ```text

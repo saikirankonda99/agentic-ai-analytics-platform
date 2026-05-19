@@ -25,6 +25,7 @@ except Exception:  # pragma: no cover - supports isolated imports in tooling
 DOTENV_PATH = Path(__file__).resolve().parent / ".env"
 DOTENV_LOADED = load_dotenv(DOTENV_PATH)
 DEFAULT_SQL_MODEL = "gpt-4o-mini"
+DEFAULT_FALLBACK_MODEL = os.getenv("OPENAI_FALLBACK_MODEL", "").strip()
 DEFAULT_OPENAI_TIMEOUT_SECONDS = float(os.getenv("OPENAI_TIMEOUT_SECONDS", "30"))
 DEFAULT_OPENAI_MAX_ATTEMPTS = max(int(os.getenv("OPENAI_MAX_ATTEMPTS", "2")), 1)
 OPENAI_TRUST_ENV = os.getenv("OPENAI_TRUST_ENV", "false").lower() in {"1", "true", "yes"}
@@ -55,6 +56,7 @@ def validate_openai_runtime() -> dict[str, Any]:
         "api_key_configured": bool(get_openai_api_key()),
         "timeout_seconds": DEFAULT_OPENAI_TIMEOUT_SECONDS,
         "max_attempts": DEFAULT_OPENAI_MAX_ATTEMPTS,
+        "fallback_model": DEFAULT_FALLBACK_MODEL or None,
         "trust_env": OPENAI_TRUST_ENV,
         "proxy_env": _configured_proxy_env(),
     }
@@ -191,6 +193,13 @@ def _request_error_text(error: dict[str, Any]) -> str:
     return f"ERROR: {error.get('error_type', 'OpenAIError')}: {error.get('error_message', 'Request failed')}.{root_text}"
 
 
+def _model_candidates(model: str) -> list[str]:
+    candidates = [model]
+    if DEFAULT_FALLBACK_MODEL and DEFAULT_FALLBACK_MODEL not in candidates:
+        candidates.append(DEFAULT_FALLBACK_MODEL)
+    return candidates
+
+
 def generate_sql_with_telemetry(question: str, schema: str, model: str = DEFAULT_SQL_MODEL) -> dict[str, Any]:
     prompt = f"""
 You are an expert SQL generator.
@@ -212,24 +221,45 @@ User question:
     started = time.perf_counter()
     last_error = None
 
-    for attempt in range(1, DEFAULT_OPENAI_MAX_ATTEMPTS + 1):
-        try:
-            response = get_openai_client().chat.completions.create(**_chat_completion_payload(prompt, model, 0))
-            content = response.choices[0].message.content or ""
-            return {
-                "sql": content.strip().replace("```sql", "").replace("```", ""),
-                "telemetry": _telemetry(model, started=started, usage=getattr(response, "usage", None)),
-            }
-        except (APIConnectionError, APITimeoutError, APIStatusError, APIError, httpx.HTTPError, RuntimeError) as exc:
-            last_error = _log_openai_exception(
-                exc,
-                attempt=attempt,
-                attempts=DEFAULT_OPENAI_MAX_ATTEMPTS,
-                operation="chat.completions.create",
-            )
-            if attempt < DEFAULT_OPENAI_MAX_ATTEMPTS:
-                time.sleep(0.4 * attempt)
+    candidates = _model_candidates(model)
+    for candidate_model in candidates:
+        for attempt in range(1, DEFAULT_OPENAI_MAX_ATTEMPTS + 1):
+            try:
+                response = get_openai_client().chat.completions.create(
+                    **_chat_completion_payload(prompt, candidate_model, 0)
+                )
+                content = response.choices[0].message.content or ""
+                telemetry = _telemetry(candidate_model, started=started, usage=getattr(response, "usage", None))
+                if candidate_model != model:
+                    telemetry["fallback_model"] = candidate_model
+                    telemetry["primary_model"] = model
+                return {
+                    "sql": content.strip().replace("```sql", "").replace("```", ""),
+                    "telemetry": telemetry,
+                }
+            except (APIConnectionError, APITimeoutError, APIStatusError, APIError, httpx.HTTPError, RuntimeError) as exc:
+                last_error = _log_openai_exception(
+                    exc,
+                    attempt=attempt,
+                    attempts=DEFAULT_OPENAI_MAX_ATTEMPTS,
+                    operation="chat.completions.create",
+                )
+                if attempt < DEFAULT_OPENAI_MAX_ATTEMPTS:
+                    time.sleep(0.4 * attempt)
+                    continue
+                break
 
+        if candidate_model != candidates[-1]:
+            logger.warning(
+                "openai_primary_model_failed attempting_fallback primary_model=%s fallback_model=%s error_type=%s",
+                model,
+                candidates[-1],
+                (last_error or {}).get("error_type"),
+            )
+
+    if last_error and len(candidates) > 1:
+        last_error["fallback_model"] = candidates[-1]
+        last_error["primary_model"] = model
     return {
         "sql": _request_error_text(last_error or {}),
         "telemetry": _telemetry(model, started=started, error=last_error),
@@ -282,55 +312,73 @@ def stream_text_with_telemetry(
     started = time.perf_counter()
     last_error = None
 
-    for attempt in range(1, DEFAULT_OPENAI_MAX_ATTEMPTS + 1):
-        content_parts = []
-        try:
+    for candidate_model in _model_candidates(model):
+        for attempt in range(1, DEFAULT_OPENAI_MAX_ATTEMPTS + 1):
+            content_parts = []
             try:
-                stream = get_openai_client().chat.completions.create(
-                    **_chat_completion_payload(prompt, model, temperature, stream=True)
-                )
-            except TypeError:
-                fallback_payload = {
-                    key: value
-                    for key, value in _chat_completion_payload(prompt, model, temperature, stream=True).items()
-                    if key != "stream_options"
+                try:
+                    stream = get_openai_client().chat.completions.create(
+                        **_chat_completion_payload(prompt, candidate_model, temperature, stream=True)
+                    )
+                except TypeError:
+                    fallback_payload = {
+                        key: value
+                        for key, value in _chat_completion_payload(prompt, candidate_model, temperature, stream=True).items()
+                        if key != "stream_options"
+                    }
+                    stream = get_openai_client().chat.completions.create(**fallback_payload)
+
+                usage = None
+                for chunk in stream:
+                    usage = getattr(chunk, "usage", None) or usage
+                    choices = getattr(chunk, "choices", None) or []
+                    if not choices:
+                        continue
+                    delta = getattr(choices[0], "delta", None)
+                    token = getattr(delta, "content", None) if delta is not None else None
+                    if not token:
+                        continue
+                    content_parts.append(token)
+                    if token_callback is not None:
+                        token_callback(token, "".join(content_parts))
+
+                text = "".join(content_parts).strip()
+                if cleanup_sql:
+                    text = text.replace("```sql", "").replace("```", "").strip()
+
+                telemetry = _telemetry(candidate_model, started=started, usage=usage)
+                if candidate_model != model:
+                    telemetry["fallback_model"] = candidate_model
+                    telemetry["primary_model"] = model
+                return {
+                    "sql": text,
+                    "text": text,
+                    "telemetry": telemetry,
                 }
-                stream = get_openai_client().chat.completions.create(**fallback_payload)
-
-            usage = None
-            for chunk in stream:
-                usage = getattr(chunk, "usage", None) or usage
-                choices = getattr(chunk, "choices", None) or []
-                if not choices:
+            except (APIConnectionError, APITimeoutError, APIStatusError, APIError, httpx.HTTPError, RuntimeError) as exc:
+                last_error = _log_openai_exception(
+                    exc,
+                    attempt=attempt,
+                    attempts=DEFAULT_OPENAI_MAX_ATTEMPTS,
+                    operation="chat.completions.create.stream",
+                )
+                if attempt < DEFAULT_OPENAI_MAX_ATTEMPTS:
+                    time.sleep(0.4 * attempt)
                     continue
-                delta = getattr(choices[0], "delta", None)
-                token = getattr(delta, "content", None) if delta is not None else None
-                if not token:
-                    continue
-                content_parts.append(token)
-                if token_callback is not None:
-                    token_callback(token, "".join(content_parts))
+                break
 
-            text = "".join(content_parts).strip()
-            if cleanup_sql:
-                text = text.replace("```sql", "").replace("```", "").strip()
-
-            return {
-                "sql": text,
-                "text": text,
-                "telemetry": _telemetry(model, started=started, usage=usage),
-            }
-        except (APIConnectionError, APITimeoutError, APIStatusError, APIError, httpx.HTTPError, RuntimeError) as exc:
-            last_error = _log_openai_exception(
-                exc,
-                attempt=attempt,
-                attempts=DEFAULT_OPENAI_MAX_ATTEMPTS,
-                operation="chat.completions.create.stream",
+        if candidate_model != _model_candidates(model)[-1]:
+            logger.warning(
+                "openai_stream_primary_model_failed attempting_fallback primary_model=%s fallback_model=%s error_type=%s",
+                model,
+                _model_candidates(model)[-1],
+                (last_error or {}).get("error_type"),
             )
-            if attempt < DEFAULT_OPENAI_MAX_ATTEMPTS:
-                time.sleep(0.4 * attempt)
 
     if last_error is not None:
+        if len(_model_candidates(model)) > 1:
+            last_error["fallback_model"] = _model_candidates(model)[-1]
+            last_error["primary_model"] = model
         error_text = _request_error_text(last_error)
         return {
             "sql": error_text,

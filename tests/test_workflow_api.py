@@ -12,12 +12,19 @@ def test_execute_and_fetch_workflow() -> None:
     workflow_id = created["workflow_id"]
     fetched = client.get(f"/workflow/{workflow_id}").json()
     events = client.get(f"/workflow/{workflow_id}/events").json()
+    telemetry = client.get(f"/workflow/{workflow_id}/telemetry").json()
+    replay = client.get(f"/workflow/{workflow_id}/replay").json()
+    telemetry_events = client.get(f"/workflow/{workflow_id}/telemetry/events").json()
 
     assert created["status"] == "queued"
     assert fetched["status"] == "completed"
     assert fetched["telemetry"]["latency_ms"] is not None
     assert len(fetched["agent_executions"]) >= 6
     assert events["workflow_id"] == workflow_id
+    assert telemetry["token_usage"]["total_tokens"] >= 0
+    assert replay["workflow_id"] == workflow_id
+    assert replay["updates"]
+    assert telemetry_events["workflow_id"] == workflow_id
 
 
 def test_health_and_readiness() -> None:
@@ -25,6 +32,26 @@ def test_health_and_readiness() -> None:
 
     assert client.get("/health").json()["status"] == "ok"
     readiness = client.get("/ready").json()
+    diagnostics = client.get("/diagnostics").json()
 
     assert readiness["status"] in {"ready", "degraded"}
     assert readiness["workflow_storage"] == "ok"
+    assert diagnostics["telemetry_schema_version"]
+    assert "openai" in diagnostics
+    assert "execution_policy" in diagnostics
+    assert client.get("/telemetry/schema").json()["schema_version"]
+    assert client.get("/operations/summary").json()["telemetry_schema_version"]
+    assert client.get("/investigations/latest").json()["status"] in {"empty", "idle", "running", "completed", "failed"}
+
+
+def test_workspace_inspection_api() -> None:
+    client = TestClient(app)
+
+    inspection = client.get("/workspace/default-team.local.user/inspection").json()
+    transcripts = client.get("/workspace/default-team.local.user/transcripts").json()
+    sql_history = client.get("/workspace/default-team.local.user/sql-history").json()
+
+    assert inspection["workspace_id"] == "default-team.local.user"
+    assert "telemetry" in inspection
+    assert transcripts["workspace_id"] == "default-team.local.user"
+    assert "items" in sql_history

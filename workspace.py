@@ -5,6 +5,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -46,6 +47,8 @@ def default_workspace_memory(identity: dict[str, Any] | None = None) -> dict[str
         "generated_insights": [],
         "telemetry_summaries": [],
         "semantic_dataset_memory": {},
+        "sessions": [],
+        "bookmarks": [],
         "updated_at": None,
     }
 
@@ -99,6 +102,12 @@ def load_workspace_memory(identity: dict[str, Any]) -> dict[str, Any]:
     return memory
 
 
+def load_workspace_memory_by_id(workspace_key: str) -> dict[str, Any]:
+    identity = default_user_session()
+    identity["workspace_id"] = _safe_id(workspace_key)
+    return load_workspace_memory(identity)
+
+
 def save_workspace_memory(identity: dict[str, Any], memory: dict[str, Any]) -> dict[str, Any]:
     memory = dict(memory or default_workspace_memory(identity))
     memory["workspace_id"] = identity["workspace_id"]
@@ -116,6 +125,63 @@ def _append_limited(memory: dict[str, Any], key: str, item: dict[str, Any], limi
     values = list(memory.get(key, []))
     values.append(item)
     memory[key] = values[-limit:]
+
+
+def start_workspace_session(memory: dict[str, Any], label: str | None = None) -> dict[str, Any]:
+    sessions = list(memory.get("sessions", []))
+    active = next((item for item in reversed(sessions) if item.get("status") == "active"), None)
+    if active:
+        return active
+    session = {
+        "session_id": f"session-{uuid4().hex[:10]}",
+        "label": label or "Analytics operations session",
+        "status": "active",
+        "started_at": datetime.now().isoformat(timespec="seconds"),
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "workflow_ids": [],
+        "transcripts": [],
+    }
+    _append_limited(memory, "sessions", session, limit=20)
+    return session
+
+
+def append_session_transcript(
+    memory: dict[str, Any],
+    *,
+    session_id: str,
+    transcript: dict[str, Any],
+) -> dict[str, Any]:
+    sessions = list(memory.get("sessions", []))
+    for item in sessions:
+        if item.get("session_id") == session_id:
+            item.setdefault("transcripts", []).append(transcript)
+            item["transcripts"] = item["transcripts"][-25:]
+            if transcript.get("workflow_id"):
+                item.setdefault("workflow_ids", []).append(transcript["workflow_id"])
+                item["workflow_ids"] = list(dict.fromkeys(item["workflow_ids"]))[-25:]
+            item["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            break
+    memory["sessions"] = sessions
+    return memory
+
+
+def bookmark_investigation(memory: dict[str, Any], investigation: dict[str, Any], note: str = "") -> dict[str, Any]:
+    if not investigation or investigation.get("status") in {None, "idle", "skipped"}:
+        return memory
+    _append_limited(
+        memory,
+        "bookmarks",
+        {
+            "bookmark_id": f"bookmark-{uuid4().hex[:10]}",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "note": note,
+            "summary": investigation.get("summary", ""),
+            "severity": investigation.get("severity", "info"),
+            "queries": investigation.get("queries", [])[:3],
+        },
+        limit=50,
+    )
+    return memory
 
 
 def snapshot_workspace_run(
@@ -159,6 +225,28 @@ def snapshot_workspace_run(
                 "model": telemetry.get("model", ""),
             },
         )
+    session = start_workspace_session(memory)
+    append_session_transcript(
+        memory,
+        session_id=session["session_id"],
+        transcript={
+            "run_id": run_id,
+            "workflow_id": telemetry.get("workflow_id") or telemetry.get("correlation_id"),
+            "question": question,
+            "intent": intent,
+            "sql": sql,
+            "rows": rows,
+            "trace": workflow_trace[-12:],
+            "telemetry": {
+                "correlation_id": telemetry.get("correlation_id"),
+                "latency_ms": telemetry.get("latency_ms", 0),
+                "total_tokens": telemetry.get("total_tokens", 0),
+                "cost_usd": telemetry.get("cost_usd", 0.0),
+                "error_type": telemetry.get("error_type"),
+            },
+            "timestamp": timestamp,
+        },
+    )
     memory["semantic_dataset_memory"] = semantic_memory or {}
     return memory
 
@@ -166,15 +254,22 @@ def snapshot_workspace_run(
 def retrieve_workspace_context(memory: dict[str, Any], question: str, limit: int = 3) -> list[dict[str, Any]]:
     terms = {term for term in re.findall(r"[a-z0-9]+", question.lower()) if len(term) > 2}
     scored = []
+    seen = set()
     for item in memory.get("query_history", []):
         haystack = f"{item.get('question', '')} {item.get('intent', '')} {item.get('sql', '')}".lower()
         score = sum(1 for term in terms if term in haystack)
-        if score:
-            scored.append((score, item))
+        identity = (item.get("question", ""), item.get("sql", ""))
+        if score and identity not in seen:
+            seen.add(identity)
+            confidence = round(min(0.95, max(0.35, score / max(len(terms), 1))), 2)
+            scored.append((score, {**item, "retrieval_score": score, "retrieval_confidence": confidence}))
     scored.sort(key=lambda pair: pair[0], reverse=True)
     if scored:
         return [item for _, item in scored[:limit]]
-    return list(reversed(memory.get("query_history", [])[-limit:]))
+    fallback = []
+    for item in reversed(memory.get("query_history", [])[-limit:]):
+        fallback.append({**item, "retrieval_score": 0, "retrieval_confidence": 0.25})
+    return fallback
 
 
 def workspace_prompt_block(memory: dict[str, Any] | None, question: str = "") -> str:
