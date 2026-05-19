@@ -40,6 +40,7 @@ def should_investigate(insight_state: dict[str, Any] | None) -> bool:
 def _record_telemetry(current: dict[str, Any], step: dict[str, Any]) -> dict[str, Any]:
     telemetry = dict(current or empty_investigation_state()["telemetry"])
     steps = list(telemetry.get("steps", [])) + [step]
+    latest_error = next((item for item in reversed(steps) if item.get("error_type") or item.get("error_message")), {})
     telemetry.update(
         {
             "steps": steps,
@@ -50,6 +51,9 @@ def _record_telemetry(current: dict[str, Any], step: dict[str, Any]) -> dict[str
             "latency_ms": sum(item.get("latency_ms", 0) for item in steps),
             "model": step.get("model") or telemetry.get("model") or DEFAULT_SQL_MODEL,
             "usage_available": any(item.get("usage_available", False) for item in steps),
+            "error_type": latest_error.get("error_type"),
+            "error_message": latest_error.get("error_message"),
+            "error_details": latest_error.get("error_details"),
         }
     )
     return telemetry

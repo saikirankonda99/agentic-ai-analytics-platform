@@ -185,6 +185,8 @@ def get_theme_css() -> str:
     }
 
     .hero-card,
+    .enterprise-hero,
+    .top-nav-shell,
     .section-card,
     .kpi-card,
     .glass-widget,
@@ -205,6 +207,54 @@ def get_theme_css() -> str:
         background:
             linear-gradient(135deg, rgba(47, 128, 237, 0.18), rgba(14, 20, 35, 0.92) 45%),
             linear-gradient(180deg, rgba(18, 26, 43, 0.92), rgba(10, 15, 28, 0.94));
+    }
+
+    .enterprise-hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: end;
+        gap: 1rem;
+        border-radius: 8px;
+        padding: clamp(0.9rem, 1.8vw, 1.2rem) clamp(1rem, 2vw, 1.4rem);
+        background:
+            linear-gradient(135deg, rgba(47, 128, 237, 0.16), rgba(14, 20, 35, 0.94) 44%),
+            linear-gradient(180deg, rgba(18, 26, 43, 0.94), rgba(10, 15, 28, 0.96));
+    }
+
+    .top-nav-shell {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 1rem;
+        border-radius: 8px;
+        padding: 0.72rem 0.9rem;
+        margin-top: 0.35rem;
+        background:
+            linear-gradient(180deg, rgba(14, 20, 35, 0.9), rgba(10, 15, 28, 0.94));
+    }
+
+    .top-nav-title {
+        color: #f8fbff;
+        font-size: 0.98rem;
+        font-weight: 700;
+    }
+
+    .top-nav-subtitle {
+        color: var(--muted);
+        font-size: 0.84rem;
+        margin-top: 0.16rem;
+    }
+
+    [data-testid="stRadio"] div[role="radiogroup"] {
+        gap: 0.45rem;
+    }
+
+    [data-testid="stRadio"] label {
+        min-height: 36px;
+        border-radius: 8px;
+        padding: 0.42rem 0.65rem;
+        border: 1px solid rgba(148, 163, 184, 0.12);
+        background: rgba(148, 163, 184, 0.05);
     }
 
     .hero-eyebrow {
@@ -239,7 +289,7 @@ def get_theme_css() -> str:
 
     .hero-badge {
         padding: 0.45rem 0.8rem;
-        border-radius: 999px;
+        border-radius: 8px;
         background: rgba(148, 163, 184, 0.08);
         border: 1px solid rgba(148, 163, 184, 0.12);
         color: #dbe7ff;
@@ -450,6 +500,208 @@ def get_theme_css() -> str:
     .workflow-empty {
         color: var(--muted);
         padding: 0.55rem 0;
+    }
+
+    .orchestration-badge-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 0.58rem;
+        margin-bottom: 0.35rem;
+    }
+
+    .orchestration-badge {
+        min-height: 118px;
+        border-radius: 8px;
+        padding: 0.72rem 0.82rem;
+        background:
+            linear-gradient(180deg, rgba(15, 23, 42, 0.86), rgba(10, 15, 28, 0.92));
+        border: 1px solid rgba(148, 163, 184, 0.13);
+        box-shadow: var(--shadow);
+    }
+
+    .orchestration-badge-top {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 0.55rem;
+        margin-bottom: 0.58rem;
+    }
+
+    .orchestration-badge-label {
+        color: var(--muted);
+        font-size: 0.74rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+    }
+
+    .orchestration-badge-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        background: var(--status-color);
+        box-shadow: 0 0 0 5px color-mix(in srgb, var(--status-color) 12%, transparent);
+        flex: 0 0 auto;
+    }
+
+    .orchestration-badge-value {
+        color: #f8fbff;
+        font-size: 1.15rem;
+        font-weight: 700;
+        line-height: 1.2;
+        margin-bottom: 0.4rem;
+        word-break: break-word;
+    }
+
+    .orchestration-badge-caption {
+        color: #bfd3ea;
+        font-size: 0.8rem;
+        line-height: 1.45;
+    }
+
+    .workflow-timeline-card-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0.52rem;
+    }
+
+    .workflow-timeline-card {
+        display: grid;
+        grid-template-columns: 12px minmax(0, 1fr) auto;
+        gap: 0.58rem;
+        align-items: start;
+        min-height: 124px;
+        border-radius: 8px;
+        padding: 0.66rem 0.7rem;
+        background: rgba(148, 163, 184, 0.05);
+        border: 1px solid rgba(148, 163, 184, 0.1);
+    }
+
+    .timeline-card-active {
+        border-color: rgba(86, 204, 242, 0.28);
+        box-shadow: 0 0 20px rgba(86, 204, 242, 0.1);
+    }
+
+    .workflow-timeline-card-marker {
+        width: 10px;
+        height: 10px;
+        margin-top: 0.22rem;
+        border-radius: 999px;
+        background: var(--status-color);
+        box-shadow: 0 0 0 5px color-mix(in srgb, var(--status-color) 12%, transparent);
+    }
+
+    .workflow-timeline-card-copy {
+        min-width: 0;
+    }
+
+    .workflow-timeline-card-title {
+        color: #f8fbff;
+        font-size: 0.9rem;
+        font-weight: 650;
+        line-height: 1.2;
+    }
+
+    .workflow-timeline-card-caption {
+        color: var(--muted);
+        font-size: 0.72rem;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        margin-top: 0.18rem;
+    }
+
+    .workflow-timeline-card-detail {
+        color: #cfe0f2;
+        font-size: 0.8rem;
+        line-height: 1.42;
+        margin-top: 0.48rem;
+    }
+
+    .workflow-timeline-card-status {
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        white-space: nowrap;
+    }
+
+    .agent-monitor-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.54rem;
+    }
+
+    .agent-monitor-panel {
+        min-height: 136px;
+        border-radius: 8px;
+        padding: 0.7rem 0.78rem;
+        background: rgba(148, 163, 184, 0.05);
+        border: 1px solid rgba(148, 163, 184, 0.1);
+    }
+
+    .agent-monitor-active {
+        border-color: rgba(86, 204, 242, 0.3);
+        box-shadow: 0 0 22px rgba(86, 204, 242, 0.12);
+    }
+
+    .agent-monitor-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 0.7rem;
+        margin-bottom: 0.55rem;
+    }
+
+    .agent-monitor-name {
+        color: #f8fbff;
+        font-size: 0.92rem;
+        font-weight: 700;
+        line-height: 1.25;
+    }
+
+    .agent-monitor-step {
+        color: var(--muted);
+        font-size: 0.72rem;
+        margin-top: 0.18rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+    }
+
+    .agent-monitor-status {
+        display: inline-flex;
+        align-items: center;
+        border-radius: 8px;
+        padding: 0.24rem 0.48rem;
+        color: var(--status-color);
+        border: 1px solid color-mix(in srgb, var(--status-color) 26%, transparent);
+        background: color-mix(in srgb, var(--status-color) 8%, transparent);
+        font-size: 0.72rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        white-space: nowrap;
+    }
+
+    .agent-monitor-caption {
+        color: #d8e7f8;
+        font-size: 0.82rem;
+        line-height: 1.45;
+        min-height: 46px;
+    }
+
+    .agent-monitor-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.42rem;
+        margin-top: 0.6rem;
+    }
+
+    .agent-monitor-meta span {
+        border-radius: 8px;
+        padding: 0.24rem 0.48rem;
+        color: #dbeafe;
+        background: rgba(148, 163, 184, 0.08);
+        border: 1px solid rgba(148, 163, 184, 0.12);
+        font-size: 0.72rem;
     }
 
     .workflow-rail-shell {
@@ -1243,7 +1495,11 @@ def get_theme_css() -> str:
 
         .summary-stat-strip,
         .observability-grid,
-        .agent-row {
+        .agent-row,
+        .orchestration-badge-grid,
+        .workflow-timeline-card-grid,
+        .agent-monitor-grid,
+        .enterprise-hero {
             grid-template-columns: 1fr;
         }
 

@@ -33,7 +33,7 @@ class WorkflowTrace(TypedDict):
     phase: str
 
 
-class StepTelemetry(TypedDict):
+class StepTelemetry(TypedDict, total=False):
     step: str
     model: str
     prompt_tokens: int
@@ -42,6 +42,11 @@ class StepTelemetry(TypedDict):
     cost_usd: float
     latency_ms: int
     usage_available: bool
+    error_type: str
+    error_message: str
+    error_attempt: int
+    error_max_attempts: int
+    error_details: dict[str, Any]
 
 
 class WorkflowState(TypedDict, total=False):
@@ -79,8 +84,9 @@ def _new_step_telemetry(
     cost_usd: float = 0.0,
     latency_ms: int = 0,
     usage_available: bool = False,
+    **extra: Any,
 ) -> StepTelemetry:
-    return {
+    telemetry: StepTelemetry = {
         "step": step,
         "model": model,
         "prompt_tokens": prompt_tokens,
@@ -90,6 +96,8 @@ def _new_step_telemetry(
         "latency_ms": latency_ms,
         "usage_available": usage_available,
     }
+    telemetry.update({key: value for key, value in extra.items() if value is not None})
+    return telemetry
 
 
 def _record_telemetry(state: WorkflowState, step_data: StepTelemetry) -> dict[str, Any]:
@@ -97,6 +105,7 @@ def _record_telemetry(state: WorkflowState, step_data: StepTelemetry) -> dict[st
     steps = list(telemetry.get("steps", []))
     steps.append(step_data)
 
+    latest_error = next((item for item in reversed(steps) if item.get("error_type") or item.get("error_message")), {})
     telemetry.update(
         {
             "steps": steps,
@@ -107,6 +116,9 @@ def _record_telemetry(state: WorkflowState, step_data: StepTelemetry) -> dict[st
             "latency_ms": sum(item.get("latency_ms", 0) for item in steps),
             "model": next((item.get("model", "") for item in reversed(steps) if item.get("model")), ""),
             "usage_available": any(item.get("usage_available", False) for item in steps),
+            "error_type": latest_error.get("error_type"),
+            "error_message": latest_error.get("error_message"),
+            "error_details": latest_error.get("error_details"),
         }
     )
     return telemetry

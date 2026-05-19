@@ -126,21 +126,48 @@ def metric_grid_html(items: list[tuple[str, object]]) -> str:
 def render_hero() -> None:
     markdown_html(
         """
-        <div class="hero-card">
-            <div class="hero-eyebrow">AI Analytics Workspace</div>
-            <h1 class="hero-title">Enterprise analytics, orchestrated by AI</h1>
-            <p class="hero-copy">
-                Ask in natural language, inspect SQL, monitor workflow telemetry, and publish executive-ready
-                insights from a single immersive command center.
-            </p>
+        <div class="enterprise-hero">
+            <div>
+                <div class="hero-eyebrow">Enterprise AI Analytics Workspace</div>
+                <h1 class="hero-title">Agentic analytics command center</h1>
+                <p class="hero-copy">
+                    Ask in natural language, inspect governed SQL, monitor orchestration, and publish executive-ready
+                    insights from one production workspace.
+                </p>
+            </div>
             <div class="hero-badges">
+                <span class="hero-badge">Multi-agent</span>
+                <span class="hero-badge">Telemetry-ready</span>
+                <span class="hero-badge">RBAC-aware</span>
                 <span class="hero-badge">Workflow-native</span>
-                <span class="hero-badge">Executive KPIs</span>
-                <span class="hero-badge">Realtime telemetry</span>
-                <span class="hero-badge">Plotly canvas</span>
             </div>
         </div>
         """
+    )
+
+
+def render_top_navigation(active_nav: str = "Overview") -> str:
+    nav_options = ["Overview", "Copilot", "History"]
+    if active_nav not in nav_options:
+        active_nav = "Overview"
+
+    markdown_html(
+        """
+        <div class="top-nav-shell">
+            <div>
+                <div class="top-nav-title">Analytics Operations</div>
+                <div class="top-nav-subtitle">Unified workspace for query execution, orchestration, monitoring, and audit trails.</div>
+            </div>
+        </div>
+        """
+    )
+    return st.radio(
+        "Primary navigation",
+        nav_options,
+        index=nav_options.index(active_nav),
+        horizontal=True,
+        label_visibility="collapsed",
+        key="top_navigation",
     )
 
 
@@ -153,12 +180,6 @@ def render_sidebar() -> dict:
                 <div class="sidebar-brand-copy">Analytics operations cockpit for AI-native querying.</div>
             </div>
             """
-        )
-
-        nav = st.radio(
-            "Workspace",
-            ["Overview", "Copilot", "History"],
-            label_visibility="collapsed",
         )
 
         st.markdown("### Control Center")
@@ -210,7 +231,7 @@ def render_sidebar() -> dict:
         run_monitoring = st.button("Run scheduled check", width="stretch")
 
         return {
-            "nav": nav,
+            "nav": st.session_state.get("top_navigation", "Overview"),
             "clear_chat": clear_chat,
             "show_schema": show_schema,
             "uploaded_file": uploaded_file,
@@ -542,6 +563,154 @@ def workflow_timeline_html(trace: list[dict]) -> tuple[str, list[str]]:
     return header + '<div class="workflow-rail-shell"><div class="workflow-rail">' + "".join(nodes) + "</div></div>", statuses
 
 
+def orchestration_status_summary(trace: list[dict], telemetry: dict | None, is_executing: bool = False) -> list[dict]:
+    telemetry = telemetry or {}
+    latest = trace[-1] if trace else {}
+    failed = any(item.get("status") == "error" for item in trace)
+    warnings = sum(1 for item in trace if item.get("status") in {"warning", "retry"})
+    completed = sum(1 for item in trace if item.get("status") == "success")
+    status = "Running" if is_executing else "Failed" if failed else "Ready" if trace else "Standby"
+    status_tone = "active" if is_executing else "error" if failed else "success" if trace else "idle"
+    return [
+        {
+            "label": "Orchestration",
+            "value": status,
+            "caption": latest.get("detail") or "Awaiting the next workflow run.",
+            "tone": status_tone,
+        },
+        {
+            "label": "Active Phase",
+            "value": STEP_META.get(latest.get("step"), {}).get("title", "No active phase"),
+            "caption": latest.get("timestamp", "Runtime not started"),
+            "tone": latest.get("status", "idle"),
+        },
+        {
+            "label": "Agent Checks",
+            "value": f"{completed}/{len(WORKFLOW_STEPS)}",
+            "caption": f"{warnings} warning signals across the current trace.",
+            "tone": "warning" if warnings else "success" if completed else "idle",
+        },
+        {
+            "label": "Governance",
+            "value": f'${telemetry.get("cost_usd", 0.0):.4f}',
+            "caption": f'{telemetry.get("total_tokens", 0):,} tokens processed.',
+            "tone": "success" if telemetry else "idle",
+        },
+    ]
+
+
+def render_orchestration_status_badges(trace: list[dict], telemetry: dict | None, is_executing: bool = False) -> str:
+    badges = []
+    for item in orchestration_status_summary(trace, telemetry, is_executing):
+        tone = item.get("tone", "idle")
+        meta = STATUS_META.get(tone, STATUS_META.get("pending"))
+        badges.append(
+            f'<div class="orchestration-badge">'
+            f'<div class="orchestration-badge-top">'
+            f'<span class="orchestration-badge-label">{escape_html(item["label"])}</span>'
+            f'<span class="orchestration-badge-dot" style="--status-color:{meta["color"]};"></span>'
+            f"</div>"
+            f'<div class="orchestration-badge-value">{escape_html(item["value"])}</div>'
+            f'<div class="orchestration-badge-caption">{escape_html(item["caption"])}</div>'
+            f"</div>"
+        )
+    return '<div class="orchestration-badge-grid">' + "".join(badges) + "</div>"
+
+
+def render_workflow_timeline_cards(trace: list[dict]) -> str:
+    latest = latest_trace_by_step(trace)
+    active_step = active_workflow_step(latest)
+    cards = []
+    for step in WORKFLOW_STEPS:
+        item = latest.get(step, {"status": "pending", "detail": "Not started."})
+        status = item.get("status", "pending")
+        meta = STATUS_META.get(status, STATUS_META["pending"])
+        step_info = STEP_META.get(step, {"title": step.title(), "caption": "Workflow step"})
+        active_class = " timeline-card-active" if step == active_step and status not in {"success", "error", "warning", "skipped"} else ""
+        cards.append(
+            f'<div class="workflow-timeline-card{active_class}">'
+            f'<div class="workflow-timeline-card-marker" style="--status-color:{meta["color"]};"></div>'
+            f'<div class="workflow-timeline-card-copy">'
+            f'<div class="workflow-timeline-card-title">{escape_html(step_info["title"])}</div>'
+            f'<div class="workflow-timeline-card-caption">{escape_html(step_info["caption"])}</div>'
+            f'<div class="workflow-timeline-card-detail">{escape_html(item.get("detail", "Not started."))}</div>'
+            f"</div>"
+            f'<div class="workflow-timeline-card-status" style="color:{meta["color"]};">{escape_html(meta["label"])}</div>'
+            f"</div>"
+        )
+    return render_response_card(
+        "Workflow Timeline Cards",
+        "Card-based lifecycle view for each orchestration phase and agent handoff.",
+        f'<div class="workflow-timeline-card-grid">{"".join(cards)}</div>',
+        tone="default-module",
+    )
+
+
+def active_agent_states(trace: list[dict], telemetry: dict | None, is_executing: bool = False) -> list[dict]:
+    telemetry = telemetry or {}
+    latest = latest_trace_by_step(trace)
+    agent_map = [
+        ("Planner", "planner", "Intent routing and task decomposition."),
+        ("Schema Agent", "schema retrieval", "Semantic and database context retrieval."),
+        ("Memory Agent", "memory retrieval", "Workspace and conversation recall."),
+        ("SQL Agent", "sql generation", "SQL synthesis and refinement."),
+        ("Validator", "validation", "Guardrails, permissions, and query checks."),
+        ("Execution Agent", "execution", "Warehouse execution and result shaping."),
+        ("Insight Agent", "autonomous insight", "Anomaly, trend, and concentration detection."),
+        ("Investigator", "investigation", "Autonomous follow-up probes."),
+    ]
+    active_step = active_workflow_step(latest)
+    states = []
+    for name, step, caption in agent_map:
+        item = latest.get(step, {})
+        status = item.get("status", "ready" if not trace else "idle")
+        if is_executing and step == active_step:
+            status = "active"
+        states.append(
+            {
+                "name": name,
+                "status": STATUS_META.get(status, {"label": status.title()})["label"],
+                "caption": item.get("detail") or caption,
+                "step": step,
+                "active": status == "active",
+                "tone": status,
+                "model": item.get("model") or telemetry.get("model") or "standby",
+                "latency": item.get("latency_ms"),
+            }
+        )
+    return states
+
+
+def render_active_agent_monitoring(trace: list[dict], telemetry: dict | None, is_executing: bool = False) -> str:
+    panels = []
+    for agent in active_agent_states(trace, telemetry, is_executing):
+        meta = STATUS_META.get(agent.get("tone"), STATUS_META["pending"])
+        latency = f'{agent["latency"]} ms' if agent.get("latency") is not None else "Latency pending"
+        active_class = " agent-monitor-active" if agent.get("active") else ""
+        panels.append(
+            f'<div class="agent-monitor-panel{active_class}">'
+            f'<div class="agent-monitor-head">'
+            f'<div>'
+            f'<div class="agent-monitor-name">{escape_html(agent["name"])}</div>'
+            f'<div class="agent-monitor-step">{escape_html(agent["step"])}</div>'
+            f"</div>"
+            f'<span class="agent-monitor-status" style="--status-color:{meta["color"]};">{escape_html(agent["status"])}</span>'
+            f"</div>"
+            f'<div class="agent-monitor-caption">{escape_html(agent["caption"])}</div>'
+            f'<div class="agent-monitor-meta">'
+            f'<span>{escape_html(agent["model"])}</span>'
+            f'<span>{escape_html(latency)}</span>'
+            f"</div>"
+            f"</div>"
+        )
+    return render_response_card(
+        "Active Agent Monitoring",
+        "Operational status panels for the agents participating in the current analytics workflow.",
+        f'<div class="agent-monitor-grid">{"".join(panels)}</div>',
+        tone="observability-module",
+    )
+
+
 def build_workflow_chart(status_values: list[str]) -> go.Figure:
     fig = go.Figure(
         data=[
@@ -623,7 +792,7 @@ def execution_log_html(logs: list[dict]) -> str:
 
 
 def live_telemetry_items(telemetry: dict) -> list[tuple[str, object]]:
-    return [
+    items = [
         ("Model", telemetry.get("model") or "Pending"),
         ("Prompt Tokens", f'{telemetry.get("prompt_tokens", 0):,}'),
         ("Completion Tokens", f'{telemetry.get("completion_tokens", 0):,}'),
@@ -631,6 +800,18 @@ def live_telemetry_items(telemetry: dict) -> list[tuple[str, object]]:
         ("Latency", f'{telemetry.get("latency_ms", 0)} ms'),
         ("Cost", f'${telemetry.get("cost_usd", 0.0):.6f}'),
     ]
+    latest_error = next(
+        (item for item in reversed(telemetry.get("steps", [])) if item.get("error_type") or item.get("error_message")),
+        {},
+    )
+    if latest_error:
+        items.extend(
+            [
+                ("OpenAI Error", latest_error.get("error_type", "Unknown")),
+                ("Attempt", f'{latest_error.get("error_attempt", "?")}/{latest_error.get("error_max_attempts", "?")}'),
+            ]
+        )
+    return items
 
 
 def progressive_telemetry_html(telemetry: dict) -> str:
@@ -708,6 +889,12 @@ def render_telemetry_panel(telemetry: dict) -> None:
 
     if not telemetry.get("usage_available", False):
         st.caption("Usage metadata was unavailable for one or more workflow steps.")
+    latest_error = next(
+        (item for item in reversed(telemetry.get("steps", [])) if item.get("error_type") or item.get("error_message")),
+        {},
+    )
+    if latest_error:
+        st.error(f'{latest_error.get("error_type", "OpenAIError")}: {latest_error.get("error_message", "Request failed.")}')
 
 
 # ---------------------------------------------------------------------------
@@ -796,6 +983,10 @@ def render_recommendation_card(recommendations: list[str]) -> str:
 def render_observability_card(telemetry: dict, trace: list[dict]) -> str:
     latest_status = trace[-1]["status"] if trace else "pending"
     latest_step = trace[-1]["step"] if trace else "Awaiting run"
+    latest_error = next(
+        (item for item in reversed(telemetry.get("steps", [])) if item.get("error_type") or item.get("error_message")),
+        {},
+    )
     telemetry_bits = [
         ("Model", telemetry.get("model") or "Unavailable"),
         ("Total Tokens", f'{telemetry.get("total_tokens", 0):,}'),
@@ -804,10 +995,24 @@ def render_observability_card(telemetry: dict, trace: list[dict]) -> str:
         ("Latest Step", latest_step),
         ("Status", latest_status.title()),
     ]
+    if latest_error:
+        telemetry_bits.extend(
+            [
+                ("OpenAI Error", latest_error.get("error_type", "Unknown")),
+                ("Error Attempt", f'{latest_error.get("error_attempt", "?")}/{latest_error.get("error_max_attempts", "?")}'),
+            ]
+        )
+    error_html = ""
+    if latest_error:
+        error_html = (
+            f'<div class="workspace-body-copy">'
+            f'{escape_html(latest_error.get("error_message", "OpenAI request failed."))}'
+            f"</div>"
+        )
     return render_response_card(
         "Observability",
         "Operational telemetry across model usage, workflow state, and execution behavior.",
-        f'<div class="observability-grid">{metric_grid_html(telemetry_bits)}</div>',
+        f'<div class="observability-grid">{metric_grid_html(telemetry_bits)}</div>{error_html}',
         tone="observability-module",
     )
 

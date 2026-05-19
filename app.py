@@ -4,7 +4,6 @@ from datetime import datetime
 
 import pandas as pd
 import streamlit as st
-from openai import OpenAI
 
 from analytics_memory import (
     contextualize_followup,
@@ -22,7 +21,7 @@ from investigation import (
     run_investigation,
     should_investigate,
 )
-from llm import DEFAULT_SQL_MODEL, stream_text_with_telemetry
+from llm import DEFAULT_SQL_MODEL, stream_text_with_telemetry, validate_openai_runtime
 from monitoring import (
     default_monitoring_config,
     empty_briefing_state,
@@ -56,9 +55,11 @@ from ui.dashboard import (
     render_history,
     render_kpi_cards,
     next_plotly_key,
+    render_active_agent_monitoring,
     render_analytics_memory_card,
     render_autonomous_insight_card,
     render_investigation_card,
+    render_orchestration_status_badges,
     render_executive_briefing_card,
     render_monitoring_card,
     render_workspace_card,
@@ -71,7 +72,9 @@ from ui.dashboard import (
     render_observability_card,
     render_sql_card,
     render_telemetry_panel,
+    render_top_navigation,
     render_workflow_timeline,
+    render_workflow_timeline_cards,
 )
 
 def get_openai_api_key():
@@ -138,11 +141,8 @@ Question:
 Sample:
 {sample}
 """
-    res = client.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return res.choices[0].message.content
+    result = stream_text_with_telemetry(prompt, model=DEFAULT_SQL_MODEL, temperature=0.2)
+    return result.get("text", "")
 
 
 def build_insight_prompt(question, df):
@@ -262,6 +262,7 @@ def stream_insight_narration(question, df, sql="", live_placeholder=None):
         workflow_telemetry = dict(st.session_state.workflow_telemetry or {})
         steps = list(workflow_telemetry.get("steps", []))
         steps.append({"step": "insight", **telemetry})
+        latest_error = latest_telemetry_error(steps)
         workflow_telemetry.update(
             {
                 "steps": steps,
@@ -272,6 +273,9 @@ def stream_insight_narration(question, df, sql="", live_placeholder=None):
                 "latency_ms": sum(item.get("latency_ms", 0) for item in steps),
                 "model": telemetry.get("model") or workflow_telemetry.get("model", ""),
                 "usage_available": any(item.get("usage_available", False) for item in steps),
+                "error_type": latest_error.get("error_type"),
+                "error_message": latest_error.get("error_message"),
+                "error_details": latest_error.get("error_details"),
             }
         )
         st.session_state.workflow_telemetry = workflow_telemetry
@@ -606,11 +610,24 @@ def enrich_trace_with_telemetry(trace, telemetry):
     for item in trace:
         combined = dict(item)
         step_meta = telemetry_steps.get(item.get("step"), {})
-        for key in ("model", "latency_ms", "prompt_tokens", "completion_tokens", "total_tokens", "cost_usd"):
+        for key in (
+            "model",
+            "latency_ms",
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "cost_usd",
+            "error_type",
+            "error_message",
+        ):
             if key in step_meta:
                 combined[key] = step_meta.get(key)
         enriched.append(combined)
     return enriched
+
+
+def latest_telemetry_error(steps):
+    return next((item for item in reversed(steps) if item.get("error_type") or item.get("error_message")), {})
 
 
 def sync_live_state_from_stream():
@@ -710,6 +727,7 @@ def merge_investigation_telemetry(investigation_state):
         return
     workflow_telemetry = dict(st.session_state.workflow_telemetry or {})
     steps = list(workflow_telemetry.get("steps", [])) + list(investigation_telemetry.get("steps", []))
+    latest_error = latest_telemetry_error(steps)
     workflow_telemetry.update(
         {
             "steps": steps,
@@ -720,6 +738,9 @@ def merge_investigation_telemetry(investigation_state):
             "latency_ms": sum(item.get("latency_ms", 0) for item in steps),
             "model": investigation_telemetry.get("model") or workflow_telemetry.get("model", ""),
             "usage_available": any(item.get("usage_available", False) for item in steps),
+            "error_type": latest_error.get("error_type"),
+            "error_message": latest_error.get("error_message"),
+            "error_details": latest_error.get("error_details"),
         }
     )
     st.session_state.workflow_telemetry = workflow_telemetry
@@ -734,6 +755,7 @@ def merge_monitoring_telemetry(monitoring_state):
         return
     workflow_telemetry = dict(st.session_state.workflow_telemetry or {})
     steps = list(workflow_telemetry.get("steps", [])) + list(monitoring_telemetry.get("steps", []))
+    latest_error = latest_telemetry_error(steps)
     workflow_telemetry.update(
         {
             "steps": steps,
@@ -744,6 +766,9 @@ def merge_monitoring_telemetry(monitoring_state):
             "latency_ms": sum(item.get("latency_ms", 0) for item in steps),
             "model": monitoring_telemetry.get("model") or workflow_telemetry.get("model", ""),
             "usage_available": any(item.get("usage_available", False) for item in steps),
+            "error_type": latest_error.get("error_type"),
+            "error_message": latest_error.get("error_message"),
+            "error_details": latest_error.get("error_details"),
         }
     )
     st.session_state.workflow_telemetry = workflow_telemetry
@@ -1220,6 +1245,28 @@ def render_analytics_workspace(client):
         },
     ]
     render_glass_widgets(widget_data)
+    active_trace = st.session_state.live_trace or st.session_state.workflow_trace
+    active_telemetry = st.session_state.live_telemetry or telemetry
+    st.markdown(
+        render_orchestration_status_badges(
+            active_trace,
+            active_telemetry,
+            is_executing=st.session_state.get("is_executing", False),
+        ),
+        unsafe_allow_html=True,
+    )
+    workflow_left, workflow_right = st.columns([1.1, 0.9], gap="medium")
+    with workflow_left:
+        st.markdown(render_workflow_timeline_cards(active_trace), unsafe_allow_html=True)
+    with workflow_right:
+        st.markdown(
+            render_active_agent_monitoring(
+                active_trace,
+                active_telemetry,
+                is_executing=st.session_state.get("is_executing", False),
+            ),
+            unsafe_allow_html=True,
+        )
     question = render_command_bar()
     live_panel_placeholder = st.empty()
     if st.session_state.get("pending_monitoring_run") or monitoring_due(st.session_state.get("monitoring_config", {})):
@@ -1503,14 +1550,33 @@ def render_analytics_workspace(client):
 
 
 def render_copilot_workspace():
+    active_trace = st.session_state.live_trace or st.session_state.workflow_trace
+    active_telemetry = st.session_state.live_telemetry or st.session_state.workflow_telemetry
+    st.markdown(
+        render_orchestration_status_badges(
+            active_trace,
+            active_telemetry,
+            is_executing=st.session_state.get("is_executing", False),
+        ),
+        unsafe_allow_html=True,
+    )
     left, right = st.columns([0.92, 1.08])
     with left:
         render_chat_history(st.session_state.messages)
+        st.markdown(
+            render_active_agent_monitoring(
+                active_trace,
+                active_telemetry,
+                is_executing=st.session_state.get("is_executing", False),
+            ),
+            unsafe_allow_html=True,
+        )
     with right:
         render_workflow_timeline(
             st.session_state.workflow_trace,
             chart_key=next_plotly_key("workflow_chart_copilot"),
         )
+        st.markdown(render_workflow_timeline_cards(active_trace), unsafe_allow_html=True)
         render_telemetry_panel(st.session_state.workflow_telemetry)
 
         if st.session_state.latest_df is not None:
@@ -1533,10 +1599,12 @@ st.set_page_config(
 )
 
 st.markdown(get_theme_css(), unsafe_allow_html=True)
-client = OpenAI(api_key=get_openai_api_key())
+client = None
 init_session_state()
+st.session_state.openai_runtime = validate_openai_runtime()
 
 render_hero()
+render_top_navigation(st.session_state.get("top_navigation", "Overview"))
 sidebar_state = render_sidebar()
 configure_workspace_session(
     sidebar_state["workspace_user"],
