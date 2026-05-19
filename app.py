@@ -13,7 +13,9 @@ from analytics_memory import (
     memory_prompt_block,
     update_analytics_memory,
 )
+from auth import render_auth_controls, require_login
 from autonomous_insights import analyze_result_set, empty_insight_state, insight_prompt_block
+from backend.connectors import get_connector_registry
 from backend.operations import agent_utilization, operations_summary
 from backend.recommendations import autonomous_recommendations, recommendation_messages
 from backend.services import execute_query_workflow
@@ -35,13 +37,21 @@ from monitoring import (
     run_monitoring_checks,
 )
 from workspace import (
+    ONBOARDING_STEPS,
+    bookmark_query,
     build_user_session,
     default_user_session,
     default_workspace_memory,
+    dismiss_onboarding,
     load_workspace_memory,
+    onboarding_progress,
+    pin_investigation,
     save_workspace_memory,
+    save_report_view,
+    save_workspace_preferences,
     snapshot_workspace_run,
     start_workspace_session,
+    update_onboarding_step,
     bookmark_investigation,
     retrieve_workspace_context,
     user_can,
@@ -66,14 +76,19 @@ from ui.dashboard import (
     render_active_agent_monitoring,
     render_analytics_memory_card,
     render_autonomous_insight_card,
+    render_empty_state_card,
     render_investigation_card,
     render_orchestration_status_badges,
     render_executive_briefing_card,
     render_monitoring_card,
+    render_onboarding_card,
     render_workspace_card,
+    render_quick_actions_card,
     render_recommendation_card,
+    render_recovery_guidance_card,
     render_result_table_card,
     render_response_card,
+    render_saved_assets_card,
     render_semantic_profile_card,
     render_sidebar,
     render_live_execution_panel,
@@ -406,10 +421,17 @@ def init_session_state():
         "workspace_memory": default_workspace_memory(default_user_session()),
         "workspace_loaded": False,
         "workspace_session_id": "",
+        "result_filter": "",
+        "result_sort_column": "",
+        "result_sort_ascending": True,
         "latest_execution_graph": {},
         "latest_stage_confidence": {},
         "latest_recovery": {},
         "latest_policy_decision": {},
+        "latest_schema_intelligence": {},
+        "latest_sql_validation": {},
+        "latest_sql_explanation": {},
+        "latest_result_quality": {},
         "active_intent": "",
         "workspace_route": "Overview",
         "last_stream_render": 0.0,
@@ -457,10 +479,17 @@ def clear_session():
     st.session_state.pending_monitoring_run = False
     st.session_state.workspace_memory = default_workspace_memory(st.session_state.get("user_identity", default_user_session()))
     st.session_state.workspace_loaded = False
+    st.session_state.result_filter = ""
+    st.session_state.result_sort_column = ""
+    st.session_state.result_sort_ascending = True
     st.session_state.latest_execution_graph = {}
     st.session_state.latest_stage_confidence = {}
     st.session_state.latest_recovery = {}
     st.session_state.latest_policy_decision = {}
+    st.session_state.latest_schema_intelligence = {}
+    st.session_state.latest_sql_validation = {}
+    st.session_state.latest_sql_explanation = {}
+    st.session_state.latest_result_quality = {}
     st.session_state.active_intent = ""
     st.session_state.last_stream_render = 0.0
     st.session_state.is_executing = False
@@ -487,8 +516,15 @@ def configure_workspace_session(user_id, team_id, role):
         st.session_state.workspace_loaded = True
         st.session_state.history = list(memory.get("query_history", []))[-10:]
         st.session_state.semantic_memory = dict(memory.get("semantic_dataset_memory", {}))
+        progress = onboarding_progress(memory)
+        if not progress["steps"].get("workspace_intro"):
+            memory = update_onboarding_step(memory, "workspace_intro")
+        if not progress["steps"].get("sample_dataset"):
+            memory = update_onboarding_step(memory, "sample_dataset")
+        st.session_state.workspace_memory = memory
         if st.session_state.semantic_memory and not st.session_state.get("semantic_context"):
             st.session_state.semantic_context = next(reversed(st.session_state.semantic_memory.values()))
+        save_workspace_memory(identity, memory)
 
 
 def persist_workspace_memory():
@@ -519,6 +555,68 @@ def persist_investigation_bookmark(note="Operator bookmark"):
         st.session_state.get("investigation_state", {}),
         note=note,
     )
+    st.session_state.workspace_memory = memory
+    persist_workspace_memory()
+
+
+def persist_query_bookmark(note="Operator bookmark"):
+    memory = bookmark_query(
+        st.session_state.get("workspace_memory", {}),
+        {
+            "question": st.session_state.get("latest_question", ""),
+            "intent": st.session_state.get("active_intent", ""),
+            "sql": st.session_state.get("latest_sql", ""),
+            "rows": len(st.session_state.latest_df) if st.session_state.get("latest_df") is not None else 0,
+        },
+        note=note,
+    )
+    st.session_state.workspace_memory = memory
+    persist_workspace_memory()
+
+
+def persist_investigation_pin(note="Pinned for follow-up"):
+    memory = pin_investigation(
+        st.session_state.get("workspace_memory", {}),
+        st.session_state.get("investigation_state", {}),
+        note=note,
+    )
+    st.session_state.workspace_memory = memory
+    persist_workspace_memory()
+
+
+def build_workspace_report_payload(scope="analytics"):
+    df = st.session_state.get("latest_df")
+    telemetry = validate_telemetry_payload(st.session_state.get("workflow_telemetry", {}))
+    trace = st.session_state.get("workflow_trace", [])
+    return {
+        "scope": scope,
+        "exported_at": current_timestamp(),
+        "workspace": workspace_summary(st.session_state.get("workspace_memory", {})),
+        "question": st.session_state.get("latest_question", ""),
+        "sql": st.session_state.get("latest_sql", ""),
+        "insight": st.session_state.get("latest_insight", ""),
+        "rows": len(df) if df is not None else 0,
+        "columns": list(df.columns) if df is not None else [],
+        "telemetry": telemetry,
+        "trace": trace,
+        "investigation": st.session_state.get("investigation_state", {}),
+        "executive_briefing": st.session_state.get("executive_briefing", {}),
+    }
+
+
+def persist_report_view(title="Executive analytics summary", scope="analytics"):
+    payload = build_workspace_report_payload(scope=scope)
+    memory = save_report_view(
+        st.session_state.get("workspace_memory", {}),
+        {"title": title, "scope": scope, "summary": payload.get("insight", ""), "payload": payload},
+    )
+    memory = update_onboarding_step(memory, "export_completed")
+    st.session_state.workspace_memory = memory
+    persist_workspace_memory()
+
+
+def persist_workspace_preferences(**preferences):
+    memory = save_workspace_preferences(st.session_state.get("workspace_memory", {}), preferences)
     st.session_state.workspace_memory = memory
     persist_workspace_memory()
 
@@ -1136,6 +1234,10 @@ def run_query(question, live_placeholder=None):
             st.session_state.latest_stage_confidence = workflow_result.get("stage_confidence", {})
             st.session_state.latest_recovery = workflow_result.get("recovery", {})
             st.session_state.latest_policy_decision = workflow_result.get("policy_decision", {})
+            st.session_state.latest_schema_intelligence = workflow_result.get("schema_intelligence", {})
+            st.session_state.latest_sql_validation = workflow_result.get("sql_validation", {})
+            st.session_state.latest_sql_explanation = workflow_result.get("sql_explanation", {})
+            st.session_state.latest_result_quality = workflow_result.get("result_quality", {})
             sql = (workflow_result.get("sql") or "").strip()
             workflow_error = workflow_result.get("error")
 
@@ -1227,6 +1329,184 @@ def render_schema(schema_visible):
             st.code(get_schema())
 
 
+def render_onboarding_workspace_panel():
+    memory = st.session_state.get("workspace_memory", {})
+    progress = onboarding_progress(memory)
+    preferences = memory.get("workspace_preferences", {})
+    if progress.get("dismissed") or not preferences.get("show_onboarding", True):
+        return
+    st.markdown(render_onboarding_card(progress, ONBOARDING_STEPS), unsafe_allow_html=True)
+    c1, c2, c3, c4 = st.columns(4, gap="small")
+    if c1.button("Use sample dataset", help="Keeps the bundled Chinook SQL dataset active.", width="stretch"):
+        memory = update_onboarding_step(st.session_state.get("workspace_memory", {}), "sample_dataset")
+        st.session_state.workspace_memory = memory
+        persist_workspace_memory()
+        st.success("Sample dataset is ready.")
+    if c2.button("Try guided query", help="Loads a good first question into the command workspace.", width="stretch"):
+        st.session_state.command_text = "Revenue by country"
+        memory = update_onboarding_step(st.session_state.get("workspace_memory", {}), "first_query")
+        st.session_state.workspace_memory = memory
+        persist_workspace_memory()
+        st.rerun()
+    if c3.button("Save preferences", help="Restores this workspace route and chart type next time.", width="stretch"):
+        persist_workspace_preferences(
+            last_route=st.session_state.get("workspace_route", "Overview"),
+            preferred_chart_type=st.session_state.get("chart_type", "Bar"),
+        )
+        st.success("Workspace preferences saved.")
+    if c4.button("Hide guide", help="Hide the onboarding guide for this workspace.", width="stretch"):
+        memory = dismiss_onboarding(st.session_state.get("workspace_memory", {}))
+        st.session_state.workspace_memory = memory
+        persist_workspace_memory()
+        st.rerun()
+
+
+def render_quick_actions_panel():
+    memory = st.session_state.get("workspace_memory", {})
+    recent = list(reversed(memory.get("recent_activity", [])[-3:]))
+    quick_actions = [
+        {"label": "Run a guided query", "caption": "Use Revenue by Country, Top Customers, or Top Tracks to populate the workspace."},
+        {"label": "Review saved work", "caption": f'{len(memory.get("query_bookmarks", []))} query bookmarks and {len(memory.get("saved_reports", []))} reports available.'},
+        {"label": "Export current context", "caption": "Download CSV, executive summary, telemetry, or trace from the active workflow."},
+        {"label": "Recover workflow", "caption": "Check recovery guidance when validation, connector, or OpenAI calls fail."},
+    ]
+    st.markdown(render_quick_actions_card(quick_actions), unsafe_allow_html=True)
+    if recent:
+        st.markdown(
+            render_response_card(
+                "Recent Shortcuts",
+                "Fast return paths from your latest workspace activity.",
+                "".join(
+                    f'<div class="workspace-list-item"><div class="observability-label">{escape_html(item.get("activity_type", ""))}</div>'
+                    f'<div class="workspace-body-copy">{escape_html(item.get("title", ""))}<br/>{escape_html(item.get("detail", ""))}</div></div>'
+                    for item in recent
+                ),
+                tone="default-module",
+            ),
+            unsafe_allow_html=True,
+        )
+
+
+def render_result_explorer(df, base_filename="result"):
+    if df is None or df.empty:
+        st.markdown(
+            render_empty_state_card(
+                "Result Explorer",
+                "No rows are available for the current workflow.",
+                [
+                    "Try a broader question such as Revenue by country.",
+                    "Inspect SQL validation guidance before retrying.",
+                    "Upload a CSV if you want to analyze an external dataset.",
+                ],
+            ),
+            unsafe_allow_html=True,
+        )
+        return
+
+    st.markdown(
+        """
+        <div class="workspace-shell compact-shell">
+            <div class="section-title">Result Explorer</div>
+            <div class="section-subtitle">Filter, sort, inspect, and export the active result set.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    controls = st.columns([1.4, 1, 0.72], gap="small")
+    with controls[0]:
+        search = st.text_input(
+            "Filter results",
+            value=st.session_state.get("result_filter", ""),
+            placeholder="Search visible values...",
+            help="Filters rows by matching any displayed cell value.",
+        )
+        st.session_state.result_filter = search
+    with controls[1]:
+        sort_options = ["None"] + list(df.columns)
+        current_sort = st.session_state.get("result_sort_column") or "None"
+        sort_column = st.selectbox(
+            "Sort by",
+            sort_options,
+            index=sort_options.index(current_sort) if current_sort in sort_options else 0,
+        )
+        st.session_state.result_sort_column = "" if sort_column == "None" else sort_column
+    with controls[2]:
+        ascending = st.toggle("Ascending", value=st.session_state.get("result_sort_ascending", True))
+        st.session_state.result_sort_ascending = ascending
+
+    filtered_df = df
+    if search.strip():
+        needle = search.strip().lower()
+        row_mask = df.astype(str).apply(lambda row: row.str.lower().str.contains(needle, regex=False).any(), axis=1)
+        filtered_df = df[row_mask]
+    if st.session_state.result_sort_column:
+        filtered_df = filtered_df.sort_values(
+            by=st.session_state.result_sort_column,
+            ascending=st.session_state.result_sort_ascending,
+            kind="mergesort",
+        )
+    st.dataframe(filtered_df, width="stretch", height=320)
+    st.caption(f"Showing {len(filtered_df):,} of {len(df):,} rows.")
+    left, right = st.columns(2, gap="small")
+    with left:
+        st.download_button(
+            "Download Filtered CSV",
+            filtered_df.to_csv(index=False).encode("utf-8"),
+            f"{base_filename}-filtered.csv",
+            "text/csv",
+            width="stretch",
+        )
+    with right:
+        st.download_button(
+            "Download Full CSV",
+            df.to_csv(index=False).encode("utf-8"),
+            f"{base_filename}.csv",
+            "text/csv",
+            width="stretch",
+        )
+    progress = onboarding_progress(st.session_state.get("workspace_memory", {}))
+    if not progress["steps"].get("results_reviewed"):
+        memory = update_onboarding_step(st.session_state.get("workspace_memory", {}), "results_reviewed")
+        st.session_state.workspace_memory = memory
+        persist_workspace_memory()
+
+
+def render_report_exports(scope="analytics"):
+    payload = build_workspace_report_payload(scope=scope)
+    summary_text = "\n\n".join(
+        part
+        for part in [
+            f"# {scope.title()} Summary",
+            f"Question: {payload.get('question') or 'No active question'}",
+            f"Rows: {payload.get('rows', 0)}",
+            f"Insight: {payload.get('insight') or 'No insight generated yet.'}",
+            f"SQL:\n{payload.get('sql') or 'No SQL generated.'}",
+        ]
+        if part
+    )
+    left, middle, right = st.columns(3, gap="small")
+    with left:
+        st.download_button(
+            "Executive Summary",
+            summary_text.encode("utf-8"),
+            f"{scope}-executive-summary.md",
+            "text/markdown",
+            width="stretch",
+        )
+    with middle:
+        st.download_button(
+            "Workflow Trace",
+            json.dumps(payload.get("trace", []), indent=2).encode("utf-8"),
+            f"{scope}-workflow-trace.json",
+            "application/json",
+            width="stretch",
+        )
+    with right:
+        if st.button("Save Report View", width="stretch"):
+            persist_report_view(scope=scope)
+            st.success("Report view saved to this workspace.")
+
+
 def render_analytics_workspace(client):
     df = st.session_state.latest_df
     telemetry = st.session_state.workflow_telemetry
@@ -1259,6 +1539,7 @@ def render_analytics_workspace(client):
         },
     ]
     render_kpi_cards(top_metrics)
+    render_onboarding_workspace_panel()
 
     widget_data = [
         {
@@ -1281,6 +1562,7 @@ def render_analytics_workspace(client):
         },
     ]
     render_glass_widgets(widget_data)
+    render_quick_actions_panel()
     active_trace = st.session_state.live_trace or st.session_state.workflow_trace
     active_telemetry = st.session_state.live_telemetry or telemetry
     st.markdown(
@@ -1520,9 +1802,9 @@ def render_analytics_workspace(client):
                     )
                     chart_rendered = True
             if not chart_rendered:
-                render_result_table_card(df, height=230)
+                render_result_explorer(df, base_filename="analytics-result")
         else:
-            render_result_table_card(df, height=250)
+            render_result_explorer(df, base_filename="analytics-result")
 
     with main_right:
         recommendations = build_ai_recommendations(df, telemetry, st.session_state.workflow_trace)
@@ -1538,6 +1820,15 @@ def render_analytics_workspace(client):
         )
         st.markdown(render_executive_briefing_card(st.session_state.get("executive_briefing")), unsafe_allow_html=True)
         st.markdown(render_observability_card(telemetry, st.session_state.workflow_trace), unsafe_allow_html=True)
+        st.markdown(
+            render_recovery_guidance_card(
+                telemetry,
+                st.session_state.get("latest_sql_validation", {}),
+                st.session_state.get("latest_recovery", {}),
+            ),
+            unsafe_allow_html=True,
+        )
+        st.markdown(render_saved_assets_card(st.session_state.get("workspace_memory")), unsafe_allow_html=True)
 
         if not df.empty:
             explanation = st.session_state.get("latest_insight", "")
@@ -1569,20 +1860,29 @@ def render_analytics_workspace(client):
         with lower_left:
             render_sql_card(st.session_state.latest_sql)
         with lower_right:
-            render_result_table_card(df, height=210)
+            render_result_explorer(df, base_filename="analytics-result")
     elif show_sql:
         render_sql_card(st.session_state.latest_sql)
     elif show_secondary_preview:
-        render_result_table_card(df, height=210)
+        render_result_explorer(df, base_filename="analytics-result")
 
     if not df.empty:
-        st.download_button(
-            "Download CSV",
-            df.to_csv(index=False).encode(),
-            "result.csv",
-            "text/csv",
-            width="stretch",
-        )
+        action_cols = st.columns(3, gap="small")
+        with action_cols[0]:
+            if st.button("Bookmark Query", width="stretch"):
+                persist_query_bookmark()
+                st.success("Query bookmarked.")
+        with action_cols[1]:
+            if st.button("Pin Investigation", width="stretch"):
+                persist_investigation_pin()
+                st.success("Investigation pinned when available.")
+        with action_cols[2]:
+            if st.button("Mark Export Complete", width="stretch"):
+                memory = update_onboarding_step(st.session_state.get("workspace_memory", {}), "export_completed")
+                st.session_state.workspace_memory = memory
+                persist_workspace_memory()
+                st.success("Export step marked complete.")
+        render_report_exports(scope="analytics")
 
 
 def render_copilot_workspace():
@@ -1798,6 +2098,7 @@ def render_operations_center():
         )
         st.markdown(render_recommendation_card(recommendation_messages(recommendation_cards)), unsafe_allow_html=True)
         render_telemetry_exports(telemetry, trace, scope="operations")
+        render_report_exports(scope="operations")
 
 
 def render_execution_graph_card(graph, confidence, recovery, policy_decision=None):
@@ -1906,9 +2207,15 @@ def render_investigations_workspace():
     left, right = st.columns([1.15, 0.85], gap="medium")
     with left:
         st.markdown(render_investigation_card(current), unsafe_allow_html=True)
-        if st.button("Bookmark Current Investigation", width="stretch"):
-            persist_investigation_bookmark()
-            st.success("Investigation bookmarked for this workspace session.")
+        bookmark_col, pin_col = st.columns(2, gap="small")
+        with bookmark_col:
+            if st.button("Bookmark Investigation", width="stretch"):
+                persist_investigation_bookmark()
+                st.success("Investigation bookmarked for this workspace session.")
+        with pin_col:
+            if st.button("Pin Investigation", width="stretch"):
+                persist_investigation_pin()
+                st.success("Investigation pinned for follow-up.")
         st.markdown(render_workflow_timeline_cards(st.session_state.live_trace or st.session_state.workflow_trace), unsafe_allow_html=True)
     with right:
         st.markdown(
@@ -1926,6 +2233,7 @@ def render_investigations_workspace():
             unsafe_allow_html=True,
         )
         st.markdown(render_workspace_card(identity, memory), unsafe_allow_html=True)
+        st.markdown(render_saved_assets_card(memory), unsafe_allow_html=True)
         st.markdown(render_semantic_profile_card(st.session_state.get("semantic_context")), unsafe_allow_html=True)
         st.markdown(render_session_replay_card(memory), unsafe_allow_html=True)
         recommendation_df = st.session_state.latest_df if st.session_state.latest_df is not None else pd.DataFrame()
@@ -2045,6 +2353,28 @@ def render_agents_workspace():
             ),
             unsafe_allow_html=True,
         )
+        validation = st.session_state.get("latest_sql_validation", {})
+        explanation = st.session_state.get("latest_sql_explanation", {})
+        quality = st.session_state.get("latest_result_quality", {})
+        schema_intelligence = st.session_state.get("latest_schema_intelligence", {})
+        st.markdown(
+            render_response_card(
+                "SQL Intelligence",
+                "Validation status, schema reasoning, query risk, explanation, and result quality.",
+                f'<div class="workspace-body-copy">Validation: {escape_html(validation.get("status", "pending"))}<br/>'
+                f'Risk: {escape_html(validation.get("risk_level", "unknown"))} ({escape_html(validation.get("risk_score", 0))})<br/>'
+                f'Confidence: {escape_html(validation.get("confidence", 0))}<br/>'
+                f'Schema confidence: {escape_html(schema_intelligence.get("confidence", 0))}<br/>'
+                f'Intent: {escape_html(explanation.get("intent_summary", ""))}<br/>'
+                f'Result quality: {escape_html(quality.get("status", "pending"))} ({escape_html(quality.get("confidence", 0))})</div>'
+                + "".join(
+                    f'<div class="workspace-list-item"><div class="observability-label">Warning</div><div class="workspace-body-copy">{escape_html(item)}</div></div>'
+                    for item in (validation.get("warnings", []) + quality.get("warnings", []))[:5]
+                ),
+                tone="summary-module",
+            ),
+            unsafe_allow_html=True,
+        )
         st.markdown(render_workflow_timeline_cards(trace), unsafe_allow_html=True)
         breakdown = phase_latency_breakdown(telemetry)
         st.markdown(
@@ -2074,6 +2404,7 @@ def render_api_workspace():
     runtime = st.session_state.get("openai_runtime", {})
     memory = st.session_state.get("workspace_memory", {})
     workspace_report = workspace_summary(memory)
+    connector_diagnostics = get_connector_registry().diagnostics(validate=True)
     left, right = st.columns([1, 1], gap="medium")
     with left:
         st.markdown(
@@ -2091,8 +2422,34 @@ def render_api_workspace():
             unsafe_allow_html=True,
         )
         st.code(
-            "GET /health\nGET /ready\nGET /diagnostics\nPOST /execute\nGET /workflow/{workflow_id}\nGET /workflow/{workflow_id}/events\nGET /workflow/{workflow_id}/stream\nGET /workspace/{workspace_id}/inspection\nGET /workspace/{workspace_id}/transcripts\nGET /workspace/{workspace_id}/sql-history",
+            "GET /health\nGET /ready\nGET /diagnostics\nPOST /execute\nGET /workflow/{workflow_id}\nGET /workflow/{workflow_id}/events\nGET /workflow/{workflow_id}/stream\nGET /connectors\nGET /connectors/{connector_id}/health\nGET /connectors/{connector_id}/schema\nPOST /connectors/validate\nGET /workspace/{workspace_id}/inspection\nGET /workspace/{workspace_id}/transcripts\nGET /workspace/{workspace_id}/sql-history",
             language="http",
+        )
+        connector_rows = []
+        for connector in connector_diagnostics.get("connectors", []):
+            health = connector_diagnostics.get("health", {}).get(connector.get("connector_id"), {})
+            connector_rows.append(
+                f'<div class="workspace-list-item"><div class="observability-label">{escape_html(connector.get("name"))} · {escape_html(connector.get("kind"))}</div>'
+                f'<div class="workspace-body-copy">Status: {escape_html(health.get("status", "unknown"))}<br/>'
+                f'Latency: {escape_html(health.get("latency_ms", 0))} ms<br/>'
+                f'Enabled: {escape_html(connector.get("enabled"))}<br/>'
+                f'Message: {escape_html(health.get("message", ""))}</div></div>'
+            )
+        st.markdown(
+            render_response_card(
+                "Connector Diagnostics",
+                "Startup validation, health, schema readiness, and safe configuration posture.",
+                "".join(connector_rows)
+                + (
+                    '<div class="workspace-body-copy">'
+                    f'PostgreSQL configured: {escape_html(connector_diagnostics.get("configuration", {}).get("postgres_configured"))}<br/>'
+                    f'PostgreSQL schema: {escape_html(connector_diagnostics.get("configuration", {}).get("postgres_schema"))}<br/>'
+                    f'SQLite path: {escape_html(connector_diagnostics.get("configuration", {}).get("sqlite_database_path"))}'
+                    "</div>"
+                ),
+                tone="summary-module",
+            ),
+            unsafe_allow_html=True,
         )
         st.markdown(
             render_response_card(
@@ -2143,6 +2500,79 @@ def render_api_workspace():
         render_telemetry_exports(telemetry, trace, scope="api")
 
 
+def render_workspace_history():
+    memory = st.session_state.get("workspace_memory", {})
+    render_history(st.session_state.history)
+    st.markdown(render_saved_assets_card(memory), unsafe_allow_html=True)
+    left, right = st.columns([1, 1], gap="medium")
+    with left:
+        saved_queries = saved_sql_history(memory, limit=8)
+        st.markdown(
+            render_response_card(
+                "Saved Query History",
+                "User-scoped SQL history restored from persistent workspace memory.",
+                "".join(
+                    f'<div class="workspace-list-item"><div class="observability-label">{escape_html(item.get("timestamp", ""))}</div>'
+                    f'<div class="workspace-body-copy">{escape_html(item.get("question", ""))}<br/><code>{escape_html(item.get("sql", ""))}</code></div></div>'
+                    for item in saved_queries
+                )
+                or '<div class="workspace-body-copy">No saved SQL history for this workspace.</div>',
+                tone="summary-module",
+            ),
+            unsafe_allow_html=True,
+        )
+    with right:
+        recent_activity = list(reversed(memory.get("recent_activity", [])[-8:]))
+        st.markdown(
+            render_response_card(
+                "Recent Activity",
+                "Workspace restoration, saved investigations, saved SQL, and workflow persistence events.",
+                "".join(
+                    f'<div class="workspace-list-item"><div class="observability-label">{escape_html(item.get("activity_type", ""))} · {escape_html(item.get("timestamp", ""))}</div>'
+                    f'<div class="workspace-body-copy">{escape_html(item.get("title", ""))}<br/>{escape_html(item.get("detail", ""))}</div></div>'
+                    for item in recent_activity
+                )
+                or '<div class="workspace-body-copy">No recent workspace activity yet.</div>',
+                tone="default-module",
+            ),
+            unsafe_allow_html=True,
+        )
+    lower_left, lower_right = st.columns([1, 1], gap="medium")
+    with lower_left:
+        bookmarks = list(reversed(memory.get("query_bookmarks", [])[-8:]))
+        st.markdown(
+            render_response_card(
+                "Bookmarked Queries",
+                "Reusable SQL workflows saved for repeat analysis.",
+                "".join(
+                    f'<div class="workspace-list-item"><div class="observability-label">{escape_html(item.get("created_at", ""))}</div>'
+                    f'<div class="workspace-body-copy">{escape_html(item.get("question", ""))}<br/><code>{escape_html(item.get("sql", ""))}</code></div></div>'
+                    for item in bookmarks
+                )
+                or '<div class="workspace-body-copy">No query bookmarks yet.</div>',
+                tone="recommendation-module",
+            ),
+            unsafe_allow_html=True,
+        )
+    with lower_right:
+        reports = list(reversed(memory.get("saved_reports", [])[-8:]))
+        st.markdown(
+            render_response_card(
+                "Saved Report Views",
+                "Executive summaries and report snapshots retained for workspace continuity.",
+                "".join(
+                    f'<div class="workspace-list-item"><div class="observability-label">{escape_html(item.get("scope", ""))} · {escape_html(item.get("created_at", ""))}</div>'
+                    f'<div class="workspace-body-copy">{escape_html(item.get("title", ""))}<br/>{escape_html(item.get("summary", ""))}</div></div>'
+                    for item in reports
+                )
+                or '<div class="workspace-body-copy">No saved report views yet.</div>',
+                tone="summary-module",
+            ),
+            unsafe_allow_html=True,
+        )
+    render_report_exports(scope="workspace")
+
+
 st.set_page_config(
     page_title="Agentic AI Analytics Platform",
     layout="wide",
@@ -2152,6 +2582,8 @@ st.set_page_config(
 st.markdown(get_theme_css(), unsafe_allow_html=True)
 client = None
 init_session_state()
+authenticated_identity = require_login()
+st.session_state.user_identity = authenticated_identity
 st.session_state.openai_runtime = validate_openai_runtime()
 
 render_hero()
@@ -2159,10 +2591,11 @@ selected_nav = render_top_navigation(st.session_state.get("top_navigation", "Ove
 st.session_state.workspace_route = selected_nav
 sidebar_state = render_sidebar()
 configure_workspace_session(
-    sidebar_state["workspace_user"],
-    sidebar_state["workspace_team"],
-    sidebar_state["workspace_role"],
+    authenticated_identity["user_id"],
+    authenticated_identity["team_id"],
+    authenticated_identity["role"],
 )
+render_auth_controls()
 st.session_state.monitoring_config = {
     **st.session_state.get("monitoring_config", default_monitoring_config()),
     "enabled": sidebar_state["monitoring_enabled"],
@@ -2202,6 +2635,6 @@ elif nav == "Agents":
 elif nav == "API":
     render_api_workspace()
 else:
-    render_history(st.session_state.history)
+    render_workspace_history()
 
 render_footer()

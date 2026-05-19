@@ -56,6 +56,14 @@ SAMPLE_PROMPTS = [
     "Tracks with album and artist",
 ]
 
+ONBOARDING_LABELS = {
+    "workspace_intro": "Workspace",
+    "sample_dataset": "Dataset",
+    "first_query": "First Query",
+    "results_reviewed": "Review",
+    "export_completed": "Export",
+}
+
 
 # ---------------------------------------------------------------------------
 # HTML primitives
@@ -103,6 +111,116 @@ def render_response_card(
         f"</div>"
         f"{response_body_html(body_html)}"
         f"</div>"
+    )
+
+
+def render_onboarding_card(onboarding: dict | None, steps: list[dict]) -> str:
+    onboarding = onboarding or {}
+    step_state = onboarding.get("steps", {})
+    total = onboarding.get("total_count") or len(steps) or 1
+    completed = onboarding.get("completed_count", 0)
+    percent = onboarding.get("percent", round((completed / total) * 100))
+    body = (
+        f'<div class="onboarding-progress-shell">'
+        f'<div class="onboarding-progress-track"><span style="width:{max(0, min(percent, 100))}%;"></span></div>'
+        f'<div class="workspace-body-copy">{escape_html(completed)} of {escape_html(total)} onboarding steps complete.</div>'
+        f"</div>"
+    )
+    body += '<div class="onboarding-step-grid">'
+    for item in steps:
+        step_id = item.get("step_id", "")
+        done = bool(step_state.get(step_id))
+        state_class = " onboarding-step-done" if done else ""
+        state_label = "Done" if done else "Next"
+        body += (
+            f'<div class="onboarding-step{state_class}">'
+            f'<div class="observability-label">{escape_html(state_label)}</div>'
+            f'<div class="onboarding-step-title">{escape_html(item.get("label") or ONBOARDING_LABELS.get(step_id, step_id))}</div>'
+            f'<div class="onboarding-step-copy">{escape_html(item.get("description", ""))}</div>'
+            f"</div>"
+        )
+    body += "</div>"
+    return render_response_card(
+        "Workspace Onboarding",
+        "Guided setup for the sample dataset, first query, result review, and exports.",
+        body,
+        tone="summary-module",
+    )
+
+
+def render_empty_state_card(title: str, subtitle: str, actions: list[str]) -> str:
+    action_html = "".join(f'<div class="workspace-list-item">{escape_html(action)}</div>' for action in actions)
+    return render_response_card(
+        title,
+        subtitle,
+        action_html or '<div class="workspace-body-copy">No action is available yet.</div>',
+        tone="default-module",
+    )
+
+
+def render_quick_actions_card(actions: list[dict]) -> str:
+    body = "".join(
+        (
+            f'<div class="quick-action-item">'
+            f'<div class="quick-action-label">{escape_html(item.get("label", ""))}</div>'
+            f'<div class="quick-action-copy">{escape_html(item.get("caption", ""))}</div>'
+            f"</div>"
+        )
+        for item in actions
+    )
+    return render_response_card(
+        "Quick Actions",
+        "Common operator paths for fast workspace recovery and exploration.",
+        f'<div class="quick-action-grid">{body}</div>',
+        tone="recommendation-module",
+    )
+
+
+def render_saved_assets_card(memory: dict | None) -> str:
+    memory = memory or {}
+    items = [
+        ("Saved Queries", len(memory.get("query_bookmarks", []))),
+        ("Saved Investigations", len(memory.get("investigations", []))),
+        ("Pinned Investigations", len(memory.get("pinned_investigations", []))),
+        ("Saved Reports", len(memory.get("saved_reports", []))),
+        ("Recent Activities", len(memory.get("recent_activity", []))),
+        ("Sessions", len(memory.get("sessions", []))),
+    ]
+    return render_response_card(
+        "Workspace Continuity",
+        "Persistent assets restored for the active workspace.",
+        f'<div class="observability-grid">{metric_grid_html(items)}</div>',
+        tone="observability-module",
+    )
+
+
+def render_recovery_guidance_card(telemetry: dict | None, validation: dict | None, recovery: dict | None) -> str:
+    telemetry = telemetry or {}
+    validation = validation or {}
+    recovery = recovery or {}
+    latest_error = next(
+        (item for item in reversed(telemetry.get("steps", [])) if item.get("error_type") or item.get("error_message")),
+        {},
+    )
+    hints = []
+    if latest_error:
+        hints.append(f'OpenAI request issue: {latest_error.get("error_message", "request failed")}')
+        hints.append("Retry the workflow after checking model availability, API key configuration, and request size.")
+    if validation.get("warnings"):
+        hints.extend([f"SQL validation: {item}" for item in validation.get("warnings", [])[:3]])
+    if recovery.get("message"):
+        hints.append(recovery["message"])
+    if not hints:
+        hints = [
+            "No active recovery action is required.",
+            "If a connector fails, validate credentials and schema access from the API workspace.",
+        ]
+    body = "".join(f'<div class="workspace-list-item">{escape_html(item)}</div>' for item in hints)
+    return render_response_card(
+        "Recovery Guidance",
+        "Plain-language next steps for connector, SQL validation, and OpenAI runtime issues.",
+        body,
+        tone="insight-module" if latest_error or validation.get("warnings") else "default-module",
     )
 
 
@@ -187,7 +305,7 @@ def render_sidebar() -> dict:
             show_schema = st.toggle("Show database schema", value=False)
 
         with st.expander("Workspace Context", expanded=True):
-            current_identity = st.session_state.get("user_identity", {})
+            current_identity = st.session_state.get("user_identity") or {}
             workspace_user = st.text_input("User", value=current_identity.get("user_id", "local.user"))
             workspace_team = st.text_input("Team", value=current_identity.get("team_id", "default-team"))
             workspace_role = st.selectbox(

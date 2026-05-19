@@ -1013,6 +1013,64 @@ def get_theme_css() -> str:
         margin-bottom: 0;
     }
 
+    .onboarding-progress-shell {
+        display: grid;
+        gap: 0.52rem;
+        margin-bottom: 0.62rem;
+    }
+
+    .onboarding-progress-track {
+        height: 8px;
+        border-radius: 999px;
+        overflow: hidden;
+        background: rgba(148, 163, 184, 0.1);
+        border: 1px solid rgba(148, 163, 184, 0.12);
+    }
+
+    .onboarding-progress-track span {
+        display: block;
+        height: 100%;
+        border-radius: 999px;
+        background: linear-gradient(90deg, #34d399, #56ccf2);
+    }
+
+    .onboarding-step-grid,
+    .quick-action-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.5rem;
+    }
+
+    .onboarding-step,
+    .quick-action-item {
+        min-height: 104px;
+        border-radius: 8px;
+        padding: 0.66rem 0.72rem;
+        background: rgba(148, 163, 184, 0.05);
+        border: 1px solid rgba(148, 163, 184, 0.11);
+    }
+
+    .onboarding-step-done {
+        border-color: rgba(52, 211, 153, 0.24);
+        background: rgba(52, 211, 153, 0.06);
+    }
+
+    .onboarding-step-title,
+    .quick-action-label {
+        color: #f8fbff;
+        font-size: 0.9rem;
+        font-weight: 700;
+        line-height: 1.25;
+        margin-bottom: 0.32rem;
+    }
+
+    .onboarding-step-copy,
+    .quick-action-copy {
+        color: #bfd3ea;
+        font-size: 0.82rem;
+        line-height: 1.45;
+    }
+
     .activity-item {
         display: grid;
         grid-template-columns: 14px 1fr auto;
@@ -1519,6 +1577,8 @@ def get_theme_css() -> str:
         .summary-stat-strip,
         .observability-grid,
         .agent-row,
+        .onboarding-step-grid,
+        .quick-action-grid,
         .orchestration-badge-grid,
         .workflow-timeline-card-grid,
         .agent-monitor-grid,
