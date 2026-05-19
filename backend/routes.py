@@ -5,14 +5,15 @@ from datetime import datetime, timezone
 from json import dumps
 from typing import Literal
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse
 
 from backend.auth_context import get_request_session
+from backend.auth_sessions import login_user, revoke_session, validate_session_token
 from backend.diagnostics import runtime_diagnostics
 from backend.logging import get_logger
-from backend.models import DEFAULT_ORGANIZATION_ID, DEFAULT_WORKSPACE_ID, RequestSession
+from backend.models import DEFAULT_ORGANIZATION_ID, DEFAULT_USER_ID, DEFAULT_WORKSPACE_ID, RequestSession
 from backend.runtime import orchestration_runtime
 from backend.services import (
     AgentCoordinationTrace,
@@ -27,7 +28,16 @@ from backend.services import (
 from backend.telemetry import RUNTIME_EVENT_TYPES, TELEMETRY_SCHEMA_VERSION, filter_telemetry_events, telemetry_aggregate
 from backend.workspace_inspection import saved_sql_history, workflow_transcripts, workspace_summary
 from backend.websocket import websocket_manager, workflow_channel
-from workspace import load_workspace_memory_by_id
+from workspace import (
+    build_user_session,
+    load_workspace_memory,
+    load_workspace_memory_by_id,
+    save_investigation_record,
+    save_report_view,
+    save_sql_history_record,
+    save_workspace_memory,
+    save_workspace_preferences,
+)
 
 logger = get_logger(__name__)
 
@@ -176,6 +186,42 @@ class OperationsSummaryResponse(BaseModel):
     telemetry_schema_version: str
 
 
+class ConnectorValidationRequest(BaseModel):
+    connector_id: str = Field("sqlite", min_length=1)
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=1)
+
+
+class LogoutRequest(BaseModel):
+    session_token: str = Field(..., min_length=1)
+
+
+class SavedSQLRequest(BaseModel):
+    question: str = ""
+    sql: str = Field(..., min_length=1)
+    rows: int = 0
+    intent: str = ""
+
+
+class SavedInvestigationRequest(BaseModel):
+    investigation: dict[str, object] = Field(default_factory=dict)
+    note: str = ""
+
+
+class WorkspacePreferencesRequest(BaseModel):
+    preferences: dict[str, object] = Field(default_factory=dict)
+
+
+class SavedReportRequest(BaseModel):
+    title: str = Field("Workspace report", min_length=1)
+    scope: str = "workspace"
+    summary: str = ""
+    payload: dict[str, object] = Field(default_factory=dict)
+
+
 @router.get("/health")
 def health() -> dict[str, str]:
     return {
@@ -188,6 +234,11 @@ def health() -> dict[str, str]:
 
 @router.get("/ready")
 def readiness() -> dict[str, str]:
+    return orchestration_service.readiness()
+
+
+@router.get("/readiness")
+def readiness_alias() -> dict[str, str]:
     return orchestration_service.readiness()
 
 
@@ -206,6 +257,109 @@ def operations_summary_endpoint() -> OperationsSummaryResponse:
         workflow_storage=ready.get("workflow_storage", "unknown"),
         telemetry_schema_version=TELEMETRY_SCHEMA_VERSION,
     )
+
+
+@router.post("/auth/login")
+def login_endpoint(payload: LoginRequest) -> dict[str, object]:
+    identity = login_user(payload.username, payload.password)
+    if identity is None:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    return {"authenticated": True, "session": identity}
+
+
+@router.post("/auth/logout")
+def logout_endpoint(payload: LogoutRequest) -> dict[str, object]:
+    return {"revoked": revoke_session(payload.session_token)}
+
+
+@router.get("/auth/session")
+def auth_session(
+    authorization: str | None = Header(default=None),
+    x_session_token: str | None = Header(default=None),
+    session: RequestSession = Depends(get_request_session),
+) -> dict[str, object]:
+    token = x_session_token or (authorization.removeprefix("Bearer ").strip() if authorization and authorization.startswith("Bearer ") else None)
+    identity = validate_session_token(token)
+    return {
+        "authenticated": bool(identity),
+        "session": identity,
+        "request_session": {
+            "user_id": session.user_id,
+            "workspace_id": session.workspace_id,
+            "organization_id": session.organization_id,
+            "roles": list(session.roles),
+        },
+    }
+
+
+@router.get("/governance")
+def governance_center(session: RequestSession = Depends(get_request_session)) -> dict[str, object]:
+    return backend_service.governance(session.workspace_id)
+
+
+@router.get("/scheduler")
+def scheduler_center(session: RequestSession = Depends(get_request_session)) -> dict[str, object]:
+    return backend_service.scheduler(session.workspace_id)
+
+
+@router.get("/incidents")
+def incident_center(workflow_id: str = "workflow:latest") -> dict[str, object]:
+    telemetry = backend_service.telemetry(workflow_id)
+    return backend_service.incidents(telemetry, workflow_id=workflow_id)
+
+
+@router.get("/executive/report")
+def executive_report(workflow_id: str = "workflow:latest", session: RequestSession = Depends(get_request_session)) -> dict[str, object]:
+    return backend_service.executive_report(
+        workspace_id=session.workspace_id,
+        telemetry=backend_service.telemetry(workflow_id),
+    )
+
+
+@router.get("/audit/timeline")
+def audit_timeline(workflow_id: str = "workflow:latest", session: RequestSession = Depends(get_request_session)) -> dict[str, object]:
+    return backend_service.operational_timeline(
+        workspace_id=session.workspace_id,
+        workflow_id=workflow_id,
+        telemetry=backend_service.telemetry(workflow_id),
+    )
+
+
+@router.get("/connectors")
+def list_connectors() -> dict[str, object]:
+    return backend_service.connectors()
+
+
+@router.get("/connectors/{connector_id}/health")
+def connector_health(connector_id: str) -> dict[str, object]:
+    try:
+        return backend_service.connector_health(connector_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/connectors/{connector_id}/schema")
+def connector_schema(connector_id: str) -> dict[str, object]:
+    try:
+        return backend_service.connector_schema(connector_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/connectors/validate")
+def validate_connector(payload: ConnectorValidationRequest) -> dict[str, object]:
+    try:
+        return backend_service.validate_connector(payload.connector_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/connectors/{connector_id}/validate")
+def validate_connector_by_id(connector_id: str) -> dict[str, object]:
+    try:
+        return backend_service.validate_connector(connector_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/execute", response_model=ExecuteResponse)
@@ -360,6 +514,81 @@ def inspect_workspace(workspace_id: str) -> dict[str, object]:
     return workspace_summary(memory)
 
 
+@router.get("/workspace/{workspace_id}")
+def get_workspace_memory(workspace_id: str, session: RequestSession = Depends(get_request_session)) -> dict[str, object]:
+    _ensure_workspace_access(session, workspace_id)
+    return load_workspace_memory_by_id(workspace_id)
+
+
+@router.post("/workspace/{workspace_id}/sql-history")
+def save_workspace_sql_history(
+    workspace_id: str,
+    payload: SavedSQLRequest,
+    session: RequestSession = Depends(get_request_session),
+) -> dict[str, object]:
+    _ensure_workspace_access(session, workspace_id)
+    identity = build_user_session(session.user_id, session.workspace_id.split(".", 1)[0], "admin", session.user.display_name)
+    identity["workspace_id"] = workspace_id
+    memory = load_workspace_memory(identity)
+    memory = save_sql_history_record(
+        memory,
+        question=payload.question,
+        sql=payload.sql,
+        rows=payload.rows,
+        intent=payload.intent,
+    )
+    memory = save_workspace_memory(identity, memory)
+    return {"workspace_id": workspace_id, "items": saved_sql_history(memory)}
+
+
+@router.post("/workspace/{workspace_id}/investigations")
+def save_workspace_investigation(
+    workspace_id: str,
+    payload: SavedInvestigationRequest,
+    session: RequestSession = Depends(get_request_session),
+) -> dict[str, object]:
+    _ensure_workspace_access(session, workspace_id)
+    identity = build_user_session(session.user_id, session.workspace_id.split(".", 1)[0], "admin", session.user.display_name)
+    identity["workspace_id"] = workspace_id
+    memory = load_workspace_memory(identity)
+    memory = save_investigation_record(memory, dict(payload.investigation), note=payload.note)
+    memory = save_workspace_memory(identity, memory)
+    return {"workspace_id": workspace_id, "investigations": memory.get("investigations", [])}
+
+
+@router.post("/workspace/{workspace_id}/preferences")
+def save_workspace_preferences_endpoint(
+    workspace_id: str,
+    payload: WorkspacePreferencesRequest,
+    session: RequestSession = Depends(get_request_session),
+) -> dict[str, object]:
+    _ensure_workspace_access(session, workspace_id)
+    identity = build_user_session(session.user_id, session.workspace_id.split(".", 1)[0], "admin", session.user.display_name)
+    identity["workspace_id"] = workspace_id
+    memory = load_workspace_memory(identity)
+    memory = save_workspace_preferences(memory, dict(payload.preferences))
+    memory = save_workspace_memory(identity, memory)
+    return {"workspace_id": workspace_id, "preferences": memory.get("workspace_preferences", {})}
+
+
+@router.post("/workspace/{workspace_id}/reports")
+def save_workspace_report(
+    workspace_id: str,
+    payload: SavedReportRequest,
+    session: RequestSession = Depends(get_request_session),
+) -> dict[str, object]:
+    _ensure_workspace_access(session, workspace_id)
+    identity = build_user_session(session.user_id, session.workspace_id.split(".", 1)[0], "admin", session.user.display_name)
+    identity["workspace_id"] = workspace_id
+    memory = load_workspace_memory(identity)
+    memory = save_report_view(
+        memory,
+        {"title": payload.title, "scope": payload.scope, "summary": payload.summary, "payload": payload.payload},
+    )
+    memory = save_workspace_memory(identity, memory)
+    return {"workspace_id": workspace_id, "reports": memory.get("saved_reports", [])}
+
+
 @router.get("/workspace/{workspace_id}/transcripts")
 def export_workspace_transcripts(workspace_id: str, session_id: str = "") -> dict[str, object]:
     memory = load_workspace_memory_by_id(workspace_id)
@@ -433,6 +662,13 @@ def _telemetry_response(telemetry: WorkflowTelemetry) -> WorkflowTelemetryRespon
             total_tokens=telemetry.token_usage.total_tokens,
         ),
     )
+
+
+def _ensure_workspace_access(session: RequestSession, workspace_id: str) -> None:
+    if session.user_id == DEFAULT_USER_ID:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    if session.workspace_id != workspace_id:
+        raise HTTPException(status_code=403, detail="Workspace access denied")
 
 
 def _stage_progression_response(

@@ -9,6 +9,7 @@ from backend.config import settings
 from backend.logging import configure_logging, get_logger
 from backend.middleware import RequestContextMiddleware
 from backend.routes import SERVICE_VERSION, router
+from backend.startup import run_startup_validation
 
 logger = get_logger(__name__)
 
@@ -17,7 +18,8 @@ logger = get_logger(__name__)
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
     app.state.settings = settings
-    logger.info("backend_startup")
+    app.state.startup_validation = run_startup_validation()
+    logger.info("backend_startup diagnostics=%s", app.state.startup_validation.get("summary", {}))
     yield
     logger.info("backend_shutdown")
 

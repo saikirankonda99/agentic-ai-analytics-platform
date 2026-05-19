@@ -204,6 +204,10 @@ class AnalyticsWorkflowResult:
     stage_confidence: dict[str, float] = field(default_factory=dict)
     recovery: dict[str, Any] = field(default_factory=dict)
     policy_decision: dict[str, Any] = field(default_factory=dict)
+    schema_intelligence: dict[str, Any] = field(default_factory=dict)
+    sql_validation: dict[str, Any] = field(default_factory=dict)
+    sql_explanation: dict[str, Any] = field(default_factory=dict)
+    result_quality: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_mapping(cls, payload: dict[str, Any]) -> "AnalyticsWorkflowResult":
@@ -220,6 +224,10 @@ class AnalyticsWorkflowResult:
             stage_confidence=dict(payload.get("stage_confidence", {})),
             recovery=dict(payload.get("recovery", {})),
             policy_decision=dict(payload.get("policy_decision", {})),
+            schema_intelligence=dict(payload.get("schema_intelligence", {})),
+            sql_validation=dict(payload.get("sql_validation", {})),
+            sql_explanation=dict(payload.get("sql_explanation", {})),
+            result_quality=dict(payload.get("result_quality", {})),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -236,6 +244,10 @@ class AnalyticsWorkflowResult:
             "stage_confidence": self.stage_confidence,
             "recovery": self.recovery,
             "policy_decision": self.policy_decision,
+            "schema_intelligence": self.schema_intelligence,
+            "sql_validation": self.sql_validation,
+            "sql_explanation": self.sql_explanation,
+            "result_quality": self.result_quality,
         }
 
 

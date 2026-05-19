@@ -8,11 +8,16 @@ from analytics_memory import contextualize_followup, memory_prompt_block
 from db import get_schema, run_query
 from graph.cost_tracker import log_query_cost
 from graph.history_store import retrieve_similar_queries, save_query_to_history
-from guardrails import is_safe_sql
 from llm import DEFAULT_SQL_MODEL, generate_sql_with_telemetry, stream_sql_with_telemetry
 from workspace import workspace_prompt_block
 from backend.orchestration import default_coordinator, recovery_hint, stage_confidence
 from backend.policies import default_execution_policy, evaluate_stage_policy
+from backend.sql_intelligence import (
+    analyze_result_quality,
+    build_schema_intelligence,
+    explain_sql,
+    validate_sql_against_schema,
+)
 from backend.telemetry import (
     TELEMETRY_SCHEMA_VERSION,
     new_correlation_id,
@@ -83,6 +88,10 @@ class WorkflowState(TypedDict, total=False):
     recovery: dict[str, Any]
     execution_policy: dict[str, Any]
     policy_decision: dict[str, Any]
+    schema_intelligence: dict[str, Any]
+    sql_validation: dict[str, Any]
+    sql_explanation: dict[str, Any]
+    result_quality: dict[str, Any]
 
 
 WorkflowEventCallback = Callable[[str, WorkflowState, str, str], None]
@@ -320,20 +329,30 @@ def planner_node(state: WorkflowState) -> WorkflowState:
 def schema_node(state: WorkflowState) -> WorkflowState:
     try:
         schema = get_schema()
+        schema_intelligence = build_schema_intelligence(schema)
         return {
             "schema": schema,
-            "stage_confidence": _stage_confidence_update(state, "schema retrieval", stage_confidence(status="completed")),
+            "schema_intelligence": schema_intelligence,
+            "stage_confidence": _stage_confidence_update(
+                state,
+                "schema retrieval",
+                schema_intelligence.get("confidence", stage_confidence(status="completed")),
+            ),
             "execution_graph": _transition_agent(
                 state,
                 "schema retrieval",
                 "completed",
-                confidence=stage_confidence(status="completed"),
+                confidence=schema_intelligence.get("confidence", stage_confidence(status="completed")),
+                metadata={
+                    "table_count": schema_intelligence.get("table_count", 0),
+                    "relationship_count": len(schema_intelligence.get("relationships", [])),
+                },
             ),
             "trace": _append_trace(
                 state,
                 "schema retrieval",
                 "success",
-                "Database schema loaded.",
+                f"Database schema loaded with {schema_intelligence.get('table_count', 0)} table(s).",
             ),
         }
     except Exception as exc:
@@ -411,6 +430,7 @@ def _build_generation_prompt(state: WorkflowState) -> str:
         memory_block = f"\n\nSimilar successful examples:\n{formatted_examples}"
 
     semantic_block = state.get("semantic_context", {}).get("prompt_block", "")
+    schema_block = "\n\n" + state.get("schema_intelligence", {}).get("compressed_prompt", "") if state.get("schema_intelligence") else ""
     conversation_block = memory_prompt_block(state.get("conversation_context"))
     workspace_block = workspace_prompt_block(state.get("workspace_context"), question)
 
@@ -423,8 +443,8 @@ Previous SQL failed:
 Database error:
 {state['last_error']}
 
-Generate a corrected read-only SQL query.{memory_block}{semantic_block}{conversation_block}{workspace_block}"""
-    return f"{question}{memory_block}{semantic_block}{conversation_block}{workspace_block}"
+Generate a corrected read-only SQL query.{memory_block}{semantic_block}{schema_block}{conversation_block}{workspace_block}"""
+    return f"{question}{memory_block}{semantic_block}{schema_block}{conversation_block}{workspace_block}"
 
 
 def _build_reflection_prompt(state: WorkflowState) -> str:
@@ -455,6 +475,12 @@ Database/runtime error:
 
 Error source:
 {state.get('last_error_source', 'unknown')}
+
+Schema intelligence:
+{state.get("schema_intelligence", {}).get("compressed_prompt", "")}
+
+Validation repair hint:
+{state.get("sql_validation", {}).get("repair_hint", "")}
 
 Return ONLY corrected read-only SQL. Do not explain anything.{memory_block}{state.get("semantic_context", {}).get("prompt_block", "")}{memory_prompt_block(state.get("conversation_context"))}{workspace_prompt_block(state.get("workspace_context"), state.get("effective_question") or state["question"])}"""
 
@@ -547,14 +573,18 @@ def validation_node(state: WorkflowState) -> WorkflowState:
             "trace": _append_trace(state, "validation", "error", error),
         }
 
-    if not is_safe_sql(sql):
-        error = "Unsafe query blocked. Only read-only SELECT queries are allowed."
+    validation = validate_sql_against_schema(sql, state.get("schema", ""))
+    explanation = explain_sql(sql, validation)
+    if validation.get("status") == "failed":
+        error = "; ".join(validation.get("errors", [])) or "SQL validation failed."
         confidence = stage_confidence(status="error", has_error=True)
         return {
             "error": error,
             "last_error": error,
             "last_error_source": "validation",
             "last_failed_sql": sql,
+            "sql_validation": validation,
+            "sql_explanation": explanation,
             "recovery": recovery_hint(error, state.get("retry_count", 0), MAX_RETRIES),
             "policy_decision": _policy_decision(state, "validation", confidence, error),
             "stage_confidence": _stage_confidence_update(state, "validation", confidence),
@@ -563,26 +593,35 @@ def validation_node(state: WorkflowState) -> WorkflowState:
                 "validation",
                 "failed",
                 confidence=confidence,
+                metadata={"risk_level": validation.get("risk_level"), "risk_score": validation.get("risk_score")},
             ),
             "trace": _append_trace(state, "validation", "error", error),
         }
 
+    validation_confidence = float(validation.get("confidence", stage_confidence(status="completed", signals=3)))
     return {
         "error": None,
         "last_error_source": None,
-        "stage_confidence": _stage_confidence_update(state, "validation", stage_confidence(status="completed", signals=3)),
+        "sql_validation": validation,
+        "sql_explanation": explanation,
+        "stage_confidence": _stage_confidence_update(state, "validation", validation_confidence),
         "execution_graph": _transition_agent(
             state,
             "validation",
             "completed",
-            confidence=stage_confidence(status="completed", signals=3),
-            metadata={"sql_validation_confidence": stage_confidence(status="completed", signals=3)},
+            confidence=validation_confidence,
+            metadata={
+                "sql_validation_confidence": validation_confidence,
+                "risk_level": validation.get("risk_level"),
+                "risk_score": validation.get("risk_score"),
+                "warnings": validation.get("warnings", []),
+            },
         ),
         "trace": _append_trace(
             state,
             "validation",
-            "success",
-            "SQL passed safety validation.",
+            "success" if validation.get("status") == "passed" else "warning",
+            "SQL passed schema validation." if validation.get("status") == "passed" else "SQL passed with validation warnings.",
         ),
     }
 
@@ -660,6 +699,7 @@ def execution_node(state: WorkflowState) -> WorkflowState:
     try:
         columns, rows = run_query(state["sql"])
         latency_ms = int((time.perf_counter() - started) * 1000)
+        quality = analyze_result_quality(columns, rows)
         save_query_to_history(
             question=state["question"],
             sql=state["sql"],
@@ -672,6 +712,10 @@ def execution_node(state: WorkflowState) -> WorkflowState:
                 model="sqlite",
                 latency_ms=latency_ms,
                 usage_available=False,
+                sql_validation_status=state.get("sql_validation", {}).get("status"),
+                sql_risk_score=state.get("sql_validation", {}).get("risk_score"),
+                result_quality_status=quality.get("status"),
+                result_quality_confidence=quality.get("confidence"),
             ),
         )
         log_query_cost(
@@ -688,13 +732,18 @@ def execution_node(state: WorkflowState) -> WorkflowState:
             "last_error": None,
             "last_error_source": None,
             "telemetry": telemetry,
-            "stage_confidence": _stage_confidence_update(state, "execution", stage_confidence(status="completed", signals=3)),
+            "result_quality": quality,
+            "stage_confidence": _stage_confidence_update(
+                state,
+                "execution",
+                min(stage_confidence(status="completed", signals=3), quality.get("confidence", 0.9)),
+            ),
             "execution_graph": _transition_agent(
                 state,
                 "execution",
                 "completed",
-                confidence=stage_confidence(status="completed", signals=3),
-                metadata={"row_count": len(rows)},
+                confidence=min(stage_confidence(status="completed", signals=3), quality.get("confidence", 0.9)),
+                metadata={"row_count": len(rows), "quality": quality},
             ),
             "trace": _append_trace(
                 state,
@@ -838,6 +887,10 @@ def _run_linear(
         "recovery": {},
         "execution_policy": default_execution_policy().as_dict(),
         "policy_decision": {},
+        "schema_intelligence": {},
+        "sql_validation": {},
+        "sql_explanation": {},
+        "result_quality": {},
         "trace": [],
     }
 
@@ -981,6 +1034,10 @@ def run_workflow(
         "recovery": {},
         "execution_policy": default_execution_policy().as_dict(),
         "policy_decision": {},
+        "schema_intelligence": {},
+        "sql_validation": {},
+        "sql_explanation": {},
+        "result_quality": {},
         "trace": [],
     }
 

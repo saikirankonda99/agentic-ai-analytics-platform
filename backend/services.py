@@ -5,7 +5,12 @@ from typing import TYPE_CHECKING, Any, Callable
 from uuid import uuid4
 
 from backend.agents import MultiAgentCoordinator
+from backend.audit import audit_log_from_workflow, operational_timeline
+from backend.connectors import ConnectorRegistry, get_connector_registry
 from backend.execution_graph import execution_graph_response
+from backend.executive import operational_report
+from backend.governance import governance_overview
+from backend.incidents import incident_from_telemetry, incident_overview
 from backend.logging import get_logger
 from backend.memory import MemoryDocument, VectorMemoryStore, build_vector_memory_store
 from backend.models import (
@@ -43,6 +48,7 @@ from backend.storage import (
     UsageStorage,
     WorkflowStorage,
 )
+from backend.scheduler import scheduler_overview
 from backend.usage import UsageService, usage_service
 from backend.telemetry import validate_telemetry_payload
 
@@ -69,6 +75,7 @@ class OrchestrationService:
         usage: UsageService | None = None,
         vector_memory_store: VectorMemoryStore | None = None,
         agent_coordinator: MultiAgentCoordinator | None = None,
+        connector_registry: ConnectorRegistry | None = None,
     ) -> None:
         self.config = config or BackendConfig()
         self.workflow_storage = workflow_storage or SQLiteWorkflowStorage()
@@ -80,6 +87,7 @@ class OrchestrationService:
         self.usage_service = usage or (UsageService(usage_storage=usage_storage) if usage_storage else usage_service)
         self.vector_memory_store = vector_memory_store or build_vector_memory_store()
         self.agent_coordinator = agent_coordinator or MultiAgentCoordinator()
+        self.connector_registry = connector_registry or get_connector_registry()
         self.worker = InlineWorker()
 
     def register_session(self, session: RequestSession) -> None:
@@ -162,6 +170,7 @@ class OrchestrationService:
             "agent_trace_storage": self._check_dependency(lambda: self.agent_trace_storage.list("__readiness__")),
             "usage_storage": self._check_dependency(lambda: self.usage_service.list_usage(workspace_id="__readiness__")),
             "vector_memory": "ok",
+            "sqlite_connector": "ok" if self.connector_registry.health("sqlite").get("status") == "healthy" else "error",
         }
         checks["status"] = "ready" if all(value == "ok" for value in checks.values()) else "degraded"
         return checks
@@ -592,6 +601,7 @@ class AnalyticsBackendService:
         self.cache = InMemoryCache()
         self.worker = InlineWorker()
         self.vector_memory_store = build_vector_memory_store()
+        self.connector_registry = get_connector_registry()
 
     def execute_query(
         self,
@@ -717,10 +727,74 @@ class AnalyticsBackendService:
         return result
 
     def execute_sql(self, sql: str) -> dict[str, Any]:
-        from db import run_query
-
-        columns, rows = run_query(sql)
+        columns, rows = self.connector_registry.get("sqlite").execute_read(sql)
         return {"columns": columns, "rows": rows, "count": len(rows)}
+
+    def connectors(self) -> dict[str, Any]:
+        return {"connectors": self.connector_registry.list_connectors()}
+
+    def connector_health(self, connector_id: str) -> dict[str, Any]:
+        return self.connector_registry.health(connector_id)
+
+    def validate_connector(self, connector_id: str) -> dict[str, Any]:
+        return self.connector_registry.validate(connector_id)
+
+    def connector_schema(self, connector_id: str) -> dict[str, Any]:
+        return self.connector_registry.inspect_schema(connector_id)
+
+    def governance(self, workspace_id: str = DEFAULT_WORKSPACE_ID) -> dict[str, Any]:
+        return governance_overview(workspace_id)
+
+    def scheduler(self, workspace_id: str = DEFAULT_WORKSPACE_ID) -> dict[str, Any]:
+        return scheduler_overview(workspace_id)
+
+    def incidents(self, telemetry: dict[str, Any] | None = None, workflow_id: str | None = None) -> dict[str, Any]:
+        incident = incident_from_telemetry(telemetry, workflow_id=workflow_id)
+        return incident_overview([incident] if incident else [])
+
+    def executive_report(
+        self,
+        *,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
+        telemetry: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        governance = self.governance(workspace_id)
+        scheduler = self.scheduler(workspace_id)
+        incidents = self.incidents(telemetry)
+        return operational_report(
+            workspace_id=workspace_id,
+            governance=governance,
+            scheduler=scheduler,
+            telemetry=telemetry or {},
+            incidents=incidents,
+        )
+
+    def operational_timeline(
+        self,
+        *,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
+        workflow_id: str = "workflow:latest",
+        telemetry: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        workflow = orchestration_service.get_workflow(workflow_id)
+        workflow_audit = None
+        if workflow is not None:
+            workflow_audit = audit_log_from_workflow(
+                workflow,
+                orchestration_service.get_events(workflow.workflow_id) or (),
+                orchestration_service.get_stream_updates(workflow.workflow_id) or (),
+            )
+        incidents = self.incidents(telemetry, workflow_id=None).get("incidents", [])
+        schedules = self.scheduler(workspace_id).get("schedules", [])
+        return {
+            "workspace_id": workspace_id,
+            "workflow_id": workflow.workflow_id if workflow else None,
+            "timeline": operational_timeline(
+                workflow_audit=workflow_audit,
+                incidents=incidents,
+                schedules=schedules,
+            ),
+        }
 
 
 backend_service = AnalyticsBackendService()

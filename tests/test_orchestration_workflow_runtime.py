@@ -25,3 +25,6 @@ def test_linear_workflow_preserves_correlation_id_with_mocked_llm(monkeypatch) -
     assert result["telemetry"]["correlation_id"].startswith("wf-")
     assert result["telemetry"]["schema_version"]
     assert any(item["step"] == "sql generation" for item in result["telemetry"]["steps"])
+    assert result["sql_validation"]["status"] in {"passed", "warning"}
+    assert result["sql_explanation"]["intent_summary"]
+    assert result["result_quality"]["status"] in {"passed", "warning"}
