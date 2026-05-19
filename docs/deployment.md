@@ -6,13 +6,14 @@ This repository now separates local app behavior from production-oriented orches
 
 - `backend`: FastAPI orchestration API, REST/SSE/websocket endpoints.
 - `frontend`: Streamlit UI, unchanged runtime entrypoint.
-- `postgres`: Postgres with pgvector image for future workflow and vector persistence.
+- `postgres`: PostgreSQL database for durable workspace, auth, report, telemetry, and workflow persistence.
 - `redis`: Pub/sub and queue coordination foundation for websocket fanout and workers.
 
 ## Runtime Boundaries
 
 - `backend.config` centralizes environment-driven settings.
-- `backend.storage` owns workflow, event, telemetry, and agent metadata repositories.
+- `backend.persistence` owns platform persistence, schema bootstrap, auth sessions, and workspace documents.
+- `backend.storage` owns workflow, event, telemetry, usage, account, and agent metadata repositories.
 - `backend.memory` defines vector-memory and embedding interfaces, with pgvector scaffolding.
 - `backend.messaging` defines Redis-ready event propagation.
 - `backend.workers` defines Redis-ready distributed worker queue abstractions.
@@ -39,6 +40,22 @@ STARTUP_VALIDATION_STRICT=true
 ```
 
 Optional dependencies such as `OPENAI_API_KEY` and `POSTGRES_URL` report warnings in non-strict local deployments.
+
+## Persistence
+
+Local development uses SQLite by default:
+
+```bash
+DATABASE_URL=sqlite:///data/platform_persistence.db
+```
+
+Production deployments should set `DATABASE_URL` to PostgreSQL:
+
+```bash
+DATABASE_URL=postgresql://app_user:password@postgres:5432/agentic_ai
+```
+
+Schema bootstrap is automatic and tracked in `schema_migrations`. See `docs/postgresql-persistence.md` for the detailed persistence guide.
 
 ## Health Checks
 

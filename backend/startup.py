@@ -8,6 +8,7 @@ from backend.auth_sessions import validate_auth_config
 from backend.config import settings, validate_settings
 from backend.connectors import get_connector_registry
 from backend.logging import get_logger
+from backend.persistence import validate_platform_database
 from backend.telemetry import TELEMETRY_SCHEMA_VERSION, validate_telemetry_payload
 
 logger = get_logger(__name__)
@@ -30,6 +31,7 @@ def run_startup_validation(*, strict: bool | None = None, validate_connectors: b
         _environment_check(),
         _openai_check(),
         _connector_check(validate_connectors=validate_connectors),
+        _database_check(),
         _auth_check(),
         _telemetry_check(),
         _orchestration_check(),
@@ -101,6 +103,17 @@ def _auth_check() -> StartupCheck:
         name="auth",
         status=status,
         message="Authentication configuration validated." if status == "ok" else "Authentication configuration has warnings.",
+        metadata=diagnostics,
+    )
+
+
+def _database_check() -> StartupCheck:
+    diagnostics = validate_platform_database(settings.database_url)
+    status = "ok" if diagnostics.get("status") == "ok" else "warning"
+    return StartupCheck(
+        name="database",
+        status=status,
+        message="Platform persistence database validated." if status == "ok" else "Platform persistence is degraded; file fallback may be used.",
         metadata=diagnostics,
     )
 

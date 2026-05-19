@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from backend.persistence import build_auth_session_repository
 from workspace import build_user_session
 
 
@@ -140,6 +141,7 @@ def create_session(user: AuthUser) -> AuthSession:
     )
     sessions = _load_sessions()
     sessions[session.session_token] = asdict(session)
+    _save_user(user)
     _save_sessions(_prune_expired(sessions))
     return session
 
@@ -174,14 +176,30 @@ def revoke_session(session_token: str | None) -> bool:
 
 def _load_sessions() -> dict[str, dict[str, Any]]:
     try:
+        sessions = build_auth_session_repository().list_sessions()
+        if sessions:
+            return sessions
+    except Exception:
+        pass
+    try:
         return json.loads(AUTH_SESSION_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
 
 
 def _save_sessions(sessions: dict[str, dict[str, Any]]) -> None:
-    AUTH_SESSION_PATH.parent.mkdir(parents=True, exist_ok=True)
-    AUTH_SESSION_PATH.write_text(json.dumps(sessions, indent=2), encoding="utf-8")
+    try:
+        build_auth_session_repository().save_sessions(sessions)
+    except Exception:
+        AUTH_SESSION_PATH.parent.mkdir(parents=True, exist_ok=True)
+        AUTH_SESSION_PATH.write_text(json.dumps(sessions, indent=2), encoding="utf-8")
+
+
+def _save_user(user: AuthUser) -> None:
+    try:
+        build_auth_session_repository().save_user(user.username, asdict(user))
+    except Exception:
+        return
 
 
 def _prune_expired(sessions: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:

@@ -38,15 +38,15 @@ from backend.storage import (
     AgentExecutionStorage,
     AgentTraceStorage,
     EventStorage,
-    SQLiteAccountStorage,
-    SQLiteAgentExecutionStorage,
-    SQLiteAgentTraceStorage,
-    SQLiteEventStorage,
-    SQLiteTelemetryStorage,
-    SQLiteWorkflowStorage,
     TelemetryStorage,
     UsageStorage,
     WorkflowStorage,
+    build_account_storage,
+    build_agent_execution_storage,
+    build_agent_trace_storage,
+    build_event_storage,
+    build_telemetry_storage,
+    build_workflow_storage,
 )
 from backend.scheduler import scheduler_overview
 from backend.usage import UsageService, usage_service
@@ -78,12 +78,12 @@ class OrchestrationService:
         connector_registry: ConnectorRegistry | None = None,
     ) -> None:
         self.config = config or BackendConfig()
-        self.workflow_storage = workflow_storage or SQLiteWorkflowStorage()
-        self.account_storage = account_storage or SQLiteAccountStorage()
-        self.event_storage = event_storage or SQLiteEventStorage()
-        self.telemetry_storage = telemetry_storage or SQLiteTelemetryStorage()
-        self.agent_execution_storage = agent_execution_storage or SQLiteAgentExecutionStorage()
-        self.agent_trace_storage = agent_trace_storage or SQLiteAgentTraceStorage()
+        self.workflow_storage = workflow_storage or build_workflow_storage()
+        self.account_storage = account_storage or build_account_storage()
+        self.event_storage = event_storage or build_event_storage()
+        self.telemetry_storage = telemetry_storage or build_telemetry_storage()
+        self.agent_execution_storage = agent_execution_storage or build_agent_execution_storage()
+        self.agent_trace_storage = agent_trace_storage or build_agent_trace_storage()
         self.usage_service = usage or (UsageService(usage_storage=usage_storage) if usage_storage else usage_service)
         self.vector_memory_store = vector_memory_store or build_vector_memory_store()
         self.agent_coordinator = agent_coordinator or MultiAgentCoordinator()

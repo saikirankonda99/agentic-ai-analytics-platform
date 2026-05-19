@@ -86,7 +86,6 @@ from ui.dashboard import (
     render_quick_actions_card,
     render_recommendation_card,
     render_recovery_guidance_card,
-    render_result_table_card,
     render_response_card,
     render_saved_assets_card,
     render_semantic_profile_card,

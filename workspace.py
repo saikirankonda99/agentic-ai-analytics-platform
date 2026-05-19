@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from backend.persistence import WorkspaceDocument, build_workspace_repository
 
 BASE_DIR = Path(__file__).resolve().parent
 WORKSPACE_DIR = BASE_DIR / "data" / "workspaces"
@@ -131,6 +132,14 @@ def _workspace_path(workspace_key: str) -> Path:
 
 
 def load_workspace_memory(identity: dict[str, Any]) -> dict[str, Any]:
+    try:
+        document = build_workspace_repository().get(identity["workspace_id"])
+    except Exception:
+        document = None
+    if document is not None:
+        memory = _normalize_workspace_memory(identity, document.memory)
+        return memory
+
     path = _workspace_path(identity["workspace_id"])
     if not path.exists():
         return default_workspace_memory(identity)
@@ -138,6 +147,10 @@ def load_workspace_memory(identity: dict[str, Any]) -> dict[str, Any]:
         stored = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         stored = {}
+    return _normalize_workspace_memory(identity, stored)
+
+
+def _normalize_workspace_memory(identity: dict[str, Any], stored: dict[str, Any]) -> dict[str, Any]:
     memory = default_workspace_memory(identity)
     memory.update(stored)
     defaults = default_workspace_memory(identity)
@@ -168,7 +181,18 @@ def save_workspace_memory(identity: dict[str, Any], memory: dict[str, Any]) -> d
         "display_name": identity.get("display_name", identity["user_id"]),
         "role": identity.get("role", "viewer"),
     }
-    _workspace_path(identity["workspace_id"]).write_text(json.dumps(memory, indent=2), encoding="utf-8")
+    try:
+        document = build_workspace_repository().save(
+            WorkspaceDocument(
+                workspace_id=identity["workspace_id"],
+                team_id=identity["team_id"],
+                memory=memory,
+                updated_at=memory["updated_at"],
+            )
+        )
+        memory["updated_at"] = document.updated_at or memory["updated_at"]
+    except Exception:
+        _workspace_path(identity["workspace_id"]).write_text(json.dumps(memory, indent=2), encoding="utf-8")
     return memory
 
 

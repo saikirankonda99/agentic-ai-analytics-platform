@@ -1,22 +1,36 @@
-# Environment
+# Local environment
 .env
+.env.*
+!.env.example
 
-# Streamlit secrets
+# Streamlit local secrets/config
 .streamlit/
 
-# Python cache
+# Python and tool caches
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+.ruff_cache/
 .pytest_cache/
 .pytest_tmp/
 pytest-cache-files-*/
 
-# Virtual env
+# Virtual environments
 venv/
+.venv/
+env/
 
-# Logs
+# Local logs and generated snapshots
 logs/
+*.log
+architecture_snapshot.txt
+git_history.txt
 
-# Generated backend runtime state
+# Generated backend/runtime database state
 data/workflow_runtime.db
+data/platform_persistence.db
+data/platform_validation.db
+data/*.db-shm
+data/*.db-wal
 data/test-runtime/
+data/workspaces/

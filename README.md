@@ -8,6 +8,10 @@ Current deployment supports SQLite and CSV-backed datasets with isolated user wo
 
 For the production architecture, orchestration lifecycle, telemetry flow, investigation system, deployment model, environment setup, troubleshooting posture, screenshots plan, and technical decisions, see [Enterprise Platform Overview](docs/enterprise-platform-overview.md).
 
+For the first-time user flow, workspace walkthrough, analytics examples, result explorer, recovery guidance, and deployment checklist, see [Usability and Onboarding Guide](docs/usability-onboarding.md).
+
+For durable SQLite/PostgreSQL persistence setup, `DATABASE_URL` configuration, schema bootstrap, and troubleshooting, see [PostgreSQL Persistence Guide](docs/postgresql-persistence.md).
+
 ---
 
 # Live System
@@ -175,6 +179,14 @@ Primary sections:
 - `History`: recent workflow runs and generated SQL
 
 Operational improvements:
+- first-time onboarding checklist with workspace progress persistence
+- guided sample dataset prompts and empty-state action paths
+- filterable and sortable result explorer with filtered/full CSV export
+- query bookmarks, pinned investigations, saved reports, and workspace preferences
+- durable SQLite/PostgreSQL repository layer for auth sessions, workspace memory, reports, bookmarks, and orchestration history
+- startup database diagnostics with lightweight schema migration tracking
+- executive summary and workflow trace exports from the Streamlit workspace
+- plain-language recovery guidance for OpenAI, connector, and SQL validation issues
 - workflow correlation IDs across UI, telemetry, and logs
 - centralized telemetry schema in `backend.telemetry`
 - coordinator execution graph with agent dependencies, transition timestamps, confidence, and recovery state

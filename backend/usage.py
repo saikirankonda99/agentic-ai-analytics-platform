@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from backend.models import DEFAULT_ORGANIZATION_ID, DEFAULT_USER_ID, DEFAULT_WORKSPACE_ID, UsageEventType, UsageRecord
-from backend.storage import SQLiteUsageStorage, UsageStorage
+from backend.storage import UsageStorage, build_usage_storage
 
 
 @dataclass
@@ -46,7 +46,7 @@ class UsageService:
         return self.usage_storage.list(organization_id=organization_id, workspace_id=workspace_id)
 
 
-usage_service = UsageService(usage_storage=SQLiteUsageStorage())
+usage_service = UsageService(usage_storage=build_usage_storage())
 
 
 __all__ = ["UsageService", "usage_service"]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from threading import RLock
@@ -819,6 +820,552 @@ class SQLiteUsageStorage(SQLiteStore):
         )
 
 
+class PostgreSQLStore:
+    def __init__(self, database_url: str | None = None) -> None:
+        self.database_url = database_url or settings.database_url
+        self._initialize()
+
+    @contextmanager
+    def _connect(self):
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:  # pragma: no cover - production dependency boundary
+            raise RuntimeError("psycopg is required for PostgreSQL workflow storage") from exc
+        connection = psycopg.connect(self.database_url, row_factory=dict_row)
+        try:
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def _initialize(self) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS workflows (
+                    workflow_id TEXT PRIMARY KEY,
+                    organization_id TEXT NOT NULL DEFAULT 'organization:default',
+                    workspace_id TEXT NOT NULL DEFAULT 'workspace:default',
+                    user_id TEXT NOT NULL DEFAULT 'user:anonymous',
+                    question TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    current_stage TEXT,
+                    stage_progression_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS workflow_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    workflow_id TEXT NOT NULL,
+                    organization_id TEXT NOT NULL DEFAULT 'organization:default',
+                    workspace_id TEXT NOT NULL DEFAULT 'workspace:default',
+                    timestamp TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    message TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_workflow_events_workflow_id ON workflow_events(workflow_id, id)")
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS workflow_telemetry (
+                    workflow_id TEXT PRIMARY KEY,
+                    organization_id TEXT NOT NULL DEFAULT 'organization:default',
+                    workspace_id TEXT NOT NULL DEFAULT 'workspace:default',
+                    started_at TEXT,
+                    completed_at TEXT,
+                    latency_ms INTEGER,
+                    estimated_cost_usd DOUBLE PRECISION NOT NULL,
+                    prompt_tokens INTEGER NOT NULL,
+                    completion_tokens INTEGER NOT NULL,
+                    total_tokens INTEGER NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS workflow_agents (
+                    id BIGSERIAL PRIMARY KEY,
+                    workflow_id TEXT NOT NULL,
+                    organization_id TEXT NOT NULL DEFAULT 'organization:default',
+                    workspace_id TEXT NOT NULL DEFAULT 'workspace:default',
+                    agent_name TEXT NOT NULL,
+                    agent_role TEXT NOT NULL,
+                    assigned_stage TEXT NOT NULL,
+                    agent_status TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_workflow_agents_workflow_id ON workflow_agents(workflow_id, id)")
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS workflow_agent_traces (
+                    id BIGSERIAL PRIMARY KEY,
+                    workflow_id TEXT NOT NULL,
+                    organization_id TEXT NOT NULL DEFAULT 'organization:default',
+                    workspace_id TEXT NOT NULL DEFAULT 'workspace:default',
+                    timestamp TEXT NOT NULL,
+                    source_agent TEXT NOT NULL,
+                    target_agent TEXT NOT NULL,
+                    handoff_reason TEXT NOT NULL,
+                    context_summary TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_workflow_agent_traces_workflow_id ON workflow_agent_traces(workflow_id, id)"
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS organizations (
+                    organization_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    plan TEXT NOT NULL DEFAULT 'free',
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS workspaces (
+                    workspace_id TEXT PRIMARY KEY,
+                    organization_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS workspace_memberships (
+                    user_id TEXT NOT NULL,
+                    workspace_id TEXT NOT NULL,
+                    organization_id TEXT NOT NULL,
+                    roles_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (user_id, workspace_id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS usage_records (
+                    usage_id TEXT PRIMARY KEY,
+                    organization_id TEXT NOT NULL,
+                    workspace_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    quantity DOUBLE PRECISION NOT NULL,
+                    estimated_cost_usd DOUBLE PRECISION NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb
+                )
+                """
+            )
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_usage_records_tenant ON usage_records(organization_id, workspace_id, timestamp)")
+
+
+class PostgreSQLWorkflowStorage(PostgreSQLStore):
+    def save(self, workflow: OrchestrationExecution) -> None:
+        stage_progression = json.dumps([asdict(stage) for stage in workflow.stage_progression])
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO workflows (
+                    workflow_id, organization_id, workspace_id, user_id, question, status, created_at,
+                    current_stage, stage_progression_json
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                ON CONFLICT (workflow_id) DO UPDATE SET
+                    organization_id = EXCLUDED.organization_id,
+                    workspace_id = EXCLUDED.workspace_id,
+                    user_id = EXCLUDED.user_id,
+                    question = EXCLUDED.question,
+                    status = EXCLUDED.status,
+                    created_at = EXCLUDED.created_at,
+                    current_stage = EXCLUDED.current_stage,
+                    stage_progression_json = EXCLUDED.stage_progression_json,
+                    updated_at = NOW()
+                """,
+                (
+                    workflow.workflow_id,
+                    workflow.organization_id,
+                    workflow.workspace_id,
+                    workflow.user_id,
+                    workflow.question,
+                    workflow.status,
+                    workflow.created_at,
+                    workflow.current_stage,
+                    stage_progression,
+                ),
+            )
+
+    def get(self, workflow_id: str) -> OrchestrationExecution | None:
+        query = "SELECT * FROM workflows WHERE workflow_id = %s"
+        params = (workflow_id,)
+        if workflow_id == "workflow:latest":
+            query = "SELECT * FROM workflows ORDER BY updated_at DESC LIMIT 1"
+            params = ()
+        with self._connect() as connection:
+            row = connection.execute(query, params).fetchone()
+        if row is None:
+            return None
+        stage_payload = row["stage_progression_json"] or []
+        stage_progression = tuple(WorkflowStageProgress(**stage) for stage in stage_payload)
+        return OrchestrationExecution(
+            workflow_id=row["workflow_id"],
+            organization_id=row["organization_id"] or DEFAULT_ORGANIZATION_ID,
+            workspace_id=row["workspace_id"] or DEFAULT_WORKSPACE_ID,
+            user_id=row["user_id"] or DEFAULT_USER_ID,
+            question=row["question"],
+            status=row["status"],
+            created_at=row["created_at"],
+            current_stage=row["current_stage"],
+            stage_progression=stage_progression,
+            telemetry=WorkflowTelemetry(),
+            agent_executions=(),
+        )
+
+
+class PostgreSQLEventStorage(PostgreSQLStore):
+    def append(
+        self,
+        workflow_id: str,
+        event: WorkflowEvent,
+        *,
+        workspace_id: str,
+        organization_id: str = DEFAULT_ORGANIZATION_ID,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO workflow_events (
+                    workflow_id, organization_id, workspace_id, timestamp, event_type, message
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (workflow_id, organization_id, workspace_id, event.timestamp, event.event_type, event.message),
+            )
+
+    def list(self, workflow_id: str, *, workspace_id: str | None = None) -> tuple[WorkflowEvent, ...]:
+        query = "SELECT timestamp, event_type, message FROM workflow_events WHERE workflow_id = %s"
+        params: tuple[str, ...] = (workflow_id,)
+        if workspace_id is not None:
+            query += " AND workspace_id = %s"
+            params = (workflow_id, workspace_id)
+        query += " ORDER BY id ASC"
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return tuple(WorkflowEvent(**row) for row in rows)
+
+
+class PostgreSQLTelemetryStorage(PostgreSQLStore):
+    def save(
+        self,
+        workflow_id: str,
+        telemetry: WorkflowTelemetry,
+        *,
+        workspace_id: str,
+        organization_id: str = DEFAULT_ORGANIZATION_ID,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO workflow_telemetry (
+                    workflow_id, organization_id, workspace_id, started_at, completed_at, latency_ms, estimated_cost_usd,
+                    prompt_tokens, completion_tokens, total_tokens
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (workflow_id) DO UPDATE SET
+                    organization_id = EXCLUDED.organization_id,
+                    workspace_id = EXCLUDED.workspace_id,
+                    started_at = EXCLUDED.started_at,
+                    completed_at = EXCLUDED.completed_at,
+                    latency_ms = EXCLUDED.latency_ms,
+                    estimated_cost_usd = EXCLUDED.estimated_cost_usd,
+                    prompt_tokens = EXCLUDED.prompt_tokens,
+                    completion_tokens = EXCLUDED.completion_tokens,
+                    total_tokens = EXCLUDED.total_tokens
+                """,
+                (
+                    workflow_id,
+                    organization_id,
+                    workspace_id,
+                    telemetry.started_at,
+                    telemetry.completed_at,
+                    telemetry.latency_ms,
+                    telemetry.estimated_cost_usd,
+                    telemetry.token_usage.prompt_tokens,
+                    telemetry.token_usage.completion_tokens,
+                    telemetry.token_usage.total_tokens,
+                ),
+            )
+
+    def get(self, workflow_id: str) -> WorkflowTelemetry | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM workflow_telemetry WHERE workflow_id = %s", (workflow_id,)).fetchone()
+        if row is None:
+            return None
+        return WorkflowTelemetry(
+            started_at=row["started_at"],
+            completed_at=row["completed_at"],
+            latency_ms=row["latency_ms"],
+            estimated_cost_usd=row["estimated_cost_usd"],
+            token_usage=TokenUsage(
+                prompt_tokens=row["prompt_tokens"],
+                completion_tokens=row["completion_tokens"],
+                total_tokens=row["total_tokens"],
+            ),
+        )
+
+
+class PostgreSQLAgentExecutionStorage(PostgreSQLStore):
+    def save_all(
+        self,
+        workflow_id: str,
+        agents: tuple[AgentExecution, ...],
+        *,
+        workspace_id: str,
+        organization_id: str = DEFAULT_ORGANIZATION_ID,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute("DELETE FROM workflow_agents WHERE workflow_id = %s", (workflow_id,))
+            for agent in agents:
+                connection.execute(
+                    """
+                    INSERT INTO workflow_agents (
+                        workflow_id, organization_id, workspace_id, agent_name, agent_role, assigned_stage, agent_status
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        workflow_id,
+                        organization_id,
+                        workspace_id,
+                        agent.agent_name,
+                        agent.agent_role,
+                        agent.assigned_stage,
+                        agent.agent_status,
+                    ),
+                )
+
+    def list(self, workflow_id: str, *, workspace_id: str | None = None) -> tuple[AgentExecution, ...]:
+        query = "SELECT agent_name, agent_role, assigned_stage, agent_status FROM workflow_agents WHERE workflow_id = %s"
+        params: tuple[str, ...] = (workflow_id,)
+        if workspace_id is not None:
+            query += " AND workspace_id = %s"
+            params = (workflow_id, workspace_id)
+        query += " ORDER BY id ASC"
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return tuple(AgentExecution(**row) for row in rows)
+
+
+class PostgreSQLAgentTraceStorage(PostgreSQLStore):
+    def save_all(
+        self,
+        workflow_id: str,
+        traces: tuple[AgentCoordinationTrace, ...],
+        *,
+        workspace_id: str,
+        organization_id: str = DEFAULT_ORGANIZATION_ID,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute("DELETE FROM workflow_agent_traces WHERE workflow_id = %s", (workflow_id,))
+            for trace in traces:
+                connection.execute(
+                    """
+                    INSERT INTO workflow_agent_traces (
+                        workflow_id, organization_id, workspace_id, timestamp, source_agent, target_agent,
+                        handoff_reason, context_summary
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        workflow_id,
+                        organization_id,
+                        workspace_id,
+                        trace.timestamp,
+                        trace.source_agent,
+                        trace.target_agent,
+                        trace.handoff_reason,
+                        trace.context_summary,
+                    ),
+                )
+
+    def list(self, workflow_id: str, *, workspace_id: str | None = None) -> tuple[AgentCoordinationTrace, ...]:
+        query = """
+            SELECT timestamp, source_agent, target_agent, handoff_reason, context_summary
+            FROM workflow_agent_traces
+            WHERE workflow_id = %s
+        """
+        params: tuple[str, ...] = (workflow_id,)
+        if workspace_id is not None:
+            query += " AND workspace_id = %s"
+            params = (workflow_id, workspace_id)
+        query += " ORDER BY id ASC"
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return tuple(AgentCoordinationTrace(**row) for row in rows)
+
+
+class PostgreSQLAccountStorage(PostgreSQLStore):
+    def save_organization(self, organization: Organization) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO organizations (organization_id, name, plan)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (organization_id) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    plan = EXCLUDED.plan,
+                    updated_at = NOW()
+                """,
+                (organization.organization_id, organization.name, organization.plan),
+            )
+
+    def save_workspace(self, workspace: Workspace) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO workspaces (workspace_id, organization_id, name)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (workspace_id) DO UPDATE SET
+                    organization_id = EXCLUDED.organization_id,
+                    name = EXCLUDED.name,
+                    updated_at = NOW()
+                """,
+                (workspace.workspace_id, workspace.organization_id, workspace.name),
+            )
+
+    def save_membership(self, membership: WorkspaceMembership) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO workspace_memberships (user_id, workspace_id, organization_id, roles_json)
+                VALUES (%s, %s, %s, %s::jsonb)
+                ON CONFLICT (user_id, workspace_id) DO UPDATE SET
+                    organization_id = EXCLUDED.organization_id,
+                    roles_json = EXCLUDED.roles_json,
+                    updated_at = NOW()
+                """,
+                (
+                    membership.user_id,
+                    membership.workspace_id,
+                    membership.organization_id,
+                    json.dumps(list(membership.roles)),
+                ),
+            )
+
+    def get_workspace(self, workspace_id: str) -> Workspace | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT workspace_id, organization_id, name FROM workspaces WHERE workspace_id = %s",
+                (workspace_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return Workspace(workspace_id=row["workspace_id"], organization_id=row["organization_id"], name=row["name"])
+
+
+class PostgreSQLUsageStorage(PostgreSQLStore):
+    def append(self, usage: UsageRecord) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO usage_records (
+                    usage_id, organization_id, workspace_id, user_id, event_type, quantity,
+                    estimated_cost_usd, timestamp, metadata_json
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                """,
+                (
+                    usage.usage_id,
+                    usage.organization_id,
+                    usage.workspace_id,
+                    usage.user_id,
+                    usage.event_type,
+                    usage.quantity,
+                    usage.estimated_cost_usd,
+                    usage.timestamp,
+                    json.dumps(usage.metadata),
+                ),
+            )
+
+    def list(
+        self,
+        *,
+        organization_id: str | None = None,
+        workspace_id: str | None = None,
+    ) -> tuple[UsageRecord, ...]:
+        query = "SELECT * FROM usage_records WHERE 1 = 1"
+        params: list[str] = []
+        if organization_id is not None:
+            query += " AND organization_id = %s"
+            params.append(organization_id)
+        if workspace_id is not None:
+            query += " AND workspace_id = %s"
+            params.append(workspace_id)
+        query += " ORDER BY timestamp ASC"
+        with self._connect() as connection:
+            rows = connection.execute(query, tuple(params)).fetchall()
+        return tuple(
+            UsageRecord(
+                usage_id=row["usage_id"],
+                organization_id=row["organization_id"],
+                workspace_id=row["workspace_id"],
+                user_id=row["user_id"],
+                event_type=row["event_type"],
+                quantity=row["quantity"],
+                estimated_cost_usd=row["estimated_cost_usd"],
+                timestamp=row["timestamp"],
+                metadata=dict(row["metadata_json"] or {}),
+            )
+            for row in rows
+        )
+
+
+def use_postgresql_storage() -> bool:
+    database_url = settings.database_url
+    return database_url.startswith("postgresql://") or database_url.startswith("postgres://")
+
+
+def build_workflow_storage() -> WorkflowStorage:
+    return PostgreSQLWorkflowStorage(settings.database_url) if use_postgresql_storage() else SQLiteWorkflowStorage()
+
+
+def build_account_storage() -> AccountStorage:
+    return PostgreSQLAccountStorage(settings.database_url) if use_postgresql_storage() else SQLiteAccountStorage()
+
+
+def build_event_storage() -> EventStorage:
+    return PostgreSQLEventStorage(settings.database_url) if use_postgresql_storage() else SQLiteEventStorage()
+
+
+def build_telemetry_storage() -> TelemetryStorage:
+    return PostgreSQLTelemetryStorage(settings.database_url) if use_postgresql_storage() else SQLiteTelemetryStorage()
+
+
+def build_agent_execution_storage() -> AgentExecutionStorage:
+    return PostgreSQLAgentExecutionStorage(settings.database_url) if use_postgresql_storage() else SQLiteAgentExecutionStorage()
+
+
+def build_agent_trace_storage() -> AgentTraceStorage:
+    return PostgreSQLAgentTraceStorage(settings.database_url) if use_postgresql_storage() else SQLiteAgentTraceStorage()
+
+
+def build_usage_storage() -> UsageStorage:
+    return PostgreSQLUsageStorage(settings.database_url) if use_postgresql_storage() else SQLiteUsageStorage()
+
+
 __all__ = [
     "AccountStorage",
     "AgentTraceStorage",
@@ -832,6 +1379,13 @@ __all__ = [
     "InMemoryTelemetryStorage",
     "InMemoryUsageStorage",
     "InMemoryWorkflowStorage",
+    "PostgreSQLAccountStorage",
+    "PostgreSQLAgentExecutionStorage",
+    "PostgreSQLAgentTraceStorage",
+    "PostgreSQLEventStorage",
+    "PostgreSQLTelemetryStorage",
+    "PostgreSQLUsageStorage",
+    "PostgreSQLWorkflowStorage",
     "SQLiteAccountStorage",
     "SQLiteAgentExecutionStorage",
     "SQLiteAgentTraceStorage",
@@ -842,4 +1396,12 @@ __all__ = [
     "TelemetryStorage",
     "UsageStorage",
     "WorkflowStorage",
+    "build_account_storage",
+    "build_agent_execution_storage",
+    "build_agent_trace_storage",
+    "build_event_storage",
+    "build_telemetry_storage",
+    "build_usage_storage",
+    "build_workflow_storage",
+    "use_postgresql_storage",
 ]
