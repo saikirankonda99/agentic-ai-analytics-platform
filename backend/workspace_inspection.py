@@ -23,6 +23,8 @@ def workspace_summary(memory: dict[str, Any] | None) -> dict[str, Any]:
         "session_count": len(sessions),
         "active_session_id": (active_session or {}).get("session_id"),
         "transcript_count": sum(len(item.get("transcripts", [])) for item in sessions),
+        "recent_activity_count": len(memory.get("recent_activity", [])),
+        "recent_activity": list(reversed(memory.get("recent_activity", [])[-10:])),
         "semantic_memory_categories": {
             "schema_memory": len(memory.get("semantic_dataset_memory", {})),
             "workflow_memory": len(memory.get("workflow_runs", [])),

@@ -17,6 +17,34 @@ ROLE_CAPABILITIES = {
     "viewer": ["query", "brief"],
 }
 
+ONBOARDING_STEPS = [
+    {
+        "step_id": "workspace_intro",
+        "label": "Workspace introduced",
+        "description": "Review the workspace map and navigation model.",
+    },
+    {
+        "step_id": "sample_dataset",
+        "label": "Sample dataset ready",
+        "description": "Use the bundled Chinook dataset or upload a CSV.",
+    },
+    {
+        "step_id": "first_query",
+        "label": "First query run",
+        "description": "Launch a guided analytics example.",
+    },
+    {
+        "step_id": "results_reviewed",
+        "label": "Results reviewed",
+        "description": "Inspect the table, SQL, chart, and AI insight brief.",
+    },
+    {
+        "step_id": "export_completed",
+        "label": "Export completed",
+        "description": "Download a result, report, telemetry bundle, or trace.",
+    },
+]
+
 
 def default_user_session() -> dict[str, Any]:
     return {
@@ -49,6 +77,23 @@ def default_workspace_memory(identity: dict[str, Any] | None = None) -> dict[str
         "semantic_dataset_memory": {},
         "sessions": [],
         "bookmarks": [],
+        "query_bookmarks": [],
+        "pinned_investigations": [],
+        "saved_reports": [],
+        "recent_activity": [],
+        "workspace_preferences": {
+            "default_route": "Overview",
+            "compact_results": False,
+            "last_route": "Overview",
+            "preferred_chart_type": "Bar",
+            "show_onboarding": True,
+        },
+        "onboarding": {
+            "completed": False,
+            "dismissed": False,
+            "steps": {item["step_id"]: False for item in ONBOARDING_STEPS},
+            "updated_at": None,
+        },
         "updated_at": None,
     }
 
@@ -95,6 +140,9 @@ def load_workspace_memory(identity: dict[str, Any]) -> dict[str, Any]:
         stored = {}
     memory = default_workspace_memory(identity)
     memory.update(stored)
+    defaults = default_workspace_memory(identity)
+    memory["workspace_preferences"] = {**defaults["workspace_preferences"], **memory.get("workspace_preferences", {})}
+    memory["onboarding"] = onboarding_progress({"onboarding": memory.get("onboarding", {})})
     memory.setdefault("members", {}).setdefault(
         identity["user_id"],
         {"display_name": identity.get("display_name", identity["user_id"]), "role": identity.get("role", "viewer")},
@@ -109,9 +157,12 @@ def load_workspace_memory_by_id(workspace_key: str) -> dict[str, Any]:
 
 
 def save_workspace_memory(identity: dict[str, Any], memory: dict[str, Any]) -> dict[str, Any]:
-    memory = dict(memory or default_workspace_memory(identity))
+    defaults = default_workspace_memory(identity)
+    memory = dict(memory or defaults)
     memory["workspace_id"] = identity["workspace_id"]
     memory["team_id"] = identity["team_id"]
+    memory["workspace_preferences"] = {**defaults["workspace_preferences"], **memory.get("workspace_preferences", {})}
+    memory["onboarding"] = onboarding_progress(memory)
     memory["updated_at"] = datetime.now().isoformat(timespec="seconds")
     memory.setdefault("members", {})[identity["user_id"]] = {
         "display_name": identity.get("display_name", identity["user_id"]),
@@ -125,6 +176,93 @@ def _append_limited(memory: dict[str, Any], key: str, item: dict[str, Any], limi
     values = list(memory.get(key, []))
     values.append(item)
     memory[key] = values[-limit:]
+
+
+def record_workspace_activity(
+    memory: dict[str, Any],
+    *,
+    activity_type: str,
+    title: str,
+    detail: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    _append_limited(
+        memory,
+        "recent_activity",
+        {
+            "activity_id": f"activity-{uuid4().hex[:10]}",
+            "activity_type": activity_type,
+            "title": title,
+            "detail": detail,
+            "metadata": metadata or {},
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+        },
+        limit=100,
+    )
+    return memory
+
+
+def onboarding_progress(memory: dict[str, Any]) -> dict[str, Any]:
+    onboarding = dict(memory.get("onboarding") or {})
+    steps = dict(onboarding.get("steps") or {})
+    for item in ONBOARDING_STEPS:
+        steps.setdefault(item["step_id"], False)
+    completed_count = sum(1 for item in ONBOARDING_STEPS if steps.get(item["step_id"]))
+    total = len(ONBOARDING_STEPS)
+    onboarding.update(
+        {
+            "steps": steps,
+            "completed_count": completed_count,
+            "total_count": total,
+            "percent": round((completed_count / total) * 100) if total else 0,
+            "completed": completed_count == total,
+        }
+    )
+    return onboarding
+
+
+def update_onboarding_step(memory: dict[str, Any], step_id: str, completed: bool = True) -> dict[str, Any]:
+    if step_id not in {item["step_id"] for item in ONBOARDING_STEPS}:
+        return memory
+    onboarding = onboarding_progress(memory)
+    onboarding["steps"][step_id] = completed
+    onboarding["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    memory["onboarding"] = onboarding_progress({"onboarding": onboarding})
+    record_workspace_activity(
+        memory,
+        activity_type="onboarding_updated",
+        title="Onboarding progress updated",
+        detail=step_id,
+        metadata={"step_id": step_id, "completed": completed},
+    )
+    return memory
+
+
+def dismiss_onboarding(memory: dict[str, Any]) -> dict[str, Any]:
+    onboarding = onboarding_progress(memory)
+    onboarding["dismissed"] = True
+    onboarding["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    memory["onboarding"] = onboarding
+    record_workspace_activity(
+        memory,
+        activity_type="onboarding_dismissed",
+        title="Onboarding walkthrough dismissed",
+        detail="The guided workspace introduction was hidden for this workspace.",
+    )
+    return memory
+
+
+def save_workspace_preferences(memory: dict[str, Any], preferences: dict[str, Any]) -> dict[str, Any]:
+    current = dict(memory.get("workspace_preferences") or {})
+    current.update({key: value for key, value in preferences.items() if value is not None})
+    memory["workspace_preferences"] = current
+    record_workspace_activity(
+        memory,
+        activity_type="preferences_saved",
+        title="Workspace preferences saved",
+        detail=", ".join(sorted(preferences.keys())),
+    )
+    return memory
 
 
 def start_workspace_session(memory: dict[str, Any], label: str | None = None) -> dict[str, Any]:
@@ -142,6 +280,7 @@ def start_workspace_session(memory: dict[str, Any], label: str | None = None) ->
         "transcripts": [],
     }
     _append_limited(memory, "sessions", session, limit=20)
+    record_workspace_activity(memory, activity_type="session_started", title="Workspace session started", detail=session["session_id"])
     return session
 
 
@@ -184,6 +323,137 @@ def bookmark_investigation(memory: dict[str, Any], investigation: dict[str, Any]
     return memory
 
 
+def pin_investigation(memory: dict[str, Any], investigation: dict[str, Any], note: str = "") -> dict[str, Any]:
+    if not investigation or investigation.get("status") in {None, "idle", "skipped"}:
+        return memory
+    _append_limited(
+        memory,
+        "pinned_investigations",
+        {
+            "pin_id": f"pin-{uuid4().hex[:10]}",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "note": note,
+            "summary": investigation.get("summary", ""),
+            "severity": investigation.get("severity", "info"),
+            "queries": investigation.get("queries", [])[:5],
+        },
+        limit=25,
+    )
+    record_workspace_activity(
+        memory,
+        activity_type="investigation_pinned",
+        title="Investigation pinned",
+        detail=investigation.get("summary", ""),
+    )
+    return memory
+
+
+def bookmark_query(memory: dict[str, Any], query: dict[str, Any], note: str = "") -> dict[str, Any]:
+    sql = (query or {}).get("sql", "")
+    if not sql.strip():
+        return memory
+    _append_limited(
+        memory,
+        "query_bookmarks",
+        {
+            "bookmark_id": f"query-{uuid4().hex[:10]}",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "note": note,
+            "question": query.get("question", ""),
+            "intent": query.get("intent", query.get("question", "")),
+            "sql": sql,
+            "rows": query.get("rows", 0),
+        },
+        limit=50,
+    )
+    record_workspace_activity(
+        memory,
+        activity_type="query_bookmarked",
+        title="Query bookmarked",
+        detail=query.get("question", "") or sql[:120],
+        metadata={"rows": query.get("rows", 0)},
+    )
+    return memory
+
+
+def save_report_view(memory: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
+    title = report.get("title") or "Analytics report"
+    _append_limited(
+        memory,
+        "saved_reports",
+        {
+            "report_id": f"report-{uuid4().hex[:10]}",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "title": title,
+            "scope": report.get("scope", "workspace"),
+            "summary": report.get("summary", ""),
+            "payload": report.get("payload", {}),
+        },
+        limit=25,
+    )
+    record_workspace_activity(
+        memory,
+        activity_type="report_saved",
+        title="Report view saved",
+        detail=title,
+        metadata={"scope": report.get("scope", "workspace")},
+    )
+    return memory
+
+
+def save_investigation_record(memory: dict[str, Any], investigation: dict[str, Any], note: str = "") -> dict[str, Any]:
+    if not investigation or investigation.get("status") in {None, "idle", "skipped"}:
+        return memory
+    record = {
+        "saved_id": f"investigation-{uuid4().hex[:10]}",
+        "saved_at": datetime.now().isoformat(timespec="seconds"),
+        "note": note,
+        **investigation,
+    }
+    _append_limited(memory, "investigations", record, limit=50)
+    record_workspace_activity(
+        memory,
+        activity_type="investigation_saved",
+        title="Investigation saved",
+        detail=record.get("summary", ""),
+        metadata={"saved_id": record["saved_id"], "severity": record.get("severity", "info"), "note": note},
+    )
+    return memory
+
+
+def save_sql_history_record(
+    memory: dict[str, Any],
+    *,
+    question: str,
+    sql: str,
+    rows: int = 0,
+    intent: str = "",
+) -> dict[str, Any]:
+    if not sql.strip():
+        return memory
+    _append_limited(
+        memory,
+        "query_history",
+        {
+            "run_id": f"manual-{uuid4().hex[:10]}",
+            "question": question,
+            "intent": intent or question,
+            "sql": sql,
+            "rows": rows,
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "saved": True,
+        },
+    )
+    record_workspace_activity(
+        memory,
+        activity_type="sql_saved",
+        title="SQL saved",
+        detail=question or sql[:120],
+        metadata={"rows": rows},
+    )
+    return memory
+
+
 def snapshot_workspace_run(
     memory: dict[str, Any],
     *,
@@ -203,6 +473,16 @@ def snapshot_workspace_run(
         memory,
         "query_history",
         {"run_id": run_id, "question": question, "intent": intent, "sql": sql, "rows": rows, "timestamp": timestamp},
+    )
+    update_onboarding_step(memory, "first_query")
+    if rows:
+        update_onboarding_step(memory, "results_reviewed")
+    record_workspace_activity(
+        memory,
+        activity_type="workflow_completed",
+        title="Workflow persisted",
+        detail=question,
+        metadata={"run_id": run_id, "rows": rows, "status": workflow_trace[-1].get("status") if workflow_trace else "unknown"},
     )
     _append_limited(
         memory,
