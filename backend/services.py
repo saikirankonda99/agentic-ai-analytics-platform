@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from uuid import uuid4
 
 from backend.agents import MultiAgentCoordinator
+from backend.execution_graph import execution_graph_response
 from backend.logging import get_logger
 from backend.memory import MemoryDocument, VectorMemoryStore, build_vector_memory_store
 from backend.models import (
@@ -247,6 +248,12 @@ class OrchestrationService:
         updates.extend(self._agent_stream_updates(workflow.agent_executions, workflow.stage_progression))
         updates.extend(self._telemetry_stream_updates(telemetry))
         return tuple(sorted(updates, key=lambda update: update.timestamp))
+
+    def get_execution_graph(self, workflow_id: str) -> dict[str, Any] | None:
+        workflow = self.get_workflow(workflow_id)
+        if workflow is None:
+            return None
+        return execution_graph_response(workflow, self.get_stream_updates(workflow_id) or ())
 
     def _save_workflow(self, workflow: OrchestrationExecution) -> None:
         self.workflow_storage.save(workflow)

@@ -23,3 +23,18 @@ def test_confidence_and_recovery_hints_are_bounded() -> None:
     assert 0 <= stage_confidence(status="completed", signals=3) <= 1
     assert recovery_hint("bad sql", 0, 2)["recoverable"] is True
     assert recovery_hint("bad sql", 2, 2)["strategy"] == "graceful_degradation"
+
+
+def test_coordinator_reports_runnable_nodes_and_summary() -> None:
+    coordinator = OrchestrationCoordinator()
+    graph = coordinator.build_graph("wf-test")
+
+    assert [node["phase"] for node in coordinator.runnable_nodes(graph)] == ["planner"]
+
+    graph = coordinator.transition(graph, "planner", "completed", confidence=0.9)
+    summary = coordinator.graph_summary(graph)
+
+    assert "schema retrieval" in summary["runnable"]
+    assert summary["completed"] == 1
+    assert summary["completion_rate"] > 0
+    assert summary["critical_path"][0] == "planner"

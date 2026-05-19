@@ -30,6 +30,7 @@ class ExecutionGraph:
     edges: tuple[tuple[str, str], ...]
     created_at: str
     updated_at: str
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def _now() -> str:
@@ -71,6 +72,10 @@ class OrchestrationCoordinator:
                 edges=edges,
                 created_at=created_at,
                 updated_at=created_at,
+                metadata={
+                    "correlation_id": correlation_id,
+                    "state_machine": ("queued", "running", "retrying", "completed", "failed", "skipped"),
+                },
             )
         )
 
@@ -104,7 +109,58 @@ class OrchestrationCoordinator:
         graph = dict(graph)
         graph["nodes"] = nodes
         graph["updated_at"] = timestamp
+        graph["metadata"] = {
+            **graph.get("metadata", {}),
+            "last_transition": {
+                "phase": phase,
+                "status": status,
+                "timestamp": timestamp,
+                "retry_count": retry_count,
+            },
+        }
         return graph
+
+    def runnable_nodes(self, graph: dict[str, Any] | None) -> list[dict[str, Any]]:
+        if not graph:
+            return []
+        nodes = {node.get("agent_id"): node for node in graph.get("nodes", [])}
+        runnable = []
+        for node in graph.get("nodes", []):
+            if node.get("status") != "queued":
+                continue
+            dependencies = node.get("dependencies", [])
+            if all(nodes.get(dependency, {}).get("status") == "completed" for dependency in dependencies):
+                runnable.append(dict(node))
+        return runnable
+
+    def graph_summary(self, graph: dict[str, Any] | None) -> dict[str, Any]:
+        if not graph:
+            return {
+                "node_count": 0,
+                "edge_count": 0,
+                "completed": 0,
+                "failed": 0,
+                "running": 0,
+                "queued": 0,
+                "retrying": 0,
+                "skipped": 0,
+                "completion_rate": 0.0,
+                "average_confidence": 0.0,
+                "runnable": [],
+                "critical_path": [],
+            }
+        nodes = list(graph.get("nodes", []))
+        counts = {status: len([node for node in nodes if node.get("status") == status]) for status in ("completed", "failed", "running", "queued", "retrying", "skipped")}
+        confidence_values = [float(node.get("confidence", 0.0) or 0.0) for node in nodes if node.get("status") in {"completed", "failed", "retrying"}]
+        return {
+            "node_count": len(nodes),
+            "edge_count": len(graph.get("edges", [])),
+            **counts,
+            "completion_rate": round((counts["completed"] / len(nodes)) * 100, 2) if nodes else 0.0,
+            "average_confidence": round(sum(confidence_values) / len(confidence_values), 3) if confidence_values else 0.0,
+            "runnable": [node.get("phase") for node in self.runnable_nodes(graph)],
+            "critical_path": [node.get("phase") for node in nodes],
+        }
 
 
 def stage_confidence(*, status: str, has_error: bool = False, retries: int = 0, signals: int = 1) -> float:

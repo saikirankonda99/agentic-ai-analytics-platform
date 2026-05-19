@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from backend.telemetry import phase_latency_breakdown, telemetry_event, telemetry_export_rows, validate_telemetry_payload
+from backend.telemetry import (
+    categorize_failure,
+    phase_latency_breakdown,
+    telemetry_aggregate,
+    telemetry_event,
+    telemetry_export_rows,
+    validate_telemetry_payload,
+)
 
 
 def test_validate_telemetry_payload_adds_correlation_and_totals() -> None:
@@ -54,3 +61,23 @@ def test_phase_latency_breakdown_and_events() -> None:
     assert breakdown[0]["latency_ms"] == 44
     assert event["event_id"].startswith("evt-")
     assert event["correlation_id"] == telemetry["correlation_id"]
+
+
+def test_telemetry_aggregate_groups_phase_and_failure_category() -> None:
+    aggregate = telemetry_aggregate(
+        [
+            {"phase": "sql generation", "status": "completed", "latency_ms": 30, "total_tokens": 12, "cost_usd": 0.001},
+            {
+                "phase": "execution",
+                "status": "failed",
+                "latency_ms": 5,
+                "error_type": "sqlite3.OperationalError",
+                "error_message": "SQL execution failed",
+            },
+        ]
+    )
+
+    assert aggregate["event_count"] == 2
+    assert aggregate["failure_count"] == 1
+    assert aggregate["by_failure_category"]["execution"] == 1
+    assert categorize_failure("APITimeoutError", "request timed out") == "timeout"

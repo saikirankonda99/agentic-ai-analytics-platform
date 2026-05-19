@@ -17,6 +17,13 @@ RUNTIME_EVENT_TYPES = (
     "openai_request",
     "recovery_update",
 )
+FAILURE_CATEGORIES = {
+    "connection": ("APIConnectionError", "ConnectError", "ReadError", "network", "proxy"),
+    "timeout": ("APITimeoutError", "TimeoutException", "timeout"),
+    "provider_status": ("APIStatusError", "rate_limit", "server_error", "status"),
+    "validation": ("validation", "unsafe", "blocked"),
+    "execution": ("sqlite", "sql execution", "database"),
+}
 
 
 @dataclass(frozen=True)
@@ -181,3 +188,47 @@ def filter_telemetry_events(
             continue
         filtered.append(dict(event))
     return filtered
+
+
+def categorize_failure(error_type: str | None = None, error_message: str | None = None) -> str:
+    text = f"{error_type or ''} {error_message or ''}".lower()
+    if not text.strip():
+        return "none"
+    for category, markers in FAILURE_CATEGORIES.items():
+        if any(marker.lower() in text for marker in markers):
+            return category
+    return "unknown"
+
+
+def telemetry_aggregate(events: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None) -> dict[str, Any]:
+    rows = [dict(event) for event in events or []]
+    failures = [event for event in rows if event.get("error_type") or str(event.get("status", "")).lower() in {"failed", "error"}]
+    total_latency = sum(int(event.get("latency_ms", 0) or 0) for event in rows)
+    total_tokens = sum(int(event.get("total_tokens", 0) or 0) for event in rows)
+    total_cost = sum(float(event.get("cost_usd", 0.0) or 0.0) for event in rows)
+    by_phase: dict[str, dict[str, Any]] = {}
+    by_failure_category: dict[str, int] = {}
+    for event in rows:
+        phase = str(event.get("phase") or event.get("step") or "unknown")
+        phase_row = by_phase.setdefault(
+            phase,
+            {"phase": phase, "event_count": 0, "latency_ms": 0, "tokens": 0, "cost_usd": 0.0, "failures": 0},
+        )
+        phase_row["event_count"] += 1
+        phase_row["latency_ms"] += int(event.get("latency_ms", 0) or 0)
+        phase_row["tokens"] += int(event.get("total_tokens", 0) or 0)
+        phase_row["cost_usd"] += float(event.get("cost_usd", 0.0) or 0.0)
+        if event in failures:
+            phase_row["failures"] += 1
+            category = categorize_failure(event.get("error_type"), event.get("error_message") or event.get("message"))
+            by_failure_category[category] = by_failure_category.get(category, 0) + 1
+    return {
+        "event_count": len(rows),
+        "failure_count": len(failures),
+        "failure_rate": round((len(failures) / len(rows)) * 100, 2) if rows else 0.0,
+        "latency_ms": total_latency,
+        "total_tokens": total_tokens,
+        "cost_usd": round(total_cost, 6),
+        "by_phase": list(by_phase.values()),
+        "by_failure_category": by_failure_category,
+    }

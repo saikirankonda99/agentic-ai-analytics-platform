@@ -24,7 +24,7 @@ from backend.services import (
     backend_service,
     orchestration_service,
 )
-from backend.telemetry import RUNTIME_EVENT_TYPES, TELEMETRY_SCHEMA_VERSION, filter_telemetry_events
+from backend.telemetry import RUNTIME_EVENT_TYPES, TELEMETRY_SCHEMA_VERSION, filter_telemetry_events, telemetry_aggregate
 from backend.workspace_inspection import saved_sql_history, workflow_transcripts, workspace_summary
 from backend.websocket import websocket_manager, workflow_channel
 from workspace import load_workspace_memory_by_id
@@ -161,6 +161,14 @@ class WorkflowReplayResponse(BaseModel):
     updates: list[WorkflowStreamUpdateResponse]
 
 
+class WorkflowExecutionGraphResponse(BaseModel):
+    workflow_id: str
+    graph: dict[str, object]
+    summary: dict[str, object]
+    dependency_status: list[dict[str, object]]
+    replay: dict[str, object]
+
+
 class OperationsSummaryResponse(BaseModel):
     status: str
     readiness: dict[str, str]
@@ -282,6 +290,14 @@ def replay_workflow(workflow_id: str) -> WorkflowReplayResponse:
     )
 
 
+@router.get("/workflow/{workflow_id}/execution-graph", response_model=WorkflowExecutionGraphResponse)
+def get_workflow_execution_graph(workflow_id: str) -> WorkflowExecutionGraphResponse:
+    graph = orchestration_service.get_execution_graph(workflow_id)
+    if graph is None:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    return WorkflowExecutionGraphResponse(**graph)
+
+
 @router.get("/telemetry/schema")
 def telemetry_schema() -> dict[str, object]:
     return {
@@ -306,6 +322,28 @@ def workflow_telemetry_events(workflow_id: str, q: str = "", phase: str = "", st
         for update in updates
     ]
     return {"workflow_id": workflow_id, "events": filter_telemetry_events(events, query=q, phase=phase, status=status)}
+
+
+@router.get("/workflow/{workflow_id}/telemetry/aggregate")
+def workflow_telemetry_aggregate(workflow_id: str) -> dict[str, object]:
+    updates = orchestration_service.get_stream_updates(workflow_id)
+    if updates is None:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    events = [
+        {
+            "timestamp": update.timestamp,
+            "phase": update.payload.get("stage") or update.payload.get("event_type") or update.update_type,
+            "status": update.payload.get("status") or update.payload.get("agent_status") or update.update_type,
+            "message": update.message,
+            **{
+                key: update.payload.get(key)
+                for key in ("latency_ms", "total_tokens", "cost_usd", "error_type", "error_message")
+                if key in update.payload
+            },
+        }
+        for update in updates
+    ]
+    return {"workflow_id": workflow_id, "aggregate": telemetry_aggregate(events)}
 
 
 @router.get("/investigations/latest")

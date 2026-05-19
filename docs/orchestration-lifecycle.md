@@ -41,3 +41,21 @@ Stage confidence is heuristic by design. It is not a business correctness score.
 ## Session Replay
 
 Workspace sessions persist transcripts with question, SQL, telemetry, trace, and correlation ID. This supports replay-oriented debugging without re-running model calls.
+
+## Persisted Execution Graphs
+
+FastAPI workflows expose a replayable execution graph through `/workflow/{workflow_id}/execution-graph`.
+The response includes:
+
+- DAG nodes and dependency edges
+- current node state and dependency readiness
+- graph-level completion, failure, retry, and confidence rollups
+- replay frames derived from workflow, stage, agent, telemetry, and investigation updates
+- workflow metadata for correlation, workspace scoping, and operator drilldown
+
+This gives operators a stable inspection contract for live execution views, replay UI, and orchestration reliability analysis without coupling clients to storage internals.
+
+## Telemetry Aggregation
+
+Workflow telemetry events can be aggregated through `/workflow/{workflow_id}/telemetry/aggregate`.
+The aggregation layer groups events by phase, summarizes latency, token usage, estimated cost, failure rate, and failure category. This is the foundation for operational dashboards, incident triage, and future rolling SaaS metrics.

@@ -15,6 +15,8 @@ def test_execute_and_fetch_workflow() -> None:
     telemetry = client.get(f"/workflow/{workflow_id}/telemetry").json()
     replay = client.get(f"/workflow/{workflow_id}/replay").json()
     telemetry_events = client.get(f"/workflow/{workflow_id}/telemetry/events").json()
+    execution_graph = client.get(f"/workflow/{workflow_id}/execution-graph").json()
+    telemetry_aggregate = client.get(f"/workflow/{workflow_id}/telemetry/aggregate").json()
 
     assert created["status"] == "queued"
     assert fetched["status"] == "completed"
@@ -25,6 +27,9 @@ def test_execute_and_fetch_workflow() -> None:
     assert replay["workflow_id"] == workflow_id
     assert replay["updates"]
     assert telemetry_events["workflow_id"] == workflow_id
+    assert execution_graph["summary"]["node_count"] >= 6
+    assert execution_graph["replay"]["frame_count"] == len(replay["updates"])
+    assert telemetry_aggregate["aggregate"]["event_count"] >= 1
 
 
 def test_health_and_readiness() -> None:
