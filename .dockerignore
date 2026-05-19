@@ -13,4 +13,7 @@ __pycache__
 .streamlit/secrets.toml
 data/cost_log.db
 data/workflow_runtime.db
+data/auth_sessions.json
+data/workspaces
 data/history_store
+.auth_test_runtime

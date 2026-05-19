@@ -28,6 +28,37 @@ docker compose up --build
 Backend: `http://localhost:8000`  
 Streamlit: `http://localhost:8501`
 
+## Startup Validation
+
+Both Docker service entrypoints run startup validation before launching the application process. Validation covers environment configuration, OpenAI runtime posture, connector registration, auth configuration, telemetry initialization, and orchestration initialization.
+
+Set strict startup validation when a deployment should fail fast on required runtime errors:
+
+```bash
+STARTUP_VALIDATION_STRICT=true
+```
+
+Optional dependencies such as `OPENAI_API_KEY` and `POSTGRES_URL` report warnings in non-strict local deployments.
+
+## Health Checks
+
+Container health checks probe application endpoints:
+
+- backend: `GET /health`
+- frontend: `GET /_stcore/health`
+
+FastAPI also exposes:
+
+- `GET /ready`
+- `GET /readiness`
+- `GET /diagnostics`
+
+`/diagnostics` includes startup validation, auth posture, connector health, OpenAI runtime configuration, and execution policy.
+
+## CI/CD
+
+GitHub Actions runs lint, tests, startup probes, Docker build validation, and deployment-safety checks on pull requests and pushes to `main`. See `docs/cicd-runtime-validation.md` for the workflow contract.
+
 ## Future Worker Paths
 
 The current runtime uses FastAPI background tasks. The queue abstractions are intentionally compatible with later Celery/RQ adoption for:

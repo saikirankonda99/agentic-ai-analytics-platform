@@ -6,6 +6,8 @@ The platform extends beyond text-to-SQL generation into the operational concerns
 
 Current deployment supports SQLite and CSV-backed datasets with isolated user workspaces. The architecture is intentionally modular to support future migration toward distributed multi-agent orchestration.
 
+For the production architecture, orchestration lifecycle, telemetry flow, investigation system, deployment model, environment setup, troubleshooting posture, screenshots plan, and technical decisions, see [Enterprise Platform Overview](docs/enterprise-platform-overview.md).
+
 ---
 
 # Live System
