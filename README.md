@@ -1,659 +1,357 @@
 # Agentic AI Analytics Platform
 
-Production-oriented natural language analytics system designed around agentic workflow patterns, safe SQL generation, evaluation, observability, and multi-step analytical reasoning.
+[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/)
+[![CI](https://github.com/saikirankonda99/agentic-ai-analytics-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/saikirankonda99/agentic-ai-analytics-platform/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-pytest-green.svg)](tests)
+[![Lint](https://img.shields.io/badge/lint-ruff-green.svg)](pyproject.toml)
+[![E2E](https://img.shields.io/badge/e2e-playwright-green.svg)](tests/e2e)
+[![License](https://img.shields.io/badge/license-not%20specified-lightgrey.svg)](#license)
 
-The platform extends beyond text-to-SQL generation into the operational concerns required for deploying LLM-driven analytics systems in realistic environments: validation, hallucination mitigation, telemetry, workspace isolation, evaluation, and conversational analytical workflows.
+Agentic AI Analytics Platform is a production-oriented natural-language analytics workspace. It combines a Streamlit operator UI, a FastAPI control plane, safe SQL generation, workflow telemetry, workspace persistence, connector diagnostics, and browser-based regression testing.
 
-Current deployment supports SQLite and CSV-backed datasets with isolated user workspaces. The architecture is intentionally modular to support future migration toward distributed multi-agent orchestration.
+The project is intentionally scoped as an engineering reference implementation: it favors explicit orchestration, validation, diagnostics, and testability over opaque automation.
 
-For the production architecture, orchestration lifecycle, telemetry flow, investigation system, deployment model, environment setup, troubleshooting posture, screenshots plan, and technical decisions, see [Enterprise Platform Overview](docs/enterprise-platform-overview.md).
+## Live Links
 
-For the first-time user flow, workspace walkthrough, analytics examples, result explorer, recovery guidance, and deployment checklist, see [Usability and Onboarding Guide](docs/usability-onboarding.md).
-
-For durable SQLite/PostgreSQL persistence setup, `DATABASE_URL` and `WORKFLOW_DATABASE_URL` configuration, schema bootstrap, and troubleshooting, see [PostgreSQL Persistence Guide](docs/postgresql-persistence.md).
-
-For browser-based workflow validation, local setup, CI execution, and trace/screenshot debugging, see [Playwright E2E Testing](docs/e2e-testing.md).
-
----
-
-# Live System
-
-- Live Deployment: https://agentic-ai-analytics-platform.onrender.com
+- Live deployment: https://agentic-ai-analytics-platform.onrender.com
 - Repository: https://github.com/saikirankonda99/agentic-ai-analytics-platform
 - Author: Sai Kiran Konda
 
----
+## Platform Overview
 
-# Why I Built This
+The workspace supports natural-language analytics against the bundled Chinook SQLite dataset, CSV uploads, and connector-ready database boundaries. It preserves workspace state across sessions and exposes operational views for query execution, orchestration status, telemetry, investigations, monitoring, API diagnostics, and saved history.
 
-I started this project after noticing that most text-to-SQL demos work for about 30 seconds before things start breaking.
+Core surfaces:
 
-Simple prompts were usually fine:
-- "top customers by revenue"
-- "sales by country"
-- "monthly revenue trends"
+| Area | Purpose |
+|---|---|
+| `Overview` | Query workflow, result explorer, charts, insight brief, SQL trace, exports |
+| `Operations` | Runtime health, workflow queue, execution graph, telemetry trends |
+| `Copilot` | Conversation history, workflow timeline, telemetry panel |
+| `Investigations` | Autonomous drill-down state, pinned investigations, saved assets |
+| `Monitoring` | Scheduled KPI checks, executive briefing state, monitoring run history |
+| `Agents` | Agent status, SQL intelligence, latency breakdown, reasoning snapshots |
+| `API` | Runtime diagnostics, connector health, endpoint map, telemetry search |
+| `History` | Saved SQL, bookmarks, reports, recent activity, workspace continuity |
 
-The problems started once queries became conversational.
-
-Users would ask things like:
-> "Now compare that against last quarter"
-
-or
-
-> "Only show the top regions from the previous result"
-
-and the system would completely lose context or generate SQL that technically executed but answered the wrong question.
-
-One of the more frustrating issues early on was GPT generating joins against columns that sounded reasonable but didn’t actually exist in the schema. In a few cases the SQL compiled successfully and returned believable-looking results, which was worse than failing outright because the mistake was harder to notice.
-
-At that point the project became less about prompt engineering and more about:
-- validation
-- debugging visibility
-- conversational state
-- evaluation
-- execution safety
-
-A surprising amount of the work ended up going into handling failure cases rather than improving generation quality itself.
-
----
-
-# Core Design Goals
-
-## 1. Fail Closed Instead of Failing Open
-
-Unsafe or malformed SQL should never reach execution.
-
-The system validates all generated SQL before execution using:
-- SELECT-only enforcement
-- destructive operation blocking
-- syntactic validation
-- retry-with-context correction flow
-
-If correction fails, execution stops.
-
----
-
-## 2. Reduce Hallucination Risk
-
-LLMs frequently generate syntactically correct but semantically incorrect SQL.
-
-The system reduces hallucinations through:
-- schema-aware grounding
-- semantic context retrieval
-- evaluation harnesses
-- reflection-oriented investigation flows
-- conversational context retention
-
----
-
-## 3. Preserve Analytical Context
-
-Real analytical workflows are iterative.
-
-The platform maintains conversational memory to support follow-up reasoning such as:
-
-> "Filter that to last quarter"
-
-or
-
-> "Compare this against the previous region"
-
-without regenerating context from scratch.
-
----
-
-## 4. Prioritize Operational Visibility
-
-Production AI systems require telemetry.
-
-The platform tracks:
-- request latency
-- token usage
-- query execution history
-- failure traces
-- generated SQL audit logs
-
-This observability layer exists to make debugging and evaluation possible.
-
----
-
-# Current Architecture (v1)
+## Architecture Summary
 
 ```text
-┌─────────────────────────────────────────────────────┐
-│                  Streamlit UI                       │
-└────────────────────┬────────────────────────────────┘
-                     │
-        ┌────────────▼──────────────┐
-        │ Workspace + Auth           │
-        │ Per-user isolation         │
-        └────────────┬──────────────┘
-                     │
-        ┌────────────▼──────────────┐
-        │ Semantic Grounding Layer   │
-        │ Schema-aware retrieval     │
-        └────────────┬──────────────┘
-                     │
-        ┌────────────▼──────────────┐
-        │ LLM Abstraction Layer      │
-        │ Provider-agnostic calls    │
-        └────────────┬──────────────┘
-                     │
-        ┌────────────▼──────────────┐
-        │ Guardrails                 │
-        │ SQL validation             │
-        │ Destructive op blocking    │
-        └────────────┬──────────────┘
-                     │
-        ┌────────────▼──────────────┐
-        │ Query Execution Layer      │
-        └────────────┬──────────────┘
-                     │
-        ┌────────────▼──────────────┐
-        │ Autonomous Insights        │
-        │ Trend + anomaly surfacing  │
-        └────────────┬──────────────┘
-                     │
-        ┌────────────▼──────────────┐
-        │ Investigation Engine       │
-        │ Multi-step reasoning       │
-        └────────────┬──────────────┘
-                     │
-        ┌────────────▼──────────────┐
-        │ Memory + Monitoring        │
-        └────────────────────────────┘
+Streamlit workspace
+  -> session/auth/workspace state
+  -> command and dashboard views
+  -> local orchestration runner
+
+FastAPI backend
+  -> health/readiness/diagnostics
+  -> auth, connector, workspace, telemetry, workflow APIs
+  -> persistence repositories
+
+Runtime layer
+  -> schema grounding
+  -> memory retrieval
+  -> SQL generation and validation
+  -> execution, insight, investigation
+  -> telemetry and replay metadata
+
+Persistence and connectors
+  -> SQLite fallback
+  -> PostgreSQL-ready repositories
+  -> connector diagnostics and schema inspection
 ```
 
----
-
-# Production Workspace Evolution
-
-The current workspace is organized as an AI analytics operations console rather than a single chat demo.
-
-Primary sections:
-- `Overview`: natural-language analytics execution, charts, SQL inspection, and insight summaries
-- `Operations`: AI operations center with runtime health, workflow queue visibility, agent utilization, trends, and recommendations
-- `Copilot`: conversation history, workflow timeline, and model telemetry
-- `Investigations`: autonomous drill-down sessions, persisted investigation memory, and recommendation follow-ups
-- `Monitoring`: scheduled KPI checks, executive briefing state, and monitoring run history
-- `Agents`: active agent panels, reasoning snapshots, latency breakdowns, and telemetry exports
-- `API`: runtime diagnostics, endpoint map, OpenAI posture, and exportable observability payloads
-- `History`: recent workflow runs and generated SQL
+Detailed Mermaid diagrams are in [Architecture Diagrams](docs/architecture.md).
 
-Operational improvements:
-- first-time onboarding checklist with workspace progress persistence
-- guided sample dataset prompts and empty-state action paths
-- filterable and sortable result explorer with filtered/full CSV export
-- query bookmarks, pinned investigations, saved reports, and workspace preferences
-- durable SQLite/PostgreSQL repository layer for auth sessions, workspace memory, reports, bookmarks, and orchestration history
-- startup database diagnostics with lightweight schema migration tracking
-- executive summary and workflow trace exports from the Streamlit workspace
-- plain-language recovery guidance for OpenAI, connector, and SQL validation issues
-- workflow correlation IDs across UI, telemetry, and logs
-- centralized telemetry schema in `backend.telemetry`
-- coordinator execution graph with agent dependencies, transition timestamps, confidence, and recovery state
-- execution policy diagnostics with retry, confidence, degradation, and escalation decisions
-- persisted workspace sessions with replayable transcripts
-- OpenAI request diagnostics with exception chains and retry metadata
-- JSON/CSV telemetry export for support and debugging
-- FastAPI `/diagnostics` endpoint for runtime posture
-- workflow inspection endpoints for telemetry, replay, and investigation retrieval
-- workspace inspection endpoints for session transcripts, saved SQL history, and report exports
-- operations endpoints for telemetry event filtering and control-plane summaries
+## Core Capabilities
 
-Detailed control-plane notes are available in [docs/platform-control-plane.md](docs/platform-control-plane.md).
+- Natural-language analytics workflow with SQL inspection and result exploration.
+- Safe SQL guardrails with SELECT-only enforcement and destructive operation blocking.
+- SQL intelligence pipeline for schema reasoning, validation, explanation, recovery, and result quality.
+- Orchestration timeline, execution graph, phase confidence, and recovery diagnostics.
+- Workspace persistence for sessions, query history, bookmarks, investigations, reports, preferences, and onboarding state.
+- Lightweight collaboration with personal/team workspace switching, shared reports, shared investigations, shared bookmarks, and collaboration activity.
+- Telemetry normalization for latency, token usage, estimated cost, correlation IDs, retries, and error metadata.
+- Connector diagnostics for SQLite/PostgreSQL posture and API-level health visibility.
+- CSV upload analysis with the same workspace, telemetry, exports, and persistence surfaces.
+- Browser E2E tests covering auth, onboarding, analytics, exports, diagnostics, persistence, monitoring, and operations.
 
-Recommended local validation:
+## Orchestration Lifecycle
 
-```bash
-python -m ruff check
-python -m pytest
-python -m streamlit run app.py --server.port 8501 --server.headless true
-```
+The workflow is explicit and inspectable:
 
----
+1. Planner normalizes the request and detects follow-up context.
+2. Schema retrieval grounds the query against connector metadata.
+3. Memory retrieval brings in relevant workspace history.
+4. SQL generation runs through the LLM abstraction layer.
+5. SQL validation enforces syntax, read-only behavior, and execution policy.
+6. Reflection/recovery captures retry and degradation decisions.
+7. Execution runs through the connector boundary.
+8. Insight generation summarizes result signals.
+9. Investigation runs drill-down workflows when severity warrants it.
+10. Persistence records workflow, telemetry, reports, bookmarks, and replay context.
 
-# Repository Structure
+See [Orchestration Lifecycle](docs/orchestration-lifecycle.md) and [Multi-Agent Orchestration](docs/multi-agent-orchestration.md).
 
-```text
-agentic-ai-analytics-platform/
-
-├── app.py
-├── api.py
-├── auth.py
-├── workspace.py
-├── semantic.py
-├── llm.py
-├── guardrails.py
-├── db.py
-├── autonomous_insights.py
-├── investigation.py
-├── analytics_memory.py
-├── monitoring.py
-├── requirements.txt
-├── Dockerfile
-├── data/
-├── evals/
-└── tests/
-```
+## SQL Intelligence Pipeline
 
----
+SQL generation is not treated as a trusted final answer. The platform records:
 
-# Engineering Decisions
+- schema intelligence and selected tables/columns
+- generated SQL
+- validation status, warnings, and risk score
+- retry and recovery metadata
+- SQL explanation
+- result quality checks
 
-## Why Streamlit
+See [SQL Intelligence](docs/sql-intelligence.md).
 
-Streamlit allowed rapid iteration on conversational analytics workflows while keeping the focus on backend orchestration and analytical behavior rather than frontend engineering overhead.
+## Telemetry And Observability
 
----
+Telemetry is normalized through `backend.telemetry` and rendered in Streamlit and FastAPI diagnostics. The platform tracks:
 
-## Why SQLite Initially
+- correlation ID
+- workflow phase and status
+- latency by phase
+- token usage and estimated cost
+- model metadata
+- retry state and policy decisions
+- structured error type/message
+- telemetry export rows
 
-SQLite reduced infrastructure complexity during early iteration and enabled rapid experimentation with:
-- query validation
-- semantic grounding
-- evaluation logic
-- memory handling
+Telemetry can be downloaded from the workspace as JSON/CSV and inspected through API diagnostics. See [Platform Control Plane](docs/platform-control-plane.md) and [E2E Testing](docs/e2e-testing.md).
 
-The architecture intentionally abstracts execution logic to support PostgreSQL, Snowflake, and MySQL migration later.
+## Persistence And Workspace Architecture
 
----
+The runtime separates platform persistence from workflow persistence:
 
-## Why Provider Abstraction Exists
+| Store | Default | Responsibility |
+|---|---|---|
+| `DATABASE_URL` | `sqlite:///data/platform_persistence.db` | auth sessions, workspace memory, saved reports, bookmarks, onboarding, preferences |
+| `WORKFLOW_DATABASE_URL` | `sqlite:///data/workflow_runtime.db` | workflows, events, telemetry, usage, agent metadata |
 
-I originally wired the project directly to the OpenAI SDK and quickly regretted it once the orchestration logic started growing.
+SQLite works for local development. PostgreSQL is supported for production-oriented deployments and is validated at startup. See [PostgreSQL Persistence](docs/postgresql-persistence.md).
 
-Prompt formatting, retries, response parsing, token accounting, and provider-specific quirks were leaking into unrelated parts of the codebase. I hit a similar problem on an earlier Claude experiment where changing SDK versions forced changes across multiple files.
+## Collaboration Workflows
 
-`llm.py` exists mainly to keep provider-specific logic isolated.
+Users can switch between a personal workspace and a shared team workspace from the Streamlit sidebar. Shared reports, investigations, bookmarks, and dashboard views retain owner, creator, visibility, and updated-at metadata. Recent collaboration activity is rendered in the History workspace so saved analysis has visible team context without adding heavy RBAC.
 
-Right now the implementation still primarily targets OpenAI, but the abstraction layer makes it easier to experiment with:
-- Claude via Bedrock
-- local inference endpoints
-- fallback provider routing
-- provider-specific retry behavior
+The permissions model is intentionally small: admins and analysts can share, viewers can inspect shared context but receive graceful warnings when trying to share. See [Collaboration Workflows](docs/collaboration.md).
 
-without rewriting investigation or execution workflows.
+## Connectors And Diagnostics
 
----
+The connector layer exposes registration, health checks, schema inspection, and safe configuration diagnostics. FastAPI provides:
 
-## Why Guardrails Exist Outside the Prompt
+- `GET /health`
+- `GET /ready`
+- `GET /diagnostics`
+- `GET /connectors`
+- `GET /connectors/{connector_id}/health`
+- `GET /connectors/{connector_id}/schema`
+- `POST /connectors/validate`
 
-Prompt-only safety is insufficient.
+See [Connectors](docs/connectors.md) and [Deployment](docs/deployment.md).
 
-Validation occurs programmatically before execution because:
-- prompts can drift
-- models hallucinate
-- jailbreaks happen
-- unsafe SQL must fail deterministically
+## Onboarding, Reports, And Exports
 
----
+The Streamlit workspace includes:
 
-## Why Stateful Memory Matters
+- persisted onboarding checklist
+- guided sample prompts
+- sortable/filterable result explorer
+- filtered and full CSV downloads
+- executive summary export
+- workflow trace export
+- telemetry JSON/CSV export
+- saved reports, query bookmarks, pinned investigations
+- workspace restoration after reload
 
-Most text-to-SQL systems treat every query independently.
+Demo flow details are in [Demo Walkthrough](docs/demo-walkthrough.md).
 
-Analytical workflows are iterative by nature, so the platform preserves:
-- prior filters
-- previous aggregations
-- user investigation history
-- contextual references
+## Screenshots
 
-across turns.
+Screenshot folders are prepared for portfolio and release assets:
 
----
+| Area | Path | Recommended capture |
+|---|---|---|
+| Onboarding | `screenshots/onboarding/` | first-run checklist and guided query state |
+| Orchestration | `screenshots/orchestration/` | timeline, execution graph, agent status |
+| Telemetry | `screenshots/telemetry/` | observability cards, latency breakdown, telemetry export |
+| Reports | `screenshots/reports/` | result explorer, exports, saved reports |
+| Connectors | `screenshots/connectors/` | API diagnostics, connector health, endpoint map |
+| Collaboration | `screenshots/collaboration/` | shared workspace switcher, shared report history, owner metadata |
 
-# Module Responsibilities
+Recommended first captures:
 
-| Module | Responsibility |
-|---|---|
-| `app.py` | Streamlit UI entrypoint |
-| `api.py` | REST API layer |
-| `workspace.py` | Per-user workspace isolation |
-| `auth.py` | Authentication and session management |
-| `semantic.py` | Schema introspection and semantic grounding |
-| `llm.py` | Provider abstraction layer |
-| `guardrails.py` | SQL safety enforcement |
-| `db.py` | Query execution and database access |
-| `autonomous_insights.py` | Trend and anomaly surfacing |
-| `investigation.py` | Follow-up reasoning workflows |
-| `analytics_memory.py` | Stateful conversational memory |
-| `monitoring.py` | Logging, telemetry, latency tracking |
-| `evals/` | Golden-set evaluation framework |
-| `tests/` | Validation and regression testing |
+- `screenshots/onboarding/01-onboarding-workspace.png`
+- `screenshots/orchestration/01-workflow-timeline.png`
+- `screenshots/orchestration/02-sql-intelligence.png`
+- `screenshots/telemetry/01-observability-panel.png`
+- `screenshots/reports/01-result-explorer.png`
+- `screenshots/reports/04-shared-report-history.png`
+- `screenshots/collaboration/01-shared-workspace-history.png`
+- `screenshots/connectors/01-api-diagnostics.png`
 
----
+Naming guidance is in [Screenshots Guide](screenshots/README.md). Avoid committing local Playwright failure screenshots from `test-results/`.
 
-# Agentic Workflow Patterns
+## Local Setup
 
-## Controlled Tool Use
-
-The LLM does not receive unrestricted database access.
-
-All generated SQL passes through:
-- syntactic validation
-- restricted operation checks
-- execution policy enforcement
-
-before execution.
-
-This defines the autonomy boundary.
-
----
-
-## Autonomous Insight Generation
-
-The system proactively surfaces:
-- anomalies
-- trends
-- outliers
-- unexpected distributions
-
-without requiring explicit user prompting.
-
----
-
-## Multi-Step Investigations
-
-Analytical sessions are modeled as iterative workflows rather than isolated prompts.
-
-The system can:
-- generate follow-up questions
-- refine prior analysis
-- compare historical queries
-- continue investigations across turns
-
----
-
-## Stateful Context Retention
-
-Conversation memory enables references to:
-- prior aggregations
-- earlier filters
-- previous datasets
-- historical analytical context
-
-without regenerating the entire workflow.
-
----
-
-# Evaluation Framework
-
-The `evals/` module implements a golden-set evaluation harness focused on production failure modes.
-
-Measured metrics include:
-
-| Metric | Purpose |
-|---|---|
-| Correctness | Does SQL produce the intended result? |
-| Hallucination Rate | Did the query return plausible but incorrect answers? |
-| Latency | End-to-end workflow execution time |
-| Token Cost | LLM usage cost per analytical task |
-
-The evaluation layer exists because successful execution does not imply correctness.
-
-A query that compiles and returns rows may still produce analytically invalid output.
-
----
-
-# Observability and Monitoring
-
-Production AI systems require debugging visibility.
-
-The monitoring layer captures:
-- structured logs
-- generated SQL audit history
-- token consumption
-- latency metrics
-- execution failures
-- correction attempts
-
-This telemetry is used to identify:
-- hallucination patterns
-- slow workflows
-- repeated correction failures
-- prompt regressions
-
----
-
-# Security Controls
-
-## SQL Safety Enforcement
-
-The platform blocks:
-- DROP
-- DELETE
-- UPDATE
-- INSERT
-- ALTER
-- TRUNCATE
-
-before execution.
-
-Only validated SELECT queries are allowed.
-
----
-
-## Workspace Isolation
-
-Uploaded datasets remain isolated per user workspace and are never shared across sessions.
-
----
-
-## Audit Logging
-
-Every generated query is logged for:
-- traceability
-- debugging
-- evaluation
-- failure analysis
-
----
-
-# Performance Notes
-
-Current deployment targets correctness and workflow reliability over raw throughput.
-
-Observed characteristics:
-- average response latency: 3–8 seconds
-- lower latency for schema-aware repeated queries
-- higher latency during multi-step investigation flows
-- token cost increases during iterative reasoning
-
-Optimization work is ongoing.
-
----
-
-# Known Limitations
-
-The current system still has several limitations:
-
-- SQLite backend is not suitable for high concurrency
-- conversational memory is session-scoped only
-- autonomous insight generation can over-surface weak trends
-- long-context prompts increase token cost significantly
-- evaluation coverage is still limited relative to production-scale datasets
-
-These limitations are intentionally documented because operational weaknesses matter in real deployments.
-
----
-
-# Tech Stack
-
-| Layer | Technology |
-|---|---|
-| Frontend | Streamlit |
-| Backend | Python |
-| Data Layer | Pandas |
-| Database | SQLite |
-| LLM Provider | OpenAI |
-| Containerization | Docker |
-| Deployment | Render |
-| Evaluation | Custom golden-set framework |
-| Monitoring | Structured logging + telemetry |
-
----
-
-# Running Locally
-
-## Clone Repository
+Use Python 3.11.
 
 ```bash
 git clone https://github.com/saikirankonda99/agentic-ai-analytics-platform.git
-
 cd agentic-ai-analytics-platform
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
----
-
-## Install Dependencies
+Configure environment:
 
 ```bash
-pip install -r requirements.txt
+cp .env.example .env
 ```
 
----
-
-## Configure API Key
-
-### Option 1 — Environment Variable
+For OpenAI-backed SQL generation, set:
 
 ```bash
-export OPENAI_API_KEY="your_api_key_here"
+OPENAI_API_KEY=your_api_key_here
 ```
 
-### Option 2 — Streamlit Secrets
+The app can still run without an API key for diagnostics, onboarding, CSV-backed workflows, and most local tests.
 
-Create:
-
-```text
-.streamlit/secrets.toml
-```
-
-Add:
-
-```toml
-OPENAI_API_KEY="your_api_key_here"
-```
-
----
-
-## Start Application
+Start Streamlit:
 
 ```bash
-streamlit run app.py
+python -m streamlit run app.py --server.port 8501
 ```
 
----
+Start FastAPI:
 
-# Docker Deployment
+```bash
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+```
 
-## Build
+Validate health:
+
+```bash
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/diagnostics
+curl http://127.0.0.1:8501/_stcore/health
+```
+
+## Persistence Setup
+
+SQLite fallback:
+
+```bash
+DATABASE_URL=sqlite:///data/platform_persistence.db
+WORKFLOW_DATABASE_URL=sqlite:///data/workflow_runtime.db
+```
+
+PostgreSQL:
+
+```bash
+DATABASE_URL=postgresql://app_user:password@localhost:5432/agentic_ai
+WORKFLOW_DATABASE_URL=postgresql://app_user:password@localhost:5432/agentic_ai
+```
+
+The startup validator reports persistence backend, configuration source, and schema bootstrap status. See [PostgreSQL Persistence](docs/postgresql-persistence.md).
+
+## Docker
+
+Local stack:
+
+```bash
+docker compose up --build
+```
+
+Individual image:
 
 ```bash
 docker build -t agentic-ai-analytics-platform .
+docker run --rm -p 8501:8501 --env-file .env agentic-ai-analytics-platform
 ```
 
----
+Backend image and frontend image are also available through `Dockerfile.backend` and `Dockerfile.frontend`.
 
-## Run
+## Testing
+
+Fast local validation:
 
 ```bash
-docker run --rm -p 8501:8501 \
--e OPENAI_API_KEY=your_api_key_here \
-agentic-ai-analytics-platform
+python -m ruff check .
+python -m pytest
 ```
 
----
+Playwright setup:
 
-# Example Analytical Queries
+```bash
+python -m playwright install chromium
+```
 
-Example prompts against the Chinook dataset:
+Run browser E2E:
 
-- Top customers by revenue
-- Revenue by geography
-- Artist performance comparison
-- Genre distribution trends
-- Regional sales breakdown
-- Monthly purchasing behavior
-- Album sales by market segment
+```bash
+RUN_E2E=1 python -m pytest tests/e2e
+```
 
-CSV uploads are also supported for isolated custom dataset analysis.
+On Windows PowerShell:
 
----
+```powershell
+$env:RUN_E2E="1"
+python -m pytest tests/e2e
+```
 
-# Challenges Encountered During Development
+The default E2E suite uses a deterministic CSV-backed analytics workflow. The OpenAI-backed SQL generation test is marked `openai` and only runs when `OPENAI_API_KEY` is configured.
 
-Some of the harder problems were not the ones I expected going into the project.
+## CI/CD
 
-One recurring issue was hallucinated columns. GPT would generate things like `customer_revenue` or `regional_sales_total` even when those columns didn’t exist. Schema grounding reduced this quite a bit, but it still showed up occasionally when prompts became long or conversational context drifted.
+GitHub Actions runs:
 
-Another annoying issue was malformed correction loops. Sometimes the retry flow would bounce between two different invalid SQL queries indefinitely because each correction introduced a new syntax problem. Retry limits and stricter validation logic were added after that started showing up repeatedly during testing.
+- `lint`: Ruff checks
+- `test`: pytest suite
+- `startup`: FastAPI and Streamlit startup probes
+- `e2e`: Playwright browser tests with artifacts
+- `docker`: backend/frontend image build validation
+- `deployment-safety`: deployment file checks
 
-CSV uploads also introduced problems I didn’t initially think about. If a user uploaded a new dataset mid-session, conversational memory could reference tables or columns from the previous schema. That forced me to add memory invalidation logic tied to workspace state.
+See [CI/CD Runtime Validation](docs/cicd-runtime-validation.md).
 
-Token growth became another issue once investigation chains got longer. Earlier versions kept appending too much historical context into prompts, which increased latency and cost pretty quickly.
+## Documentation Map
 
-There are still cases where:
-- aggregation logic becomes overly complex
-- anomaly detection over-surfaces weak trends
-- long conversational chains drift semantically over time
+- [Docs Index](docs/README.md)
+- [Architecture Diagrams](docs/architecture.md)
+- [Demo Walkthrough](docs/demo-walkthrough.md)
+- [Collaboration Workflows](docs/collaboration.md)
+- [Performance Notes](docs/performance.md)
+- [Screenshots Guide](screenshots/README.md)
+- [Deployment](docs/deployment.md)
+- [E2E Testing](docs/e2e-testing.md)
+- [Troubleshooting](docs/troubleshooting.md)
 
-Those are still being worked on.
+## Roadmap
 
----
+Near-term:
 
-# Roadmap (v2)
+- capture and commit curated screenshots for the prepared screenshot structure
+- expand role-specific browser tests for admin, analyst, and viewer
+- add more connector-specific E2E fixtures
+- improve report templates for repeatable demo artifacts
+- add a lightweight seed-data reset command for demos
 
-The next iteration transitions from a sequential pipeline toward stateful multi-agent orchestration.
+Future:
 
-Primary goals:
-- richer analytical reasoning
-- reflection loops
-- parallel agent execution
-- planner-based decomposition
-- enterprise orchestration compatibility
+- broaden SQL evaluation datasets
+- add more database connectors
+- improve semantic retrieval for longer workspace histories
+- add workflow comparison and replay UI
+- support external worker execution for longer-running jobs
+- define an explicit repository license
 
----
+## License
 
-## Planned Improvements
+No license file is currently declared. Add a `LICENSE` file before treating this repository as open-source software.
 
-| Planned Work | Motivation |
-|---|---|
-| LangGraph orchestration | Stateful graph execution |
-| Reflection agent | Hallucination detection before execution |
-| Planner agent | Multi-step task decomposition |
-| History-aware retrieval | Better analytical continuity |
-| Snowflake/Postgres adapters | Production database support |
-| MCP server support | External agent interoperability |
-| Bedrock integration | Enterprise AWS-native deployments |
-| Expanded evaluation suite | Larger correctness benchmark coverage |
-| Human approval checkpoints | High-risk operation review |
-| Telemetry dashboard | Per-user cost visibility |
-
----
-
-# Contributing
-
-The project is still evolving and architectural feedback is welcome.
-
-Contributions are encouraged for:
-- orchestration improvements
-- evaluation methodology
-- hallucination mitigation
-- database adapters
-- telemetry and monitoring
-- testing coverage
-
----
-
-# License
-
-See LICENSE file.
-
----
-
-# Author
+## Author
 
 Sai Kiran Konda
 
