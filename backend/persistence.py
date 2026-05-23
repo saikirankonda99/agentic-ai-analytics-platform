@@ -79,7 +79,6 @@ def persistence_settings() -> PersistenceSettings:
     return PersistenceSettings(
         database_url=os.getenv("DATABASE_URL")
         or os.getenv("PLATFORM_DATABASE_URL")
-        or os.getenv("WORKFLOW_DATABASE_URL")
         or DEFAULT_DATABASE_URL,
         retries=max(0, int(os.getenv("DATABASE_RETRIES", "2"))),
         retry_delay_seconds=max(0.0, float(os.getenv("DATABASE_RETRY_DELAY_SECONDS", "0.05"))),

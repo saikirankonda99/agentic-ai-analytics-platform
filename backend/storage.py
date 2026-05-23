@@ -6,9 +6,10 @@ from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from threading import RLock
-from typing import Protocol
+from typing import Any, Protocol
 
 from backend.config import settings
+from backend.logging import get_logger
 from backend.models import (
     DEFAULT_ORGANIZATION_ID,
     DEFAULT_USER_ID,
@@ -28,6 +29,141 @@ from backend.models import (
 
 
 DEFAULT_WORKFLOW_DB_PATH = Path(settings.sqlite_workflow_path)
+logger = get_logger(__name__)
+
+
+def _json_dump(value: Any) -> str:
+    return json.dumps(value, sort_keys=True)
+
+
+def _json_load(value: Any, default: Any) -> Any:
+    if value is None:
+        return default
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    if isinstance(value, str):
+        if not value.strip():
+            return default
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            logger.warning("storage_json_deserialization_failed payload_type=%s", type(value).__name__)
+            return default
+    return value
+
+
+def _stage_progression_json(stages: tuple[WorkflowStageProgress, ...]) -> str:
+    return _json_dump([asdict(stage) for stage in stages])
+
+
+def _stage_progression_from_payload(payload: Any) -> tuple[WorkflowStageProgress, ...]:
+    loaded = _json_load(payload, [])
+    if not isinstance(loaded, (list, tuple)):
+        logger.warning("storage_stage_progression_invalid payload_type=%s", type(loaded).__name__)
+        return ()
+
+    stages: list[WorkflowStageProgress] = []
+    for stage in loaded:
+        if not isinstance(stage, dict):
+            logger.warning("storage_stage_progression_item_invalid payload_type=%s", type(stage).__name__)
+            continue
+        try:
+            stages.append(
+                WorkflowStageProgress(
+                    stage=stage["stage"],
+                    status=stage["status"],
+                    timestamp=stage["timestamp"],
+                )
+            )
+        except (KeyError, TypeError):
+            logger.warning("storage_stage_progression_item_invalid keys=%s", sorted(stage.keys()))
+    return tuple(stages)
+
+
+def _workflow_from_row(row: Any) -> OrchestrationExecution:
+    return OrchestrationExecution(
+        workflow_id=row["workflow_id"],
+        organization_id=row["organization_id"] or DEFAULT_ORGANIZATION_ID,
+        workspace_id=row["workspace_id"] or DEFAULT_WORKSPACE_ID,
+        user_id=row["user_id"] or DEFAULT_USER_ID,
+        question=row["question"],
+        status=row["status"],
+        created_at=row["created_at"],
+        current_stage=row["current_stage"],
+        stage_progression=_stage_progression_from_payload(row["stage_progression_json"]),
+        telemetry=WorkflowTelemetry(),
+        agent_executions=(),
+    )
+
+
+def _telemetry_values(
+    workflow_id: str,
+    organization_id: str,
+    workspace_id: str,
+    telemetry: WorkflowTelemetry,
+) -> tuple[Any, ...]:
+    return (
+        workflow_id,
+        organization_id,
+        workspace_id,
+        telemetry.started_at,
+        telemetry.completed_at,
+        telemetry.latency_ms,
+        telemetry.estimated_cost_usd,
+        telemetry.token_usage.prompt_tokens,
+        telemetry.token_usage.completion_tokens,
+        telemetry.token_usage.total_tokens,
+    )
+
+
+def _telemetry_from_row(row: Any) -> WorkflowTelemetry:
+    return WorkflowTelemetry(
+        started_at=row["started_at"],
+        completed_at=row["completed_at"],
+        latency_ms=row["latency_ms"],
+        estimated_cost_usd=row["estimated_cost_usd"],
+        token_usage=TokenUsage(
+            prompt_tokens=row["prompt_tokens"],
+            completion_tokens=row["completion_tokens"],
+            total_tokens=row["total_tokens"],
+        ),
+    )
+
+
+def _workflow_filter(
+    base_query: str,
+    workflow_id: str,
+    workspace_id: str | None,
+    placeholder: str,
+) -> tuple[str, tuple[str, ...]]:
+    query = base_query
+    params: tuple[str, ...] = (workflow_id,)
+    if workspace_id is not None:
+        query += f" AND workspace_id = {placeholder}"
+        params = (workflow_id, workspace_id)
+    return query, params
+
+
+def _usage_from_row(row: Any) -> UsageRecord:
+    metadata = _json_load(row["metadata_json"], {})
+    if not isinstance(metadata, dict):
+        logger.warning("storage_usage_metadata_invalid payload_type=%s", type(metadata).__name__)
+        metadata = {}
+    return UsageRecord(
+        usage_id=row["usage_id"],
+        organization_id=row["organization_id"],
+        workspace_id=row["workspace_id"],
+        user_id=row["user_id"],
+        event_type=row["event_type"],
+        quantity=row["quantity"],
+        estimated_cost_usd=row["estimated_cost_usd"],
+        timestamp=row["timestamp"],
+        metadata=metadata,
+    )
+
+
+def _storage_error(operation: str, exc: Exception) -> None:
+    logger.exception("storage_operation_failed operation=%s error=%s", operation, type(exc).__name__)
 
 
 class WorkflowStorage(Protocol):
@@ -287,8 +423,17 @@ class SQLiteStore:
         connection.row_factory = sqlite3.Row
         return connection
 
+    @contextmanager
+    def _transaction(self, operation: str):
+        try:
+            with self._lock, self._connect() as connection:
+                yield connection
+        except Exception as exc:
+            _storage_error(operation, exc)
+            raise
+
     def _initialize(self) -> None:
-        with self._lock, self._connect() as connection:
+        with self._transaction("sqlite.initialize") as connection:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS workflows (
@@ -438,8 +583,8 @@ class SQLiteStore:
 
 class SQLiteWorkflowStorage(SQLiteStore):
     def save(self, workflow: OrchestrationExecution) -> None:
-        stage_progression = json.dumps([asdict(stage) for stage in workflow.stage_progression])
-        with self._lock, self._connect() as connection:
+        stage_progression = _stage_progression_json(workflow.stage_progression)
+        with self._transaction("sqlite.workflow.save") as connection:
             connection.execute(
                 """
                 INSERT INTO workflows (
@@ -478,29 +623,13 @@ class SQLiteWorkflowStorage(SQLiteStore):
             query = "SELECT * FROM workflows ORDER BY updated_at DESC LIMIT 1"
             params = ()
 
-        with self._lock, self._connect() as connection:
+        with self._transaction("sqlite.workflow.get") as connection:
             row = connection.execute(query, params).fetchone()
 
         if row is None:
             return None
 
-        stage_progression = tuple(
-            WorkflowStageProgress(**stage)
-            for stage in json.loads(row["stage_progression_json"] or "[]")
-        )
-        return OrchestrationExecution(
-            workflow_id=row["workflow_id"],
-            organization_id=row["organization_id"] or DEFAULT_ORGANIZATION_ID,
-            workspace_id=row["workspace_id"] or DEFAULT_WORKSPACE_ID,
-            user_id=row["user_id"] or DEFAULT_USER_ID,
-            question=row["question"],
-            status=row["status"],
-            created_at=row["created_at"],
-            current_stage=row["current_stage"],
-            stage_progression=stage_progression,
-            telemetry=WorkflowTelemetry(),
-            agent_executions=(),
-        )
+        return _workflow_from_row(row)
 
 
 class SQLiteEventStorage(SQLiteStore):
@@ -512,7 +641,7 @@ class SQLiteEventStorage(SQLiteStore):
         workspace_id: str,
         organization_id: str = DEFAULT_ORGANIZATION_ID,
     ) -> None:
-        with self._lock, self._connect() as connection:
+        with self._transaction("sqlite.event.append") as connection:
             connection.execute(
                 """
                 INSERT INTO workflow_events (
@@ -524,17 +653,18 @@ class SQLiteEventStorage(SQLiteStore):
             )
 
     def list(self, workflow_id: str, *, workspace_id: str | None = None) -> tuple[WorkflowEvent, ...]:
-        query = """
+        query, params = _workflow_filter(
+            """
             SELECT timestamp, event_type, message
             FROM workflow_events
             WHERE workflow_id = ?
-        """
-        params: tuple[str, ...] = (workflow_id,)
-        if workspace_id is not None:
-            query += " AND workspace_id = ?"
-            params = (workflow_id, workspace_id)
+            """,
+            workflow_id,
+            workspace_id,
+            "?",
+        )
         query += " ORDER BY id ASC"
-        with self._lock, self._connect() as connection:
+        with self._transaction("sqlite.event.list") as connection:
             rows = connection.execute(query, params).fetchall()
         return tuple(WorkflowEvent(**dict(row)) for row in rows)
 
@@ -548,7 +678,7 @@ class SQLiteTelemetryStorage(SQLiteStore):
         workspace_id: str,
         organization_id: str = DEFAULT_ORGANIZATION_ID,
     ) -> None:
-        with self._lock, self._connect() as connection:
+        with self._transaction("sqlite.telemetry.save") as connection:
             connection.execute(
                 """
                 INSERT INTO workflow_telemetry (
@@ -567,39 +697,18 @@ class SQLiteTelemetryStorage(SQLiteStore):
                     completion_tokens = excluded.completion_tokens,
                     total_tokens = excluded.total_tokens
                 """,
-                (
-                    workflow_id,
-                    organization_id,
-                    workspace_id,
-                    telemetry.started_at,
-                    telemetry.completed_at,
-                    telemetry.latency_ms,
-                    telemetry.estimated_cost_usd,
-                    telemetry.token_usage.prompt_tokens,
-                    telemetry.token_usage.completion_tokens,
-                    telemetry.token_usage.total_tokens,
-                ),
+                _telemetry_values(workflow_id, organization_id, workspace_id, telemetry),
             )
 
     def get(self, workflow_id: str) -> WorkflowTelemetry | None:
-        with self._lock, self._connect() as connection:
+        with self._transaction("sqlite.telemetry.get") as connection:
             row = connection.execute(
                 "SELECT * FROM workflow_telemetry WHERE workflow_id = ?",
                 (workflow_id,),
             ).fetchone()
         if row is None:
             return None
-        return WorkflowTelemetry(
-            started_at=row["started_at"],
-            completed_at=row["completed_at"],
-            latency_ms=row["latency_ms"],
-            estimated_cost_usd=row["estimated_cost_usd"],
-            token_usage=TokenUsage(
-                prompt_tokens=row["prompt_tokens"],
-                completion_tokens=row["completion_tokens"],
-                total_tokens=row["total_tokens"],
-            ),
-        )
+        return _telemetry_from_row(row)
 
 
 class SQLiteAgentExecutionStorage(SQLiteStore):
@@ -611,7 +720,7 @@ class SQLiteAgentExecutionStorage(SQLiteStore):
         workspace_id: str,
         organization_id: str = DEFAULT_ORGANIZATION_ID,
     ) -> None:
-        with self._lock, self._connect() as connection:
+        with self._transaction("sqlite.agent_execution.save_all") as connection:
             connection.execute("DELETE FROM workflow_agents WHERE workflow_id = ?", (workflow_id,))
             connection.executemany(
                 """
@@ -635,17 +744,18 @@ class SQLiteAgentExecutionStorage(SQLiteStore):
             )
 
     def list(self, workflow_id: str, *, workspace_id: str | None = None) -> tuple[AgentExecution, ...]:
-        query = """
+        query, params = _workflow_filter(
+            """
             SELECT agent_name, agent_role, assigned_stage, agent_status
             FROM workflow_agents
             WHERE workflow_id = ?
-        """
-        params: tuple[str, ...] = (workflow_id,)
-        if workspace_id is not None:
-            query += " AND workspace_id = ?"
-            params = (workflow_id, workspace_id)
+            """,
+            workflow_id,
+            workspace_id,
+            "?",
+        )
         query += " ORDER BY id ASC"
-        with self._lock, self._connect() as connection:
+        with self._transaction("sqlite.agent_execution.list") as connection:
             rows = connection.execute(query, params).fetchall()
         return tuple(AgentExecution(**dict(row)) for row in rows)
 
@@ -659,7 +769,7 @@ class SQLiteAgentTraceStorage(SQLiteStore):
         workspace_id: str,
         organization_id: str = DEFAULT_ORGANIZATION_ID,
     ) -> None:
-        with self._lock, self._connect() as connection:
+        with self._transaction("sqlite.agent_trace.save_all") as connection:
             connection.execute("DELETE FROM workflow_agent_traces WHERE workflow_id = ?", (workflow_id,))
             connection.executemany(
                 """
@@ -685,24 +795,25 @@ class SQLiteAgentTraceStorage(SQLiteStore):
             )
 
     def list(self, workflow_id: str, *, workspace_id: str | None = None) -> tuple[AgentCoordinationTrace, ...]:
-        query = """
+        query, params = _workflow_filter(
+            """
             SELECT timestamp, source_agent, target_agent, handoff_reason, context_summary
             FROM workflow_agent_traces
             WHERE workflow_id = ?
-        """
-        params: tuple[str, ...] = (workflow_id,)
-        if workspace_id is not None:
-            query += " AND workspace_id = ?"
-            params = (workflow_id, workspace_id)
+            """,
+            workflow_id,
+            workspace_id,
+            "?",
+        )
         query += " ORDER BY id ASC"
-        with self._lock, self._connect() as connection:
+        with self._transaction("sqlite.agent_trace.list") as connection:
             rows = connection.execute(query, params).fetchall()
         return tuple(AgentCoordinationTrace(**dict(row)) for row in rows)
 
 
 class SQLiteAccountStorage(SQLiteStore):
     def save_organization(self, organization: Organization) -> None:
-        with self._lock, self._connect() as connection:
+        with self._transaction("sqlite.account.save_organization") as connection:
             connection.execute(
                 """
                 INSERT INTO organizations (organization_id, name, plan)
@@ -716,7 +827,7 @@ class SQLiteAccountStorage(SQLiteStore):
             )
 
     def save_workspace(self, workspace: Workspace) -> None:
-        with self._lock, self._connect() as connection:
+        with self._transaction("sqlite.account.save_workspace") as connection:
             connection.execute(
                 """
                 INSERT INTO workspaces (workspace_id, organization_id, name)
@@ -730,7 +841,7 @@ class SQLiteAccountStorage(SQLiteStore):
             )
 
     def save_membership(self, membership: WorkspaceMembership) -> None:
-        with self._lock, self._connect() as connection:
+        with self._transaction("sqlite.account.save_membership") as connection:
             connection.execute(
                 """
                 INSERT INTO workspace_memberships (user_id, workspace_id, organization_id, roles_json)
@@ -744,12 +855,12 @@ class SQLiteAccountStorage(SQLiteStore):
                     membership.user_id,
                     membership.workspace_id,
                     membership.organization_id,
-                    json.dumps(list(membership.roles)),
+                    _json_dump(list(membership.roles)),
                 ),
             )
 
     def get_workspace(self, workspace_id: str) -> Workspace | None:
-        with self._lock, self._connect() as connection:
+        with self._transaction("sqlite.account.get_workspace") as connection:
             row = connection.execute(
                 "SELECT workspace_id, organization_id, name FROM workspaces WHERE workspace_id = ?",
                 (workspace_id,),
@@ -765,7 +876,7 @@ class SQLiteAccountStorage(SQLiteStore):
 
 class SQLiteUsageStorage(SQLiteStore):
     def append(self, usage: UsageRecord) -> None:
-        with self._lock, self._connect() as connection:
+        with self._transaction("sqlite.usage.append") as connection:
             connection.execute(
                 """
                 INSERT INTO usage_records (
@@ -783,7 +894,7 @@ class SQLiteUsageStorage(SQLiteStore):
                     usage.quantity,
                     usage.estimated_cost_usd,
                     usage.timestamp,
-                    json.dumps(usage.metadata),
+                    _json_dump(usage.metadata),
                 ),
             )
 
@@ -802,27 +913,14 @@ class SQLiteUsageStorage(SQLiteStore):
             query += " AND workspace_id = ?"
             params.append(workspace_id)
         query += " ORDER BY timestamp ASC"
-        with self._lock, self._connect() as connection:
+        with self._transaction("sqlite.usage.list") as connection:
             rows = connection.execute(query, tuple(params)).fetchall()
-        return tuple(
-            UsageRecord(
-                usage_id=row["usage_id"],
-                organization_id=row["organization_id"],
-                workspace_id=row["workspace_id"],
-                user_id=row["user_id"],
-                event_type=row["event_type"],
-                quantity=row["quantity"],
-                estimated_cost_usd=row["estimated_cost_usd"],
-                timestamp=row["timestamp"],
-                metadata=json.loads(row["metadata_json"] or "{}"),
-            )
-            for row in rows
-        )
+        return tuple(_usage_from_row(row) for row in rows)
 
 
 class PostgreSQLStore:
     def __init__(self, database_url: str | None = None) -> None:
-        self.database_url = database_url or settings.database_url
+        self.database_url = database_url or settings.workflow_database_url
         self._initialize()
 
     @contextmanager
@@ -842,8 +940,17 @@ class PostgreSQLStore:
         finally:
             connection.close()
 
+    @contextmanager
+    def _transaction(self, operation: str):
+        try:
+            with self._connect() as connection:
+                yield connection
+        except Exception as exc:
+            _storage_error(operation, exc)
+            raise
+
     def _initialize(self) -> None:
-        with self._connect() as connection:
+        with self._transaction("postgres.initialize") as connection:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS workflows (
@@ -975,8 +1082,8 @@ class PostgreSQLStore:
 
 class PostgreSQLWorkflowStorage(PostgreSQLStore):
     def save(self, workflow: OrchestrationExecution) -> None:
-        stage_progression = json.dumps([asdict(stage) for stage in workflow.stage_progression])
-        with self._connect() as connection:
+        stage_progression = _stage_progression_json(workflow.stage_progression)
+        with self._transaction("postgres.workflow.save") as connection:
             connection.execute(
                 """
                 INSERT INTO workflows (
@@ -1014,25 +1121,11 @@ class PostgreSQLWorkflowStorage(PostgreSQLStore):
         if workflow_id == "workflow:latest":
             query = "SELECT * FROM workflows ORDER BY updated_at DESC LIMIT 1"
             params = ()
-        with self._connect() as connection:
+        with self._transaction("postgres.workflow.get") as connection:
             row = connection.execute(query, params).fetchone()
         if row is None:
             return None
-        stage_payload = row["stage_progression_json"] or []
-        stage_progression = tuple(WorkflowStageProgress(**stage) for stage in stage_payload)
-        return OrchestrationExecution(
-            workflow_id=row["workflow_id"],
-            organization_id=row["organization_id"] or DEFAULT_ORGANIZATION_ID,
-            workspace_id=row["workspace_id"] or DEFAULT_WORKSPACE_ID,
-            user_id=row["user_id"] or DEFAULT_USER_ID,
-            question=row["question"],
-            status=row["status"],
-            created_at=row["created_at"],
-            current_stage=row["current_stage"],
-            stage_progression=stage_progression,
-            telemetry=WorkflowTelemetry(),
-            agent_executions=(),
-        )
+        return _workflow_from_row(row)
 
 
 class PostgreSQLEventStorage(PostgreSQLStore):
@@ -1044,7 +1137,7 @@ class PostgreSQLEventStorage(PostgreSQLStore):
         workspace_id: str,
         organization_id: str = DEFAULT_ORGANIZATION_ID,
     ) -> None:
-        with self._connect() as connection:
+        with self._transaction("postgres.event.append") as connection:
             connection.execute(
                 """
                 INSERT INTO workflow_events (
@@ -1056,13 +1149,14 @@ class PostgreSQLEventStorage(PostgreSQLStore):
             )
 
     def list(self, workflow_id: str, *, workspace_id: str | None = None) -> tuple[WorkflowEvent, ...]:
-        query = "SELECT timestamp, event_type, message FROM workflow_events WHERE workflow_id = %s"
-        params: tuple[str, ...] = (workflow_id,)
-        if workspace_id is not None:
-            query += " AND workspace_id = %s"
-            params = (workflow_id, workspace_id)
+        query, params = _workflow_filter(
+            "SELECT timestamp, event_type, message FROM workflow_events WHERE workflow_id = %s",
+            workflow_id,
+            workspace_id,
+            "%s",
+        )
         query += " ORDER BY id ASC"
-        with self._connect() as connection:
+        with self._transaction("postgres.event.list") as connection:
             rows = connection.execute(query, params).fetchall()
         return tuple(WorkflowEvent(**row) for row in rows)
 
@@ -1076,7 +1170,7 @@ class PostgreSQLTelemetryStorage(PostgreSQLStore):
         workspace_id: str,
         organization_id: str = DEFAULT_ORGANIZATION_ID,
     ) -> None:
-        with self._connect() as connection:
+        with self._transaction("postgres.telemetry.save") as connection:
             connection.execute(
                 """
                 INSERT INTO workflow_telemetry (
@@ -1095,36 +1189,15 @@ class PostgreSQLTelemetryStorage(PostgreSQLStore):
                     completion_tokens = EXCLUDED.completion_tokens,
                     total_tokens = EXCLUDED.total_tokens
                 """,
-                (
-                    workflow_id,
-                    organization_id,
-                    workspace_id,
-                    telemetry.started_at,
-                    telemetry.completed_at,
-                    telemetry.latency_ms,
-                    telemetry.estimated_cost_usd,
-                    telemetry.token_usage.prompt_tokens,
-                    telemetry.token_usage.completion_tokens,
-                    telemetry.token_usage.total_tokens,
-                ),
+                _telemetry_values(workflow_id, organization_id, workspace_id, telemetry),
             )
 
     def get(self, workflow_id: str) -> WorkflowTelemetry | None:
-        with self._connect() as connection:
+        with self._transaction("postgres.telemetry.get") as connection:
             row = connection.execute("SELECT * FROM workflow_telemetry WHERE workflow_id = %s", (workflow_id,)).fetchone()
         if row is None:
             return None
-        return WorkflowTelemetry(
-            started_at=row["started_at"],
-            completed_at=row["completed_at"],
-            latency_ms=row["latency_ms"],
-            estimated_cost_usd=row["estimated_cost_usd"],
-            token_usage=TokenUsage(
-                prompt_tokens=row["prompt_tokens"],
-                completion_tokens=row["completion_tokens"],
-                total_tokens=row["total_tokens"],
-            ),
-        )
+        return _telemetry_from_row(row)
 
 
 class PostgreSQLAgentExecutionStorage(PostgreSQLStore):
@@ -1136,7 +1209,7 @@ class PostgreSQLAgentExecutionStorage(PostgreSQLStore):
         workspace_id: str,
         organization_id: str = DEFAULT_ORGANIZATION_ID,
     ) -> None:
-        with self._connect() as connection:
+        with self._transaction("postgres.agent_execution.save_all") as connection:
             connection.execute("DELETE FROM workflow_agents WHERE workflow_id = %s", (workflow_id,))
             for agent in agents:
                 connection.execute(
@@ -1158,13 +1231,14 @@ class PostgreSQLAgentExecutionStorage(PostgreSQLStore):
                 )
 
     def list(self, workflow_id: str, *, workspace_id: str | None = None) -> tuple[AgentExecution, ...]:
-        query = "SELECT agent_name, agent_role, assigned_stage, agent_status FROM workflow_agents WHERE workflow_id = %s"
-        params: tuple[str, ...] = (workflow_id,)
-        if workspace_id is not None:
-            query += " AND workspace_id = %s"
-            params = (workflow_id, workspace_id)
+        query, params = _workflow_filter(
+            "SELECT agent_name, agent_role, assigned_stage, agent_status FROM workflow_agents WHERE workflow_id = %s",
+            workflow_id,
+            workspace_id,
+            "%s",
+        )
         query += " ORDER BY id ASC"
-        with self._connect() as connection:
+        with self._transaction("postgres.agent_execution.list") as connection:
             rows = connection.execute(query, params).fetchall()
         return tuple(AgentExecution(**row) for row in rows)
 
@@ -1178,7 +1252,7 @@ class PostgreSQLAgentTraceStorage(PostgreSQLStore):
         workspace_id: str,
         organization_id: str = DEFAULT_ORGANIZATION_ID,
     ) -> None:
-        with self._connect() as connection:
+        with self._transaction("postgres.agent_trace.save_all") as connection:
             connection.execute("DELETE FROM workflow_agent_traces WHERE workflow_id = %s", (workflow_id,))
             for trace in traces:
                 connection.execute(
@@ -1202,24 +1276,25 @@ class PostgreSQLAgentTraceStorage(PostgreSQLStore):
                 )
 
     def list(self, workflow_id: str, *, workspace_id: str | None = None) -> tuple[AgentCoordinationTrace, ...]:
-        query = """
+        query, params = _workflow_filter(
+            """
             SELECT timestamp, source_agent, target_agent, handoff_reason, context_summary
             FROM workflow_agent_traces
             WHERE workflow_id = %s
-        """
-        params: tuple[str, ...] = (workflow_id,)
-        if workspace_id is not None:
-            query += " AND workspace_id = %s"
-            params = (workflow_id, workspace_id)
+            """,
+            workflow_id,
+            workspace_id,
+            "%s",
+        )
         query += " ORDER BY id ASC"
-        with self._connect() as connection:
+        with self._transaction("postgres.agent_trace.list") as connection:
             rows = connection.execute(query, params).fetchall()
         return tuple(AgentCoordinationTrace(**row) for row in rows)
 
 
 class PostgreSQLAccountStorage(PostgreSQLStore):
     def save_organization(self, organization: Organization) -> None:
-        with self._connect() as connection:
+        with self._transaction("postgres.account.save_organization") as connection:
             connection.execute(
                 """
                 INSERT INTO organizations (organization_id, name, plan)
@@ -1233,7 +1308,7 @@ class PostgreSQLAccountStorage(PostgreSQLStore):
             )
 
     def save_workspace(self, workspace: Workspace) -> None:
-        with self._connect() as connection:
+        with self._transaction("postgres.account.save_workspace") as connection:
             connection.execute(
                 """
                 INSERT INTO workspaces (workspace_id, organization_id, name)
@@ -1247,7 +1322,7 @@ class PostgreSQLAccountStorage(PostgreSQLStore):
             )
 
     def save_membership(self, membership: WorkspaceMembership) -> None:
-        with self._connect() as connection:
+        with self._transaction("postgres.account.save_membership") as connection:
             connection.execute(
                 """
                 INSERT INTO workspace_memberships (user_id, workspace_id, organization_id, roles_json)
@@ -1261,12 +1336,12 @@ class PostgreSQLAccountStorage(PostgreSQLStore):
                     membership.user_id,
                     membership.workspace_id,
                     membership.organization_id,
-                    json.dumps(list(membership.roles)),
+                    _json_dump(list(membership.roles)),
                 ),
             )
 
     def get_workspace(self, workspace_id: str) -> Workspace | None:
-        with self._connect() as connection:
+        with self._transaction("postgres.account.get_workspace") as connection:
             row = connection.execute(
                 "SELECT workspace_id, organization_id, name FROM workspaces WHERE workspace_id = %s",
                 (workspace_id,),
@@ -1278,7 +1353,7 @@ class PostgreSQLAccountStorage(PostgreSQLStore):
 
 class PostgreSQLUsageStorage(PostgreSQLStore):
     def append(self, usage: UsageRecord) -> None:
-        with self._connect() as connection:
+        with self._transaction("postgres.usage.append") as connection:
             connection.execute(
                 """
                 INSERT INTO usage_records (
@@ -1296,7 +1371,7 @@ class PostgreSQLUsageStorage(PostgreSQLStore):
                     usage.quantity,
                     usage.estimated_cost_usd,
                     usage.timestamp,
-                    json.dumps(usage.metadata),
+                    _json_dump(usage.metadata),
                 ),
             )
 
@@ -1315,55 +1390,108 @@ class PostgreSQLUsageStorage(PostgreSQLStore):
             query += " AND workspace_id = %s"
             params.append(workspace_id)
         query += " ORDER BY timestamp ASC"
-        with self._connect() as connection:
+        with self._transaction("postgres.usage.list") as connection:
             rows = connection.execute(query, tuple(params)).fetchall()
-        return tuple(
-            UsageRecord(
-                usage_id=row["usage_id"],
-                organization_id=row["organization_id"],
-                workspace_id=row["workspace_id"],
-                user_id=row["user_id"],
-                event_type=row["event_type"],
-                quantity=row["quantity"],
-                estimated_cost_usd=row["estimated_cost_usd"],
-                timestamp=row["timestamp"],
-                metadata=dict(row["metadata_json"] or {}),
-            )
-            for row in rows
-        )
+        return tuple(_usage_from_row(row) for row in rows)
 
 
 def use_postgresql_storage() -> bool:
-    database_url = settings.database_url
+    database_url = settings.workflow_database_url
     return database_url.startswith("postgresql://") or database_url.startswith("postgres://")
 
 
+def workflow_storage_backend() -> str:
+    return "postgresql" if use_postgresql_storage() else "sqlite"
+
+
+def validate_workflow_storage(database_url: str | None = None) -> dict[str, Any]:
+    selected_url = database_url or settings.workflow_database_url
+    backend = "postgresql" if selected_url.startswith(("postgresql://", "postgres://")) else "sqlite"
+    try:
+        if backend == "postgresql":
+            PostgreSQLWorkflowStorage(selected_url)
+        else:
+            db_path = Path(selected_url.removeprefix("sqlite:///")) if selected_url.startswith("sqlite:///") else DEFAULT_WORKFLOW_DB_PATH
+            SQLiteWorkflowStorage(db_path)
+        return {
+            "status": "ok",
+            "backend": backend,
+            "database_url": _redact_database_url(selected_url),
+            "source": settings.workflow_database_source if database_url is None else "explicit",
+        }
+    except Exception as exc:
+        _storage_error("workflow.validate", exc)
+        return {
+            "status": "error",
+            "backend": backend,
+            "database_url": _redact_database_url(selected_url),
+            "source": settings.workflow_database_source if database_url is None else "explicit",
+            "error_type": type(exc).__name__,
+            "message": str(exc),
+        }
+
+
+def _redact_database_url(database_url: str) -> str:
+    if "@" not in database_url or "://" not in database_url:
+        return database_url
+    scheme, rest = database_url.split("://", 1)
+    return f"{scheme}://***@{rest.split('@', 1)[1]}"
+
+
 def build_workflow_storage() -> WorkflowStorage:
-    return PostgreSQLWorkflowStorage(settings.database_url) if use_postgresql_storage() else SQLiteWorkflowStorage()
+    return (
+        PostgreSQLWorkflowStorage(settings.workflow_database_url)
+        if use_postgresql_storage()
+        else SQLiteWorkflowStorage(settings.sqlite_workflow_path)
+    )
 
 
 def build_account_storage() -> AccountStorage:
-    return PostgreSQLAccountStorage(settings.database_url) if use_postgresql_storage() else SQLiteAccountStorage()
+    return (
+        PostgreSQLAccountStorage(settings.workflow_database_url)
+        if use_postgresql_storage()
+        else SQLiteAccountStorage(settings.sqlite_workflow_path)
+    )
 
 
 def build_event_storage() -> EventStorage:
-    return PostgreSQLEventStorage(settings.database_url) if use_postgresql_storage() else SQLiteEventStorage()
+    return (
+        PostgreSQLEventStorage(settings.workflow_database_url)
+        if use_postgresql_storage()
+        else SQLiteEventStorage(settings.sqlite_workflow_path)
+    )
 
 
 def build_telemetry_storage() -> TelemetryStorage:
-    return PostgreSQLTelemetryStorage(settings.database_url) if use_postgresql_storage() else SQLiteTelemetryStorage()
+    return (
+        PostgreSQLTelemetryStorage(settings.workflow_database_url)
+        if use_postgresql_storage()
+        else SQLiteTelemetryStorage(settings.sqlite_workflow_path)
+    )
 
 
 def build_agent_execution_storage() -> AgentExecutionStorage:
-    return PostgreSQLAgentExecutionStorage(settings.database_url) if use_postgresql_storage() else SQLiteAgentExecutionStorage()
+    return (
+        PostgreSQLAgentExecutionStorage(settings.workflow_database_url)
+        if use_postgresql_storage()
+        else SQLiteAgentExecutionStorage(settings.sqlite_workflow_path)
+    )
 
 
 def build_agent_trace_storage() -> AgentTraceStorage:
-    return PostgreSQLAgentTraceStorage(settings.database_url) if use_postgresql_storage() else SQLiteAgentTraceStorage()
+    return (
+        PostgreSQLAgentTraceStorage(settings.workflow_database_url)
+        if use_postgresql_storage()
+        else SQLiteAgentTraceStorage(settings.sqlite_workflow_path)
+    )
 
 
 def build_usage_storage() -> UsageStorage:
-    return PostgreSQLUsageStorage(settings.database_url) if use_postgresql_storage() else SQLiteUsageStorage()
+    return (
+        PostgreSQLUsageStorage(settings.workflow_database_url)
+        if use_postgresql_storage()
+        else SQLiteUsageStorage(settings.sqlite_workflow_path)
+    )
 
 
 __all__ = [
@@ -1403,5 +1531,7 @@ __all__ = [
     "build_telemetry_storage",
     "build_usage_storage",
     "build_workflow_storage",
+    "validate_workflow_storage",
+    "workflow_storage_backend",
     "use_postgresql_storage",
 ]
