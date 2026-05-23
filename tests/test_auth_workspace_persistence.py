@@ -105,10 +105,17 @@ def test_auth_and_workspace_persistence_api(monkeypatch) -> None:
         ).json()
         saved_report = client.post(
             f"/workspace/{workspace_id}/reports",
-            json={"title": "Executive summary", "scope": "analytics", "summary": "Healthy", "payload": {"rows": 1}},
+            json={"title": "Executive summary", "scope": "analytics", "summary": "Healthy", "payload": {"rows": 1}, "visibility": "team"},
+            headers=headers,
+        ).json()
+        team_workspace_id = workspace_id.split(".", 1)[0] + ".shared"
+        shared_report = client.post(
+            f"/workspace/{team_workspace_id}/reports",
+            json={"title": "Shared dashboard", "scope": "dashboard", "summary": "Team view", "payload": {}, "visibility": "team"},
             headers=headers,
         ).json()
         fetched = client.get(f"/workspace/{workspace_id}", headers=headers).json()
+        shared_fetched = client.get(f"/workspace/{team_workspace_id}", headers=headers).json()
         session_status = client.get("/auth/session", headers=headers).json()
         unauthorized = client.get(f"/workspace/{workspace_id}")
         logout = client.post("/auth/logout", json={"session_token": token}).json()
@@ -116,10 +123,16 @@ def test_auth_and_workspace_persistence_api(monkeypatch) -> None:
         assert saved_sql["items"][0]["sql"] == "select 1"
         assert saved_investigation["investigations"][0]["summary"] == "Found anomaly"
         assert saved_preferences["preferences"]["default_route"] == "Operations"
-        assert saved_report["reports"][0]["title"] == "Executive summary"
+        saved_report_item = [item for item in saved_report["reports"] if item.get("title") == "Executive summary"][-1]
+        shared_report_item = [item for item in shared_report["reports"] if item.get("title") == "Shared dashboard"][-1]
+        assert saved_report_item["visibility"] == "team"
+        assert shared_report_item["title"] == "Shared dashboard"
         assert fetched["query_history"][0]["saved"] is True
         assert fetched["saved_reports"][0]["summary"] == "Healthy"
         assert fetched["recent_activity"]
+        assert shared_fetched["workspace_id"] == team_workspace_id
+        assert any(item.get("visibility") == "team" for item in shared_fetched["saved_reports"])
+        assert any(item.get("event_type") == "report_shared" for item in shared_fetched["collaboration_events"])
         assert session_status["authenticated"] is True
         assert unauthorized.status_code == 401
         assert logout["revoked"] is True

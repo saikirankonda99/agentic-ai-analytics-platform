@@ -89,6 +89,7 @@ class OrchestrationService:
         self.agent_coordinator = agent_coordinator or MultiAgentCoordinator()
         self.connector_registry = connector_registry or get_connector_registry()
         self.worker = InlineWorker()
+        self._stream_update_cache: dict[str, tuple[tuple[Any, ...], tuple[WorkflowStreamUpdate, ...]]] = {}
 
     def register_session(self, session: RequestSession) -> None:
         self.account_storage.save_organization(session.organization)
@@ -247,16 +248,33 @@ class OrchestrationService:
         if workflow is None:
             return None
 
-        updates: list[WorkflowStreamUpdate] = []
         events = self.get_events(workflow_id) or ()
         telemetry = self.telemetry_storage.get(workflow_id) or workflow.telemetry
+        cache_key = (
+            workflow.status,
+            workflow.current_stage,
+            len(workflow.stage_progression),
+            len(workflow.agent_executions),
+            len(events),
+            events[-1].timestamp if events else "",
+            telemetry.completed_at,
+            telemetry.latency_ms,
+            telemetry.estimated_cost_usd,
+        )
+        cached = self._stream_update_cache.get(workflow_id)
+        if cached and cached[0] == cache_key:
+            return cached[1]
+
+        updates: list[WorkflowStreamUpdate] = []
         updates.extend(self._event_stream_updates(events))
         updates.extend(self._lifecycle_stream_updates(events))
         updates.extend(self._investigation_stream_updates(events))
         updates.extend(self._stage_stream_updates(workflow.stage_progression))
         updates.extend(self._agent_stream_updates(workflow.agent_executions, workflow.stage_progression))
         updates.extend(self._telemetry_stream_updates(telemetry))
-        return tuple(sorted(updates, key=lambda update: update.timestamp))
+        result = tuple(sorted(updates, key=lambda update: update.timestamp))
+        self._stream_update_cache[workflow_id] = (cache_key, result)
+        return result
 
     def get_execution_graph(self, workflow_id: str) -> dict[str, Any] | None:
         workflow = self.get_workflow(workflow_id)
@@ -265,6 +283,7 @@ class OrchestrationService:
         return execution_graph_response(workflow, self.get_stream_updates(workflow_id) or ())
 
     def _save_workflow(self, workflow: OrchestrationExecution) -> None:
+        self._stream_update_cache.pop(workflow.workflow_id, None)
         self.workflow_storage.save(workflow)
         self.telemetry_storage.save(
             workflow.workflow_id,
@@ -411,6 +430,7 @@ class OrchestrationService:
             event_type=event_type,
             message=message,
         )
+        self._stream_update_cache.pop(workflow_id, None)
         self.event_storage.append(
             workflow_id,
             event,

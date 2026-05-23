@@ -14,9 +14,14 @@ from typing import Any
 import pytest
 
 from tests.e2e.playwright_settings import E2ESettings, load_settings
+from tests.e2e.pages import login
 
 
 REPORTS: list[dict[str, Any]] = []
+
+
+def _is_e2e_item(item: pytest.Item) -> bool:
+    return "e2e" in item.keywords or "tests/e2e" in item.nodeid.replace("\\", "/")
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -24,7 +29,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         return
     skip = pytest.mark.skip(reason="Playwright E2E tests require RUN_E2E=1")
     for item in items:
-        if "e2e" in item.keywords:
+        if _is_e2e_item(item):
             item.add_marker(skip)
 
 
@@ -34,7 +39,7 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo) -> Itera
     report = outcome.get_result()
     if report.when == "call":
         setattr(item, "e2e_report", report)
-        if "e2e" in item.keywords:
+        if _is_e2e_item(item):
             REPORTS.append({"nodeid": item.nodeid, "outcome": report.outcome, "duration": report.duration})
 
 
@@ -103,6 +108,8 @@ def _service_env(settings: E2ESettings) -> dict[str, str]:
             "AUTH_ANALYST_PASSWORD": os.getenv("AUTH_ANALYST_PASSWORD", "analyst123"),
             "AUTH_VIEWER_PASSWORD": os.getenv("AUTH_VIEWER_PASSWORD", "viewer123"),
             "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY", ""),
+            "OPENAI_MAX_ATTEMPTS": "1",
+            "OPENAI_TIMEOUT_SECONDS": "5",
             "STARTUP_VALIDATION_STRICT": "false",
             "STREAMLIT_SERVER_PORT": str(settings.streamlit_port),
         }
@@ -150,6 +157,8 @@ def running_services(e2e_settings: E2ESettings) -> Iterator[E2ESettings]:
             "true",
             "--server.port",
             str(e2e_settings.streamlit_port),
+            "--server.fileWatcherType",
+            "none",
             "--browser.gatherUsageStats",
             "false",
         ],
@@ -219,11 +228,22 @@ def page(browser_context, running_services: E2ESettings, request: pytest.Fixture
 
 @pytest.fixture()
 def logged_in_page(page, running_services: E2ESettings):
-    page.goto(running_services.streamlit_url)
-    page.get_by_role("textbox", name="Password").fill(running_services.admin_password)
-    page.get_by_role("button", name="Login").click()
-    page.get_by_text("Agentic analytics command center").wait_for()
+    login(page, running_services)
     return page
+
+
+@pytest.fixture()
+def sample_csv(e2e_settings: E2ESettings) -> Path:
+    path = e2e_settings.output_dir / "fixtures" / "sample-revenue.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "country,revenue,orders\n"
+        "USA,1200,12\n"
+        "Canada,700,8\n"
+        "Germany,450,5\n",
+        encoding="utf-8",
+    )
+    return path
 
 
 @pytest.fixture()
