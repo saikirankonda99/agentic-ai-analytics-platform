@@ -47,13 +47,17 @@ Local development uses SQLite by default:
 
 ```bash
 DATABASE_URL=sqlite:///data/platform_persistence.db
+WORKFLOW_DATABASE_URL=sqlite:///data/workflow_runtime.db
 ```
 
-Production deployments should set `DATABASE_URL` to PostgreSQL:
+Production deployments should set both persistence URLs to PostgreSQL:
 
 ```bash
 DATABASE_URL=postgresql://app_user:password@postgres:5432/agentic_ai
+WORKFLOW_DATABASE_URL=postgresql://app_user:password@postgres:5432/agentic_ai
 ```
+
+`DATABASE_URL` owns workspace/auth/report persistence. `WORKFLOW_DATABASE_URL` owns workflow history, events, telemetry, agents, and usage persistence. If `WORKFLOW_DATABASE_URL` is omitted, the runtime falls back to `DATABASE_URL` for compatibility and reports that fallback in startup diagnostics.
 
 Schema bootstrap is automatic and tracked in `schema_migrations`. See `docs/postgresql-persistence.md` for the detailed persistence guide.
 

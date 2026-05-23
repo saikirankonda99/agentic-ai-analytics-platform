@@ -2,6 +2,10 @@
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-q -p no:cacheprovider"
+markers = [
+    "e2e: browser-based Playwright end-to-end tests",
+    "openai: tests that require a configured OpenAI API key",
+]
 
 [tool.ruff]
 line-length = 120
