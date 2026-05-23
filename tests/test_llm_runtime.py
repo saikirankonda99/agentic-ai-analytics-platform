@@ -69,3 +69,18 @@ def test_generate_sql_returns_structured_error_telemetry(monkeypatch) -> None:
     assert result["telemetry"]["error_type"] == "RuntimeError"
     assert result["telemetry"]["error_message"] == "boom"
     assert result["telemetry"]["error_details"]["operation"] == "chat.completions.create"
+    assert result["telemetry"]["error_details"]["retry"]["should_retry"] is False
+
+
+def test_generate_sql_uses_shared_retry_backoff(monkeypatch) -> None:
+    completions = _Completions(error=RuntimeError("temporary"))
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(llm, "_client", _Client(completions))
+    monkeypatch.setattr(llm, "DEFAULT_OPENAI_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(llm.time, "sleep", sleep_calls.append)
+
+    result = llm.generate_sql_with_telemetry("List customers", "CREATE TABLE Customer(id INTEGER)")
+
+    assert result["sql"].startswith("ERROR: RuntimeError")
+    assert sleep_calls == [0.4]
+    assert result["telemetry"]["error_details"]["retry"]["max_attempts"] == 2

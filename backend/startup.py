@@ -9,6 +9,7 @@ from backend.config import settings, validate_settings
 from backend.connectors import get_connector_registry
 from backend.logging import get_logger
 from backend.persistence import validate_platform_database
+from backend.storage import validate_workflow_storage
 from backend.telemetry import TELEMETRY_SCHEMA_VERSION, validate_telemetry_payload
 
 logger = get_logger(__name__)
@@ -32,6 +33,7 @@ def run_startup_validation(*, strict: bool | None = None, validate_connectors: b
         _openai_check(),
         _connector_check(validate_connectors=validate_connectors),
         _database_check(),
+        _workflow_database_check(),
         _auth_check(),
         _telemetry_check(),
         _orchestration_check(),
@@ -57,11 +59,17 @@ def run_startup_validation(*, strict: bool | None = None, validate_connectors: b
 
 def _environment_check() -> StartupCheck:
     config = validate_settings(settings)
-    status = "ok" if config.get("valid") else "warning"
+    status = "error" if config.get("errors") else "ok" if config.get("valid") else "warning"
     return StartupCheck(
         name="environment",
         status=status,
-        message="Environment configuration validated." if status == "ok" else "Environment configuration has warnings.",
+        message=(
+            "Environment configuration validated."
+            if status == "ok"
+            else "Environment configuration has errors."
+            if status == "error"
+            else "Environment configuration has warnings."
+        ),
         metadata=config,
     )
 
@@ -114,6 +122,27 @@ def _database_check() -> StartupCheck:
         name="database",
         status=status,
         message="Platform persistence database validated." if status == "ok" else "Platform persistence is degraded; file fallback may be used.",
+        metadata=diagnostics,
+    )
+
+
+def _workflow_database_check() -> StartupCheck:
+    diagnostics = validate_workflow_storage()
+    status = "ok" if diagnostics.get("status") == "ok" else "error"
+    logger.info(
+        "workflow_persistence_selected backend=%s source=%s database_url=%s",
+        diagnostics.get("backend"),
+        diagnostics.get("source"),
+        diagnostics.get("database_url"),
+    )
+    return StartupCheck(
+        name="workflow_database",
+        status=status,
+        message=(
+            "Workflow persistence database validated."
+            if status == "ok"
+            else "Workflow persistence database is unavailable."
+        ),
         metadata=diagnostics,
     )
 

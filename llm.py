@@ -10,6 +10,7 @@ import streamlit as st
 from dotenv import load_dotenv
 from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError, OpenAI
 
+from backend.retry import RetryPolicy, retry_decision, retry_policy
 from graph.cost_tracker import estimate_cost
 
 try:
@@ -27,7 +28,7 @@ DOTENV_LOADED = load_dotenv(DOTENV_PATH)
 DEFAULT_SQL_MODEL = "gpt-4o-mini"
 DEFAULT_FALLBACK_MODEL = os.getenv("OPENAI_FALLBACK_MODEL", "").strip()
 DEFAULT_OPENAI_TIMEOUT_SECONDS = float(os.getenv("OPENAI_TIMEOUT_SECONDS", "30"))
-DEFAULT_OPENAI_MAX_ATTEMPTS = max(int(os.getenv("OPENAI_MAX_ATTEMPTS", "2")), 1)
+DEFAULT_OPENAI_MAX_ATTEMPTS = retry_policy("llm").max_attempts
 OPENAI_TRUST_ENV = os.getenv("OPENAI_TRUST_ENV", "false").lower() in {"1", "true", "yes"}
 
 TokenCallback = Callable[[str, str], None]
@@ -56,6 +57,7 @@ def validate_openai_runtime() -> dict[str, Any]:
         "api_key_configured": bool(get_openai_api_key()),
         "timeout_seconds": DEFAULT_OPENAI_TIMEOUT_SECONDS,
         "max_attempts": DEFAULT_OPENAI_MAX_ATTEMPTS,
+        "retry_policy": _llm_retry_policy().as_dict(),
         "fallback_model": DEFAULT_FALLBACK_MODEL or None,
         "trust_env": OPENAI_TRUST_ENV,
         "proxy_env": _configured_proxy_env(),
@@ -100,11 +102,32 @@ def _exception_chain(exc: BaseException) -> list[dict[str, str]]:
     return chain
 
 
-def _openai_exception_payload(exc: BaseException, *, attempt: int, attempts: int, operation: str) -> dict[str, Any]:
+def _llm_retry_policy() -> RetryPolicy:
+    configured = retry_policy("llm")
+    if DEFAULT_OPENAI_MAX_ATTEMPTS != configured.max_attempts:
+        return RetryPolicy(
+            domain="llm",
+            max_retries=max(0, DEFAULT_OPENAI_MAX_ATTEMPTS - 1),
+            base_delay_seconds=configured.base_delay_seconds,
+            max_delay_seconds=configured.max_delay_seconds,
+            backoff_multiplier=configured.backoff_multiplier,
+        )
+    return configured
+
+
+def _openai_exception_payload(
+    exc: BaseException,
+    *,
+    attempt: int,
+    attempts: int,
+    operation: str,
+    retry: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "operation": operation,
         "attempt": attempt,
         "max_attempts": attempts,
+        "retry": retry or {},
         "error_type": type(exc).__name__,
         "error_message": str(exc),
         "exception_chain": _exception_chain(exc),
@@ -125,8 +148,15 @@ def _openai_exception_payload(exc: BaseException, *, attempt: int, attempts: int
     return payload
 
 
-def _log_openai_exception(exc: BaseException, *, attempt: int, attempts: int, operation: str) -> dict[str, Any]:
-    payload = _openai_exception_payload(exc, attempt=attempt, attempts=attempts, operation=operation)
+def _log_openai_exception(
+    exc: BaseException,
+    *,
+    attempt: int,
+    attempts: int,
+    operation: str,
+    retry: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = _openai_exception_payload(exc, attempt=attempt, attempts=attempts, operation=operation, retry=retry)
     logger.error(
         "openai_request_failed operation=%s attempt=%s/%s error_type=%s error_message=%s details=%s",
         operation,
@@ -161,6 +191,7 @@ def _telemetry(
         "usage_available": usage_available,
         "openai_timeout_seconds": DEFAULT_OPENAI_TIMEOUT_SECONDS,
         "openai_max_attempts": DEFAULT_OPENAI_MAX_ATTEMPTS,
+        "retry_policy": _llm_retry_policy().as_dict(),
     }
     if error:
         telemetry.update(
@@ -170,6 +201,7 @@ def _telemetry(
                 "error_attempt": error.get("attempt"),
                 "error_max_attempts": error.get("max_attempts"),
                 "error_details": error,
+                "retry": error.get("retry", {}),
             }
         )
     return telemetry
@@ -220,10 +252,11 @@ User question:
 
     started = time.perf_counter()
     last_error = None
+    retry_runtime = _llm_retry_policy()
 
     candidates = _model_candidates(model)
     for candidate_model in candidates:
-        for attempt in range(1, DEFAULT_OPENAI_MAX_ATTEMPTS + 1):
+        for attempt in range(1, retry_runtime.max_attempts + 1):
             try:
                 response = get_openai_client().chat.completions.create(
                     **_chat_completion_payload(prompt, candidate_model, 0)
@@ -238,14 +271,21 @@ User question:
                     "telemetry": telemetry,
                 }
             except (APIConnectionError, APITimeoutError, APIStatusError, APIError, httpx.HTTPError, RuntimeError) as exc:
+                retry_status = retry_decision(
+                    domain="llm",
+                    retry_count=attempt - 1,
+                    error=str(exc),
+                    policy=retry_runtime,
+                )
                 last_error = _log_openai_exception(
                     exc,
                     attempt=attempt,
-                    attempts=DEFAULT_OPENAI_MAX_ATTEMPTS,
+                    attempts=retry_runtime.max_attempts,
                     operation="chat.completions.create",
+                    retry=retry_status.as_dict(),
                 )
-                if attempt < DEFAULT_OPENAI_MAX_ATTEMPTS:
-                    time.sleep(0.4 * attempt)
+                if retry_status.should_retry:
+                    time.sleep(retry_status.delay_seconds)
                     continue
                 break
 
@@ -311,9 +351,10 @@ def stream_text_with_telemetry(
 ) -> dict[str, Any]:
     started = time.perf_counter()
     last_error = None
+    retry_runtime = _llm_retry_policy()
 
     for candidate_model in _model_candidates(model):
-        for attempt in range(1, DEFAULT_OPENAI_MAX_ATTEMPTS + 1):
+        for attempt in range(1, retry_runtime.max_attempts + 1):
             content_parts = []
             try:
                 try:
@@ -356,14 +397,21 @@ def stream_text_with_telemetry(
                     "telemetry": telemetry,
                 }
             except (APIConnectionError, APITimeoutError, APIStatusError, APIError, httpx.HTTPError, RuntimeError) as exc:
+                retry_status = retry_decision(
+                    domain="llm",
+                    retry_count=attempt - 1,
+                    error=str(exc),
+                    policy=retry_runtime,
+                )
                 last_error = _log_openai_exception(
                     exc,
                     attempt=attempt,
-                    attempts=DEFAULT_OPENAI_MAX_ATTEMPTS,
+                    attempts=retry_runtime.max_attempts,
                     operation="chat.completions.create.stream",
+                    retry=retry_status.as_dict(),
                 )
-                if attempt < DEFAULT_OPENAI_MAX_ATTEMPTS:
-                    time.sleep(0.4 * attempt)
+                if retry_status.should_retry:
+                    time.sleep(retry_status.delay_seconds)
                     continue
                 break
 

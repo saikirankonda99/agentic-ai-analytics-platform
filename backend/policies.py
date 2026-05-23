@@ -4,6 +4,8 @@ import os
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
+from backend.retry import RetryPolicy, retry_decision, retry_policy
+
 
 PolicyAction = Literal["continue", "retry", "monitor", "degrade", "escalate"]
 
@@ -42,8 +44,9 @@ def _env_float(name: str, default: float) -> float:
 
 
 def default_execution_policy() -> ExecutionPolicy:
+    workflow_retry = retry_policy("workflow")
     return ExecutionPolicy(
-        max_retries=max(0, _env_int("ORCHESTRATION_MAX_RETRIES", 2)),
+        max_retries=workflow_retry.max_retries,
         confidence_floor=min(1.0, max(0.0, _env_float("ORCHESTRATION_CONFIDENCE_FLOOR", 0.55))),
         enable_fallback_model=_env_bool("ORCHESTRATION_ENABLE_FALLBACK_MODEL", True),
         enable_investigation=_env_bool("ORCHESTRATION_ENABLE_INVESTIGATION", True),
@@ -58,12 +61,15 @@ def evaluate_stage_policy(
     retry_count: int = 0,
     error: str | None = None,
     policy: ExecutionPolicy | None = None,
+    retry: RetryPolicy | None = None,
 ) -> dict[str, Any]:
     runtime_policy = policy or default_execution_policy()
+    retry_runtime = retry or retry_policy("workflow")
+    retry_status = retry_decision(domain="workflow", retry_count=retry_count, error=error, policy=retry_runtime)
     action: PolicyAction = "continue"
     reason = "Stage is within configured runtime policy."
 
-    if error and retry_count < runtime_policy.max_retries:
+    if retry_status.should_retry:
         action = "retry"
         reason = "Stage failed and retry budget remains."
     elif error:
@@ -84,6 +90,7 @@ def evaluate_stage_policy(
         "confidence": round(confidence, 3),
         "retry_count": retry_count,
         "max_retries": runtime_policy.max_retries,
+        "retry": retry_status.as_dict(),
         "confidence_floor": runtime_policy.confidence_floor,
     }
 

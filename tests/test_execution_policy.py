@@ -14,6 +14,7 @@ def test_policy_retries_while_budget_remains() -> None:
 
     assert decision["action"] == "retry"
     assert decision["max_retries"] == 2
+    assert decision["retry"]["should_retry"] is True
 
 
 def test_policy_escalates_critical_stage_after_retry_budget() -> None:

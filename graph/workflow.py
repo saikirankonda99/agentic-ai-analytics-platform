@@ -12,6 +12,7 @@ from llm import DEFAULT_SQL_MODEL, generate_sql_with_telemetry, stream_sql_with_
 from workspace import workspace_prompt_block
 from backend.orchestration import default_coordinator, recovery_hint, stage_confidence
 from backend.policies import default_execution_policy, evaluate_stage_policy
+from backend.retry import RetryPolicy, retry_decision, retry_policy
 from backend.sql_intelligence import (
     analyze_result_quality,
     build_schema_intelligence,
@@ -35,7 +36,7 @@ except ImportError:
     LANGGRAPH_AVAILABLE = False
 
 
-MAX_RETRIES = 2
+MAX_RETRIES = retry_policy("workflow").max_retries
 
 
 class WorkflowTrace(TypedDict):
@@ -92,6 +93,8 @@ class WorkflowState(TypedDict, total=False):
     sql_validation: dict[str, Any]
     sql_explanation: dict[str, Any]
     result_quality: dict[str, Any]
+    retry_policy: dict[str, Any]
+    retry_decision: dict[str, Any]
 
 
 WorkflowEventCallback = Callable[[str, WorkflowState, str, str], None]
@@ -185,12 +188,41 @@ def _stage_confidence_update(state: WorkflowState, step: str, value: float) -> d
 
 
 def _policy_decision(state: WorkflowState, step: str, confidence: float, error: str | None = None) -> dict[str, Any]:
+    retry_runtime = _workflow_retry_policy(state)
     return evaluate_stage_policy(
         stage=step,
         confidence=confidence,
         retry_count=state.get("retry_count", 0),
         error=error,
+        retry=retry_runtime,
     )
+
+
+def _workflow_retry_policy(state: WorkflowState | None = None) -> RetryPolicy:
+    configured = retry_policy("workflow")
+    payload = (state or {}).get("retry_policy", {})
+    if isinstance(payload, dict) and payload:
+        return RetryPolicy(
+            domain="workflow",
+            max_retries=int(payload.get("max_retries", configured.max_retries) or 0),
+            base_delay_seconds=float(payload.get("base_delay_seconds", configured.base_delay_seconds) or 0.0),
+            max_delay_seconds=float(payload.get("max_delay_seconds", configured.max_delay_seconds) or 0.0),
+            backoff_multiplier=float(payload.get("backoff_multiplier", configured.backoff_multiplier) or 1.0),
+        )
+    return configured
+
+
+def _workflow_max_retries(state: WorkflowState | None = None) -> int:
+    return _workflow_retry_policy(state).max_retries
+
+
+def _workflow_retry_decision(state: WorkflowState, error: str | None = None) -> dict[str, Any]:
+    return retry_decision(
+        domain="workflow",
+        retry_count=state.get("retry_count", 0),
+        error=error or state.get("error"),
+        policy=_workflow_retry_policy(state),
+    ).as_dict()
 
 
 def _skip_optional_reflection(state: WorkflowState) -> WorkflowState:
@@ -358,7 +390,7 @@ def schema_node(state: WorkflowState) -> WorkflowState:
     except Exception as exc:
         return {
             "error": f"Schema retrieval failed: {exc}",
-            "recovery": recovery_hint(str(exc), state.get("retry_count", 0), MAX_RETRIES),
+            "recovery": recovery_hint(str(exc), state.get("retry_count", 0), _workflow_max_retries(state)),
             "stage_confidence": _stage_confidence_update(state, "schema retrieval", stage_confidence(status="error", has_error=True)),
             "execution_graph": _transition_agent(
                 state,
@@ -489,7 +521,7 @@ def sql_generation_node(
     state: WorkflowState,
     callback: WorkflowEventCallback | None = None,
 ) -> WorkflowState:
-    if state.get("error") and state.get("retry_count", 0) > MAX_RETRIES:
+    if state.get("error") and state.get("retry_count", 0) > _workflow_max_retries(state):
         return {}
 
     started = time.perf_counter()
@@ -512,7 +544,12 @@ def sql_generation_node(
         return {
             "error": sql or "SQL generation failed.",
             "telemetry": _record_telemetry(state, step_telemetry),
-            "recovery": recovery_hint(sql or "SQL generation failed.", state.get("retry_count", 0), MAX_RETRIES),
+            "recovery": recovery_hint(
+                sql or "SQL generation failed.",
+                state.get("retry_count", 0),
+                _workflow_max_retries(state),
+            ),
+            "retry_decision": _workflow_retry_decision(state, sql or "SQL generation failed."),
             "policy_decision": _policy_decision(state, "sql generation", confidence, sql or "SQL generation failed."),
             "stage_confidence": _stage_confidence_update(state, "sql generation", confidence),
             "execution_graph": _transition_agent(
@@ -561,7 +598,8 @@ def validation_node(state: WorkflowState) -> WorkflowState:
             "last_error": error,
             "last_error_source": "validation",
             "last_failed_sql": "",
-            "recovery": recovery_hint(error, state.get("retry_count", 0), MAX_RETRIES),
+            "recovery": recovery_hint(error, state.get("retry_count", 0), _workflow_max_retries(state)),
+            "retry_decision": _workflow_retry_decision(state, error),
             "policy_decision": _policy_decision(state, "validation", confidence, error),
             "stage_confidence": _stage_confidence_update(state, "validation", confidence),
             "execution_graph": _transition_agent(
@@ -585,7 +623,8 @@ def validation_node(state: WorkflowState) -> WorkflowState:
             "last_failed_sql": sql,
             "sql_validation": validation,
             "sql_explanation": explanation,
-            "recovery": recovery_hint(error, state.get("retry_count", 0), MAX_RETRIES),
+            "recovery": recovery_hint(error, state.get("retry_count", 0), _workflow_max_retries(state)),
+            "retry_decision": _workflow_retry_decision(state, error),
             "policy_decision": _policy_decision(state, "validation", confidence, error),
             "stage_confidence": _stage_confidence_update(state, "validation", confidence),
             "execution_graph": _transition_agent(
@@ -654,7 +693,8 @@ def reflection_node(
             "retry_count": retry_count,
             "error": error,
             "telemetry": _record_telemetry(state, step_telemetry),
-            "recovery": recovery_hint(error, retry_count, MAX_RETRIES),
+            "recovery": recovery_hint(error, retry_count, _workflow_max_retries(state)),
+            "retry_decision": _workflow_retry_decision({**state, "retry_count": retry_count, "error": error}, error),
             "policy_decision": _policy_decision(state, "reflection", confidence, error),
             "stage_confidence": _stage_confidence_update(state, "reflection", confidence),
             "execution_graph": _transition_agent(
@@ -668,7 +708,7 @@ def reflection_node(
                 state,
                 "reflection",
                 "error",
-                f"Correction attempt {retry_count}/{MAX_RETRIES} failed: {error}",
+                f"Correction attempt {retry_count}/{_workflow_max_retries(state)} failed: {error}",
             ),
         }
 
@@ -689,7 +729,7 @@ def reflection_node(
             state,
             "reflection",
             "retry",
-            f"Correction attempt {retry_count}/{MAX_RETRIES} generated updated SQL.",
+            f"Correction attempt {retry_count}/{_workflow_max_retries(state)} generated updated SQL.",
         ),
     }
 
@@ -763,7 +803,8 @@ def execution_node(state: WorkflowState) -> WorkflowState:
             "last_error": str(exc),
             "last_error_source": "execution",
             "last_failed_sql": state.get("sql", ""),
-            "recovery": recovery_hint(str(exc), state.get("retry_count", 0), MAX_RETRIES),
+            "recovery": recovery_hint(str(exc), state.get("retry_count", 0), _workflow_max_retries(state)),
+            "retry_decision": _workflow_retry_decision(state, str(exc)),
             "policy_decision": _policy_decision(state, "execution", confidence, error),
             "telemetry": _record_telemetry(
                 state,
@@ -788,7 +829,7 @@ def execution_node(state: WorkflowState) -> WorkflowState:
 
 def _route_after_validation(state: WorkflowState) -> str:
     if state.get("error"):
-        if state.get("retry_count", 0) < MAX_RETRIES:
+        if _workflow_retry_decision(state, state.get("error")).get("should_retry"):
             return "reflection"
         return "end"
     return "execution"
@@ -801,7 +842,7 @@ def reflection_skip_node(state: WorkflowState) -> WorkflowState:
 
 
 def _route_after_execution(state: WorkflowState) -> str:
-    if state.get("error") and state.get("retry_count", 0) < MAX_RETRIES:
+    if state.get("error") and _workflow_retry_decision(state, state.get("error")).get("should_retry"):
         return "reflection"
     return "end"
 
@@ -886,6 +927,8 @@ def _run_linear(
         "stage_confidence": {},
         "recovery": {},
         "execution_policy": default_execution_policy().as_dict(),
+        "retry_policy": retry_policy("workflow").as_dict(),
+        "retry_decision": {},
         "policy_decision": {},
         "schema_intelligence": {},
         "sql_validation": {},
@@ -947,7 +990,7 @@ def _run_linear(
             state.get("trace", [{}])[-1].get("detail", "Validation finished."),
         )
         if state.get("error"):
-            if state.get("retry_count", 0) < MAX_RETRIES:
+            if _workflow_retry_decision(state, state.get("error")).get("should_retry"):
                 _emit_event(callback, "active", state, "reflection", "Repairing SQL after validation failure.")
                 state.update(reflection_node(state, callback=callback))
                 _emit_event(
@@ -981,7 +1024,7 @@ def _run_linear(
             "execution",
             state.get("trace", [{}])[-1].get("detail", "Execution finished."),
         )
-        if state.get("error") and state.get("retry_count", 0) < MAX_RETRIES:
+        if state.get("error") and _workflow_retry_decision(state, state.get("error")).get("should_retry"):
             _emit_event(callback, "active", state, "reflection", "Repairing SQL after execution failure.")
             state.update(reflection_node(state, callback=callback))
             _emit_event(
@@ -1033,6 +1076,8 @@ def run_workflow(
         "stage_confidence": {},
         "recovery": {},
         "execution_policy": default_execution_policy().as_dict(),
+        "retry_policy": retry_policy("workflow").as_dict(),
+        "retry_decision": {},
         "policy_decision": {},
         "schema_intelligence": {},
         "sql_validation": {},
