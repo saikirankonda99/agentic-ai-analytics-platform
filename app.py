@@ -1,6 +1,5 @@
 import os
 import time
-import json
 from datetime import datetime
 
 import pandas as pd
@@ -15,12 +14,10 @@ from analytics_memory import (
 )
 from auth import render_auth_controls, require_login
 from autonomous_insights import analyze_result_set, empty_insight_state, insight_prompt_block
-from backend.connectors import get_connector_registry
-from backend.operations import agent_utilization, operations_summary
-from backend.recommendations import autonomous_recommendations, recommendation_messages
+from backend.operations import agent_utilization
 from backend.services import execute_query_workflow
-from backend.telemetry import filter_telemetry_events, phase_latency_breakdown, telemetry_export_rows, validate_telemetry_payload
-from backend.workspace_inspection import saved_sql_history, workflow_transcripts, workspace_summary
+from backend.telemetry import validate_telemetry_payload
+from backend.workspace_inspection import workspace_summary
 from db import get_schema
 from investigation import (
     empty_investigation_state,
@@ -37,32 +34,41 @@ from monitoring import (
     run_monitoring_checks,
 )
 from workspace import (
-    ONBOARDING_STEPS,
+    as_personal_workspace,
+    as_team_workspace,
     bookmark_query,
     build_user_session,
     default_user_session,
     default_workspace_memory,
-    dismiss_onboarding,
     load_workspace_memory,
     onboarding_progress,
     pin_investigation,
+    record_workspace_activity,
     save_workspace_memory,
+    save_investigation_record,
     save_report_view,
     save_workspace_preferences,
     snapshot_workspace_run,
     start_workspace_session,
     update_onboarding_step,
     bookmark_investigation,
-    retrieve_workspace_context,
     user_can,
+    workspace_memory_fingerprint,
 )
 from semantic import profile_dataframe, profile_schema, recommend_chart_fields, semantic_prompt_block
 from styles.theme import get_theme_css
+from ui.views.common import ViewServices
+from ui.views.connectors import render_api_workspace
+from ui.views.investigations import render_investigations_workspace
+from ui.views.orchestration import render_copilot_workspace, render_operations_center
+from ui.views.onboarding import render_onboarding_workspace_panel, render_quick_actions_panel
+from ui.views.reports import render_report_exports, render_result_explorer
+from ui.views.telemetry import render_agents_workspace, render_monitoring_workspace, render_telemetry_exports
+from ui.views.workspace import render_workspace_history
 from ui.dashboard import (
     build_plotly_figure,
     build_default_operations_figure,
     escape_html,
-    render_chat_history,
     render_activity_feed,
     render_agent_row,
     render_command_bar,
@@ -70,20 +76,16 @@ from ui.dashboard import (
     render_footer,
     render_glass_widgets,
     render_hero,
-    render_history,
     render_kpi_cards,
     next_plotly_key,
     render_active_agent_monitoring,
     render_analytics_memory_card,
     render_autonomous_insight_card,
-    render_empty_state_card,
     render_investigation_card,
     render_orchestration_status_badges,
     render_executive_briefing_card,
     render_monitoring_card,
-    render_onboarding_card,
     render_workspace_card,
-    render_quick_actions_card,
     render_recommendation_card,
     render_recovery_guidance_card,
     render_response_card,
@@ -93,9 +95,7 @@ from ui.dashboard import (
     render_live_execution_panel,
     render_observability_card,
     render_sql_card,
-    render_telemetry_panel,
     render_top_navigation,
-    render_workflow_timeline,
     render_workflow_timeline_cards,
 )
 
@@ -420,6 +420,11 @@ def init_session_state():
         "workspace_memory": default_workspace_memory(default_user_session()),
         "workspace_loaded": False,
         "workspace_session_id": "",
+        "workspace_memory_last_saved_signature": "",
+        "workspace_memory_last_saved_id": "",
+        "workspace_persistence_timings": [],
+        "_render_timings": [],
+        "_render_export_cache": {},
         "result_filter": "",
         "result_sort_column": "",
         "result_sort_ascending": True,
@@ -478,6 +483,11 @@ def clear_session():
     st.session_state.pending_monitoring_run = False
     st.session_state.workspace_memory = default_workspace_memory(st.session_state.get("user_identity", default_user_session()))
     st.session_state.workspace_loaded = False
+    st.session_state.workspace_memory_last_saved_signature = ""
+    st.session_state.workspace_memory_last_saved_id = ""
+    st.session_state.workspace_persistence_timings = []
+    st.session_state._render_timings = []
+    st.session_state._render_export_cache = {}
     st.session_state.result_filter = ""
     st.session_state.result_sort_column = ""
     st.session_state.result_sort_ascending = True
@@ -503,10 +513,11 @@ def current_timestamp():
     return datetime.now().isoformat(timespec="seconds")
 
 
-def configure_workspace_session(user_id, team_id, role):
-    identity = build_user_session(user_id, team_id, role)
-    previous_workspace = st.session_state.get("user_identity", {}).get("workspace_id")
+def configure_workspace_session(user_id, team_id, role, workspace_scope="Personal", display_name=None):
+    identity = select_workspace_identity(build_user_session(user_id, team_id, role, display_name=display_name), workspace_scope)
+    previous_workspace = st.session_state.get("active_workspace_id")
     st.session_state.user_identity = identity
+    st.session_state.active_workspace_id = identity["workspace_id"]
     if not st.session_state.get("workspace_loaded") or previous_workspace != identity["workspace_id"]:
         memory = load_workspace_memory(identity)
         session = start_workspace_session(memory)
@@ -523,12 +534,42 @@ def configure_workspace_session(user_id, team_id, role):
         st.session_state.workspace_memory = memory
         if st.session_state.semantic_memory and not st.session_state.get("semantic_context"):
             st.session_state.semantic_context = next(reversed(st.session_state.semantic_memory.values()))
-        save_workspace_memory(identity, memory)
+        st.session_state.workspace_memory = save_workspace_memory(identity, memory)
+        st.session_state.workspace_memory_last_saved_signature = workspace_memory_fingerprint(st.session_state.workspace_memory)
+        st.session_state.workspace_memory_last_saved_id = identity.get("workspace_id")
+        st.session_state.workspace_persistence_timings = st.session_state.get("workspace_persistence_timings", [])[-19:] + [
+            {"operation": "workspace_load_bootstrap", "elapsed_ms": 0, "timestamp": current_timestamp()}
+        ]
+
+
+def select_workspace_identity(identity, scope):
+    return as_team_workspace(identity) if scope == "Shared team" else as_personal_workspace(identity)
 
 
 def persist_workspace_memory():
     identity = st.session_state.get("user_identity", default_user_session())
-    st.session_state.workspace_memory = save_workspace_memory(identity, st.session_state.get("workspace_memory", {}))
+    memory = st.session_state.get("workspace_memory", {})
+    signature = workspace_memory_fingerprint(memory)
+    if (
+        st.session_state.get("workspace_memory_last_saved_signature") == signature
+        and st.session_state.get("workspace_memory_last_saved_id") == identity.get("workspace_id")
+    ):
+        return memory
+    started_at = time.perf_counter()
+    st.session_state.workspace_memory = save_workspace_memory(identity, memory)
+    st.session_state.workspace_memory_last_saved_signature = workspace_memory_fingerprint(st.session_state.workspace_memory)
+    st.session_state.workspace_memory_last_saved_id = identity.get("workspace_id")
+    timings = st.session_state.get("workspace_persistence_timings", [])
+    timings.append(
+        {
+            "operation": "save_workspace_memory",
+            "workspace_id": identity.get("workspace_id"),
+            "elapsed_ms": round((time.perf_counter() - started_at) * 1000, 2),
+            "timestamp": current_timestamp(),
+        }
+    )
+    st.session_state.workspace_persistence_timings = timings[-20:]
+    return st.session_state.workspace_memory
 
 
 def persist_workspace_snapshot(question, intent, sql, df):
@@ -553,6 +594,7 @@ def persist_investigation_bookmark(note="Operator bookmark"):
         st.session_state.get("workspace_memory", {}),
         st.session_state.get("investigation_state", {}),
         note=note,
+        identity=st.session_state.get("user_identity", default_user_session()),
     )
     st.session_state.workspace_memory = memory
     persist_workspace_memory()
@@ -568,6 +610,7 @@ def persist_query_bookmark(note="Operator bookmark"):
             "rows": len(st.session_state.latest_df) if st.session_state.get("latest_df") is not None else 0,
         },
         note=note,
+        identity=st.session_state.get("user_identity", default_user_session()),
     )
     st.session_state.workspace_memory = memory
     persist_workspace_memory()
@@ -578,6 +621,7 @@ def persist_investigation_pin(note="Pinned for follow-up"):
         st.session_state.get("workspace_memory", {}),
         st.session_state.get("investigation_state", {}),
         note=note,
+        identity=st.session_state.get("user_identity", default_user_session()),
     )
     st.session_state.workspace_memory = memory
     persist_workspace_memory()
@@ -608,10 +652,65 @@ def persist_report_view(title="Executive analytics summary", scope="analytics"):
     memory = save_report_view(
         st.session_state.get("workspace_memory", {}),
         {"title": title, "scope": scope, "summary": payload.get("insight", ""), "payload": payload},
+        identity=st.session_state.get("user_identity", default_user_session()),
     )
     memory = update_onboarding_step(memory, "export_completed")
     st.session_state.workspace_memory = memory
     persist_workspace_memory()
+
+
+def persist_shared_report_view(title="Shared analytics summary", scope="analytics"):
+    if not user_can(st.session_state.get("user_identity"), "share"):
+        st.warning("Your current workspace role does not allow sharing reports.")
+        return False
+    payload = build_workspace_report_payload(scope=scope)
+    memory = save_report_view(
+        st.session_state.get("workspace_memory", {}),
+        {"title": title, "scope": scope, "summary": payload.get("insight", ""), "payload": payload},
+        identity=st.session_state.get("user_identity", default_user_session()),
+        visibility="team",
+    )
+    memory = update_onboarding_step(memory, "export_completed")
+    st.session_state.workspace_memory = memory
+    persist_workspace_memory()
+    return True
+
+
+def persist_shared_query_bookmark(note="Shared with team"):
+    if not user_can(st.session_state.get("user_identity"), "share"):
+        st.warning("Your current workspace role does not allow sharing bookmarks.")
+        return False
+    memory = bookmark_query(
+        st.session_state.get("workspace_memory", {}),
+        {
+            "question": st.session_state.get("latest_question", ""),
+            "intent": st.session_state.get("active_intent", ""),
+            "sql": st.session_state.get("latest_sql", ""),
+            "rows": len(st.session_state.latest_df) if st.session_state.get("latest_df") is not None else 0,
+        },
+        note=note,
+        identity=st.session_state.get("user_identity", default_user_session()),
+        visibility="team",
+    )
+    st.session_state.workspace_memory = memory
+    persist_workspace_memory()
+    return True
+
+
+def persist_shared_investigation(note="Shared with team"):
+    if not user_can(st.session_state.get("user_identity"), "share"):
+        st.warning("Your current workspace role does not allow sharing investigations.")
+        return False
+    memory = save_investigation_record(
+        st.session_state.get("workspace_memory", {}),
+        st.session_state.get("investigation_state", {}),
+        note=note,
+        identity=st.session_state.get("user_identity", default_user_session()),
+        visibility="team",
+    )
+    st.session_state.workspace_memory = memory
+    persist_workspace_memory()
+    return True
 
 
 def persist_workspace_preferences(**preferences):
@@ -1328,185 +1427,7 @@ def render_schema(schema_visible):
             st.code(get_schema())
 
 
-def render_onboarding_workspace_panel():
-    memory = st.session_state.get("workspace_memory", {})
-    progress = onboarding_progress(memory)
-    preferences = memory.get("workspace_preferences", {})
-    if progress.get("dismissed") or not preferences.get("show_onboarding", True):
-        return
-    st.markdown(render_onboarding_card(progress, ONBOARDING_STEPS), unsafe_allow_html=True)
-    c1, c2, c3, c4 = st.columns(4, gap="small")
-    if c1.button("Use sample dataset", help="Keeps the bundled Chinook SQL dataset active.", width="stretch"):
-        memory = update_onboarding_step(st.session_state.get("workspace_memory", {}), "sample_dataset")
-        st.session_state.workspace_memory = memory
-        persist_workspace_memory()
-        st.success("Sample dataset is ready.")
-    if c2.button("Try guided query", help="Loads a good first question into the command workspace.", width="stretch"):
-        st.session_state.command_text = "Revenue by country"
-        memory = update_onboarding_step(st.session_state.get("workspace_memory", {}), "first_query")
-        st.session_state.workspace_memory = memory
-        persist_workspace_memory()
-        st.rerun()
-    if c3.button("Save preferences", help="Restores this workspace route and chart type next time.", width="stretch"):
-        persist_workspace_preferences(
-            last_route=st.session_state.get("workspace_route", "Overview"),
-            preferred_chart_type=st.session_state.get("chart_type", "Bar"),
-        )
-        st.success("Workspace preferences saved.")
-    if c4.button("Hide guide", help="Hide the onboarding guide for this workspace.", width="stretch"):
-        memory = dismiss_onboarding(st.session_state.get("workspace_memory", {}))
-        st.session_state.workspace_memory = memory
-        persist_workspace_memory()
-        st.rerun()
-
-
-def render_quick_actions_panel():
-    memory = st.session_state.get("workspace_memory", {})
-    recent = list(reversed(memory.get("recent_activity", [])[-3:]))
-    quick_actions = [
-        {"label": "Run a guided query", "caption": "Use Revenue by Country, Top Customers, or Top Tracks to populate the workspace."},
-        {"label": "Review saved work", "caption": f'{len(memory.get("query_bookmarks", []))} query bookmarks and {len(memory.get("saved_reports", []))} reports available.'},
-        {"label": "Export current context", "caption": "Download CSV, executive summary, telemetry, or trace from the active workflow."},
-        {"label": "Recover workflow", "caption": "Check recovery guidance when validation, connector, or OpenAI calls fail."},
-    ]
-    st.markdown(render_quick_actions_card(quick_actions), unsafe_allow_html=True)
-    if recent:
-        st.markdown(
-            render_response_card(
-                "Recent Shortcuts",
-                "Fast return paths from your latest workspace activity.",
-                "".join(
-                    f'<div class="workspace-list-item"><div class="observability-label">{escape_html(item.get("activity_type", ""))}</div>'
-                    f'<div class="workspace-body-copy">{escape_html(item.get("title", ""))}<br/>{escape_html(item.get("detail", ""))}</div></div>'
-                    for item in recent
-                ),
-                tone="default-module",
-            ),
-            unsafe_allow_html=True,
-        )
-
-
-def render_result_explorer(df, base_filename="result"):
-    if df is None or df.empty:
-        st.markdown(
-            render_empty_state_card(
-                "Result Explorer",
-                "No rows are available for the current workflow.",
-                [
-                    "Try a broader question such as Revenue by country.",
-                    "Inspect SQL validation guidance before retrying.",
-                    "Upload a CSV if you want to analyze an external dataset.",
-                ],
-            ),
-            unsafe_allow_html=True,
-        )
-        return
-
-    st.markdown(
-        """
-        <div class="workspace-shell compact-shell">
-            <div class="section-title">Result Explorer</div>
-            <div class="section-subtitle">Filter, sort, inspect, and export the active result set.</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    controls = st.columns([1.4, 1, 0.72], gap="small")
-    with controls[0]:
-        search = st.text_input(
-            "Filter results",
-            value=st.session_state.get("result_filter", ""),
-            placeholder="Search visible values...",
-            help="Filters rows by matching any displayed cell value.",
-        )
-        st.session_state.result_filter = search
-    with controls[1]:
-        sort_options = ["None"] + list(df.columns)
-        current_sort = st.session_state.get("result_sort_column") or "None"
-        sort_column = st.selectbox(
-            "Sort by",
-            sort_options,
-            index=sort_options.index(current_sort) if current_sort in sort_options else 0,
-        )
-        st.session_state.result_sort_column = "" if sort_column == "None" else sort_column
-    with controls[2]:
-        ascending = st.toggle("Ascending", value=st.session_state.get("result_sort_ascending", True))
-        st.session_state.result_sort_ascending = ascending
-
-    filtered_df = df
-    if search.strip():
-        needle = search.strip().lower()
-        row_mask = df.astype(str).apply(lambda row: row.str.lower().str.contains(needle, regex=False).any(), axis=1)
-        filtered_df = df[row_mask]
-    if st.session_state.result_sort_column:
-        filtered_df = filtered_df.sort_values(
-            by=st.session_state.result_sort_column,
-            ascending=st.session_state.result_sort_ascending,
-            kind="mergesort",
-        )
-    st.dataframe(filtered_df, width="stretch", height=320)
-    st.caption(f"Showing {len(filtered_df):,} of {len(df):,} rows.")
-    left, right = st.columns(2, gap="small")
-    with left:
-        st.download_button(
-            "Download Filtered CSV",
-            filtered_df.to_csv(index=False).encode("utf-8"),
-            f"{base_filename}-filtered.csv",
-            "text/csv",
-            width="stretch",
-        )
-    with right:
-        st.download_button(
-            "Download Full CSV",
-            df.to_csv(index=False).encode("utf-8"),
-            f"{base_filename}.csv",
-            "text/csv",
-            width="stretch",
-        )
-    progress = onboarding_progress(st.session_state.get("workspace_memory", {}))
-    if not progress["steps"].get("results_reviewed"):
-        memory = update_onboarding_step(st.session_state.get("workspace_memory", {}), "results_reviewed")
-        st.session_state.workspace_memory = memory
-        persist_workspace_memory()
-
-
-def render_report_exports(scope="analytics"):
-    payload = build_workspace_report_payload(scope=scope)
-    summary_text = "\n\n".join(
-        part
-        for part in [
-            f"# {scope.title()} Summary",
-            f"Question: {payload.get('question') or 'No active question'}",
-            f"Rows: {payload.get('rows', 0)}",
-            f"Insight: {payload.get('insight') or 'No insight generated yet.'}",
-            f"SQL:\n{payload.get('sql') or 'No SQL generated.'}",
-        ]
-        if part
-    )
-    left, middle, right = st.columns(3, gap="small")
-    with left:
-        st.download_button(
-            "Executive Summary",
-            summary_text.encode("utf-8"),
-            f"{scope}-executive-summary.md",
-            "text/markdown",
-            width="stretch",
-        )
-    with middle:
-        st.download_button(
-            "Workflow Trace",
-            json.dumps(payload.get("trace", []), indent=2).encode("utf-8"),
-            f"{scope}-workflow-trace.json",
-            "application/json",
-            width="stretch",
-        )
-    with right:
-        if st.button("Save Report View", width="stretch"):
-            persist_report_view(scope=scope)
-            st.success("Report view saved to this workspace.")
-
-
-def render_analytics_workspace(client):
+def render_analytics_workspace(client, services):
     df = st.session_state.latest_df
     telemetry = st.session_state.workflow_telemetry
     exec_time = st.session_state.latest_exec_time
@@ -1538,7 +1459,7 @@ def render_analytics_workspace(client):
         },
     ]
     render_kpi_cards(top_metrics)
-    render_onboarding_workspace_panel()
+    render_onboarding_workspace_panel(services)
 
     widget_data = [
         {
@@ -1801,9 +1722,9 @@ def render_analytics_workspace(client):
                     )
                     chart_rendered = True
             if not chart_rendered:
-                render_result_explorer(df, base_filename="analytics-result")
+                render_result_explorer(df, services, base_filename="analytics-result")
         else:
-            render_result_explorer(df, base_filename="analytics-result")
+            render_result_explorer(df, services, base_filename="analytics-result")
 
     with main_right:
         recommendations = build_ai_recommendations(df, telemetry, st.session_state.workflow_trace)
@@ -1859,717 +1780,44 @@ def render_analytics_workspace(client):
         with lower_left:
             render_sql_card(st.session_state.latest_sql)
         with lower_right:
-            render_result_explorer(df, base_filename="analytics-result")
+            render_result_explorer(df, services, base_filename="analytics-result")
     elif show_sql:
         render_sql_card(st.session_state.latest_sql)
     elif show_secondary_preview:
-        render_result_explorer(df, base_filename="analytics-result")
+        render_result_explorer(df, services, base_filename="analytics-result")
 
     if not df.empty:
-        action_cols = st.columns(3, gap="small")
+        action_cols = st.columns(5, gap="small")
         with action_cols[0]:
             if st.button("Bookmark Query", width="stretch"):
                 persist_query_bookmark()
                 st.success("Query bookmarked.")
         with action_cols[1]:
+            if st.button("Share Query", width="stretch"):
+                if persist_shared_query_bookmark():
+                    st.success("Query shared with this workspace.")
+        with action_cols[2]:
             if st.button("Pin Investigation", width="stretch"):
                 persist_investigation_pin()
                 st.success("Investigation pinned when available.")
-        with action_cols[2]:
+        with action_cols[3]:
+            if st.button("Share Investigation", width="stretch"):
+                if persist_shared_investigation():
+                    st.success("Investigation shared when available.")
+        with action_cols[4]:
             if st.button("Mark Export Complete", width="stretch"):
                 memory = update_onboarding_step(st.session_state.get("workspace_memory", {}), "export_completed")
+                record_workspace_activity(
+                    memory,
+                    activity_type="export_completed",
+                    title="Export completed",
+                    detail=st.session_state.get("latest_question", "Workspace export"),
+                    actor=st.session_state.get("user_identity", default_user_session()),
+                )
                 st.session_state.workspace_memory = memory
                 persist_workspace_memory()
                 st.success("Export step marked complete.")
-        render_report_exports(scope="analytics")
-
-
-def render_copilot_workspace():
-    active_trace = st.session_state.live_trace or st.session_state.workflow_trace
-    active_telemetry = st.session_state.live_telemetry or st.session_state.workflow_telemetry
-    st.markdown(
-        render_orchestration_status_badges(
-            active_trace,
-            active_telemetry,
-            is_executing=st.session_state.get("is_executing", False),
-        ),
-        unsafe_allow_html=True,
-    )
-    left, right = st.columns([0.92, 1.08])
-    with left:
-        render_chat_history(st.session_state.messages)
-        st.markdown(
-            render_active_agent_monitoring(
-                active_trace,
-                active_telemetry,
-                is_executing=st.session_state.get("is_executing", False),
-            ),
-            unsafe_allow_html=True,
-        )
-    with right:
-        render_workflow_timeline(
-            st.session_state.workflow_trace,
-            chart_key=next_plotly_key("workflow_chart_copilot"),
-        )
-        st.markdown(render_workflow_timeline_cards(active_trace), unsafe_allow_html=True)
-        render_telemetry_panel(st.session_state.workflow_telemetry)
-
-        if st.session_state.latest_df is not None:
-            st.markdown(
-                """
-                <div class="section-card compact-card">
-                    <div class="section-title">Active Dataset Snapshot</div>
-                    <div class="section-subtitle">Fast peek at the current result set powering the workspace.</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            st.dataframe(st.session_state.latest_df.head(20), width="stretch", height=280)
-
-
-def render_telemetry_exports(telemetry, trace, scope="workspace"):
-    telemetry = validate_telemetry_payload(telemetry)
-    rows = telemetry_export_rows(telemetry, trace)
-    payload = {
-        "telemetry": telemetry,
-        "trace": trace,
-        "events": st.session_state.get("streaming_workflow", {}).get("telemetry_events", []),
-        "latency_breakdown": phase_latency_breakdown(telemetry),
-        "exported_at": current_timestamp(),
-    }
-    left, right = st.columns(2)
-    with left:
-        st.download_button(
-            "Export Telemetry JSON",
-            json.dumps(payload, indent=2).encode("utf-8"),
-            f"{scope}-telemetry.json",
-            "application/json",
-            width="stretch",
-        )
-    with right:
-        csv_df = pd.DataFrame(rows or [{"correlation_id": telemetry.get("correlation_id"), "step": "none"}])
-        st.download_button(
-            "Export Telemetry CSV",
-            csv_df.to_csv(index=False).encode("utf-8"),
-            f"{scope}-telemetry.csv",
-            "text/csv",
-            width="stretch",
-        )
-
-
-def render_platform_summary():
-    telemetry = validate_telemetry_payload(st.session_state.live_telemetry or st.session_state.workflow_telemetry)
-    trace = st.session_state.live_trace or st.session_state.workflow_trace
-    latest = trace[-1] if trace else {}
-    summary = [
-        {
-            "label": "Correlation ID",
-            "value": telemetry.get("correlation_id", "Pending"),
-            "caption": "Stable workflow identifier for support, logs, and telemetry exports.",
-        },
-        {
-            "label": "Workflow State",
-            "value": latest.get("status", "standby").title(),
-            "caption": latest.get("detail", "No workflow is currently running."),
-        },
-        {
-            "label": "Latency",
-            "value": f'{telemetry.get("latency_ms", 0)} ms',
-            "caption": "Aggregated across model, memory, execution, and investigation phases.",
-        },
-        {
-            "label": "Cost",
-            "value": f'${telemetry.get("cost_usd", 0.0):.4f}',
-            "caption": "Estimated model spend for the active workflow.",
-        },
-    ]
-    render_kpi_cards(summary)
-
-
-def current_operations_summary():
-    return operations_summary(
-        memory=st.session_state.get("workspace_memory", {}),
-        telemetry=st.session_state.live_telemetry or st.session_state.workflow_telemetry,
-        trace=st.session_state.live_trace or st.session_state.workflow_trace,
-        execution_graph=st.session_state.get("latest_execution_graph", {}),
-        is_executing=st.session_state.get("is_executing", False),
-    )
-
-
-def render_health_banner(summary):
-    tone = "observability-module" if summary.get("health") != "degraded" else "insight-module"
-    message = (
-        "Runtime degraded. Inspect OpenAI request diagnostics, recovery telemetry, and recent failed phases."
-        if summary.get("health") == "degraded"
-        else "Runtime healthy. Orchestration telemetry, workspace memory, and diagnostics are available."
-    )
-    st.markdown(
-        render_response_card(
-            "Runtime Health",
-            f'Current posture: {summary.get("health", "unknown").title()}',
-            f'<div class="workspace-body-copy">{escape_html(message)}</div>',
-            tone=tone,
-        ),
-        unsafe_allow_html=True,
-    )
-
-
-def render_operations_center():
-    telemetry = validate_telemetry_payload(st.session_state.live_telemetry or st.session_state.workflow_telemetry)
-    trace = st.session_state.live_trace or st.session_state.workflow_trace
-    memory = st.session_state.get("workspace_memory", {})
-    graph = st.session_state.get("latest_execution_graph", {})
-    summary = current_operations_summary()
-    render_health_banner(summary)
-    render_kpi_cards(
-        [
-            {
-                "label": "Active Workflows",
-                "value": summary["active_workflows"],
-                "caption": "Local workspace workflows currently executing.",
-            },
-            {
-                "label": "Agent Utilization",
-                "value": summary["active_agents"],
-                "caption": "Agents in running or retrying states.",
-            },
-            {
-                "label": "Token Volume",
-                "value": f'{summary["total_tokens"]:,}',
-                "caption": "Persisted and active workflow token usage.",
-            },
-            {
-                "label": "Runtime Cost",
-                "value": f'${summary["estimated_cost_usd"]:.4f}',
-                "caption": "Estimated model spend across workspace telemetry.",
-            },
-        ]
-    )
-    left, right = st.columns([1.2, 0.8], gap="medium")
-    with left:
-        st.markdown(render_workflow_timeline_cards(trace), unsafe_allow_html=True)
-        st.markdown(
-            render_response_card(
-                "Workflow Queue",
-                "Workspace-local queue and replay posture from persisted sessions.",
-                "".join(
-                    f'<div class="workspace-list-item"><div class="observability-label">{escape_html(item.get("run_id", "workflow"))} · {escape_html(item.get("status", "unknown")).upper()}</div>'
-                    f'<div class="workspace-body-copy">Trace events: {escape_html(len(item.get("trace", [])))}</div></div>'
-                    for item in reversed(memory.get("workflow_runs", [])[-8:])
-                )
-                or '<div class="workspace-body-copy">No persisted workflow queue entries yet.</div>',
-                tone="default-module",
-            ),
-            unsafe_allow_html=True,
-        )
-        trend_rows = memory.get("telemetry_summaries", [])[-12:]
-        if trend_rows:
-            trend_df = pd.DataFrame(trend_rows)
-            trend_cols = [col for col in ["latency_ms", "total_tokens", "cost_usd"] if col in trend_df.columns]
-            if trend_cols:
-                st.line_chart(trend_df[trend_cols], height=260)
-        else:
-            st.markdown(
-                render_response_card(
-                    "Telemetry Trends",
-                    "Rolling latency, token, and cost trends will appear after workflow runs.",
-                    '<div class="workspace-body-copy">No telemetry trend history has been captured yet.</div>',
-                    tone="observability-module",
-                ),
-                unsafe_allow_html=True,
-            )
-    with right:
-        st.markdown(render_active_agent_monitoring(trace, telemetry, st.session_state.get("is_executing", False)), unsafe_allow_html=True)
-        st.markdown(
-            render_execution_graph_card(
-                graph,
-                st.session_state.get("latest_stage_confidence", {}),
-                st.session_state.get("latest_recovery", {}),
-                st.session_state.get("latest_policy_decision", {}),
-            ),
-            unsafe_allow_html=True,
-        )
-        recommendation_cards = autonomous_recommendations(
-            operations=summary,
-            memory=memory,
-            investigation=st.session_state.get("investigation_state"),
-            telemetry=telemetry,
-        )
-        st.markdown(render_recommendation_card(recommendation_messages(recommendation_cards)), unsafe_allow_html=True)
-        render_telemetry_exports(telemetry, trace, scope="operations")
-        render_report_exports(scope="operations")
-
-
-def render_execution_graph_card(graph, confidence, recovery, policy_decision=None):
-    nodes = graph.get("nodes", []) if graph else []
-    body = "".join(
-        (
-            f'<div class="workspace-list-item">'
-            f'<div class="observability-label">{escape_html(node.get("name", ""))} · {escape_html(node.get("status", "queued")).upper()}</div>'
-            f'<div class="workspace-body-copy">Phase: {escape_html(node.get("phase", ""))}<br/>'
-            f'Dependencies: {escape_html(", ".join(node.get("dependencies", [])) or "none")}<br/>'
-            f'Confidence: {escape_html(node.get("confidence", 0.0))}</div>'
-            f"</div>"
-        )
-        for node in nodes
-    )
-    if recovery:
-        body += (
-            f'<div class="workspace-list-item">'
-            f'<div class="observability-label">Recovery · {escape_html(recovery.get("strategy", "none"))}</div>'
-            f'<div class="workspace-body-copy">{escape_html(recovery.get("message", ""))}</div>'
-            f"</div>"
-        )
-    if confidence:
-        body += (
-            '<div class="workspace-list-item">'
-            '<div class="observability-label">Stage Confidence</div>'
-            '<div class="workspace-body-copy">'
-            + "<br/>".join(f"{escape_html(k)}: {escape_html(v)}" for k, v in confidence.items())
-            + "</div></div>"
-        )
-    if policy_decision:
-        body += (
-            '<div class="workspace-list-item">'
-            f'<div class="observability-label">Policy Decision · {escape_html(policy_decision.get("action", "continue")).upper()}</div>'
-            f'<div class="workspace-body-copy">{escape_html(policy_decision.get("reason", ""))}<br/>'
-            f'Stage: {escape_html(policy_decision.get("stage", ""))}<br/>'
-            f'Retry Budget: {escape_html(policy_decision.get("retry_count", 0))}/{escape_html(policy_decision.get("max_retries", 0))}</div>'
-            "</div>"
-        )
-    return render_response_card(
-        "Execution Graph",
-        "Coordinator view of agent dependencies, stage state, retry posture, and confidence scores.",
-        body or '<div class="workspace-body-copy">No execution graph has been created yet.</div>',
-        tone="observability-module",
-    )
-
-
-def render_memory_inspection_card(memory):
-    categories = {
-        "schema_memory": len((memory or {}).get("semantic_dataset_memory", {})),
-        "workflow_memory": len((memory or {}).get("workflow_runs", [])),
-        "investigation_memory": len((memory or {}).get("investigations", [])),
-        "telemetry_memory": len((memory or {}).get("telemetry_summaries", [])),
-    }
-    recent_queries = retrieve_workspace_context(memory or {}, st.session_state.get("latest_question", ""), limit=5)
-    body = (
-        '<div class="observability-grid">'
-        + "".join(
-            f'<div class="observability-metric"><div class="observability-label">{escape_html(key)}</div>'
-            f'<div class="observability-value">{escape_html(value)}</div></div>'
-            for key, value in categories.items()
-        )
-        + "</div>"
-    )
-    body += "".join(
-        f'<div class="workspace-list-item"><div class="observability-label">Retrieval candidate · {escape_html(item.get("run_id", ""))}</div>'
-        f'<div class="workspace-body-copy">{escape_html(item.get("question", ""))}<br/>Rows: {escape_html(item.get("rows", 0))}<br/>'
-        f'Confidence: {escape_html(item.get("retrieval_confidence", 0.0))}</div></div>'
-        for item in recent_queries
-    )
-    return render_response_card(
-        "Semantic Memory Inspection",
-        "Categorized workspace memory with deduplicated recent retrieval candidates.",
-        body,
-        tone="default-module",
-    )
-
-
-def render_session_replay_card(memory):
-    sessions = list(reversed((memory or {}).get("sessions", [])[-5:]))
-    body = "".join(
-        (
-            f'<div class="workspace-list-item">'
-            f'<div class="observability-label">{escape_html(session.get("session_id", ""))} · {escape_html(session.get("status", ""))}</div>'
-            f'<div class="workspace-body-copy">Started: {escape_html(session.get("started_at", ""))}<br/>'
-            f'Workflows: {escape_html(len(session.get("workflow_ids", [])))}<br/>'
-            f'Transcripts: {escape_html(len(session.get("transcripts", [])))}</div>'
-            f"</div>"
-        )
-        for session in sessions
-    )
-    return render_response_card(
-        "Session Replay",
-        "Persisted workspace sessions and exportable workflow transcript counts.",
-        body or '<div class="workspace-body-copy">No persisted sessions yet.</div>',
-        tone="summary-module",
-    )
-
-
-def render_investigations_workspace():
-    render_platform_summary()
-    identity = st.session_state.get("user_identity")
-    memory = st.session_state.get("workspace_memory", {})
-    current = st.session_state.get("investigation_state")
-    stored = memory.get("investigations", [])
-    left, right = st.columns([1.15, 0.85], gap="medium")
-    with left:
-        st.markdown(render_investigation_card(current), unsafe_allow_html=True)
-        bookmark_col, pin_col = st.columns(2, gap="small")
-        with bookmark_col:
-            if st.button("Bookmark Investigation", width="stretch"):
-                persist_investigation_bookmark()
-                st.success("Investigation bookmarked for this workspace session.")
-        with pin_col:
-            if st.button("Pin Investigation", width="stretch"):
-                persist_investigation_pin()
-                st.success("Investigation pinned for follow-up.")
-        st.markdown(render_workflow_timeline_cards(st.session_state.live_trace or st.session_state.workflow_trace), unsafe_allow_html=True)
-    with right:
-        st.markdown(
-            render_response_card(
-                "Investigation Sessions",
-                "Persisted autonomous drill-down sessions for this workspace.",
-                "".join(
-                    f'<div class="workspace-list-item"><div class="observability-label">{escape_html(item.get("run_id", "run"))}</div>'
-                    f'<div class="workspace-body-copy">{escape_html(item.get("summary", ""))}</div></div>'
-                    for item in reversed(stored[-6:])
-                )
-                or '<div class="workspace-body-copy">No persisted investigation sessions yet.</div>',
-                tone="insight-module",
-            ),
-            unsafe_allow_html=True,
-        )
-        st.markdown(render_workspace_card(identity, memory), unsafe_allow_html=True)
-        st.markdown(render_saved_assets_card(memory), unsafe_allow_html=True)
-        st.markdown(render_semantic_profile_card(st.session_state.get("semantic_context")), unsafe_allow_html=True)
-        st.markdown(render_session_replay_card(memory), unsafe_allow_html=True)
-        recommendation_df = st.session_state.latest_df if st.session_state.latest_df is not None else pd.DataFrame()
-        st.markdown(
-            render_recommendation_card(
-                build_ai_recommendations(
-                    recommendation_df,
-                    st.session_state.workflow_telemetry,
-                    st.session_state.workflow_trace,
-                )
-            ),
-            unsafe_allow_html=True,
-        )
-
-
-def render_monitoring_workspace():
-    render_platform_summary()
-    memory = st.session_state.get("workspace_memory", {})
-    telemetry_runs = memory.get("telemetry_summaries", [])
-    failed_runs = [item for item in telemetry_runs if item.get("error_type")]
-    avg_latency = (
-        sum(item.get("latency_ms", 0) for item in telemetry_runs) / len(telemetry_runs)
-        if telemetry_runs
-        else 0
-    )
-    render_kpi_cards(
-        [
-            {
-                "label": "Workflow Throughput",
-                "value": len(memory.get("workflow_runs", [])),
-                "caption": "Persisted workflow runs in this workspace.",
-            },
-            {
-                "label": "Rolling Latency",
-                "value": f"{avg_latency:.0f} ms" if telemetry_runs else "Standby",
-                "caption": "Average latency across persisted telemetry summaries.",
-            },
-            {
-                "label": "Error Rate",
-                "value": f"{(len(failed_runs) / len(telemetry_runs) * 100):.1f}%" if telemetry_runs else "0.0%",
-                "caption": "Share of runs with captured error telemetry.",
-            },
-            {
-                "label": "Runtime Uptime",
-                "value": "Online",
-                "caption": "Streamlit session and backend diagnostics are responding.",
-            },
-        ]
-    )
-    left, right = st.columns([1, 1], gap="medium")
-    with left:
-        st.markdown(
-            render_monitoring_card(
-                st.session_state.get("monitoring_state"),
-                st.session_state.get("monitoring_config"),
-            ),
-            unsafe_allow_html=True,
-        )
-        st.markdown(render_executive_briefing_card(st.session_state.get("executive_briefing")), unsafe_allow_html=True)
-    with right:
-        st.markdown(
-            render_response_card(
-                "Monitoring Run History",
-                "Recent scheduled KPI runs with severity and briefing summaries.",
-                "".join(
-                    f'<div class="workspace-list-item"><div class="observability-label">{escape_html(item.get("time", ""))} · {escape_html(item.get("severity", "info")).upper()}</div>'
-                    f'<div class="workspace-body-copy">{escape_html(item.get("summary", ""))}</div></div>'
-                    for item in reversed(st.session_state.get("monitoring_runs", [])[-8:])
-                )
-                or '<div class="workspace-body-copy">No monitoring run history yet.</div>',
-                tone="observability-module",
-            ),
-            unsafe_allow_html=True,
-        )
-        render_telemetry_exports(st.session_state.workflow_telemetry, st.session_state.workflow_trace, scope="monitoring")
-
-
-def render_agents_workspace():
-    telemetry = validate_telemetry_payload(st.session_state.live_telemetry or st.session_state.workflow_telemetry)
-    trace = st.session_state.live_trace or st.session_state.workflow_trace
-    render_platform_summary()
-    left, right = st.columns([0.92, 1.08], gap="medium")
-    with left:
-        st.markdown(
-            render_active_agent_monitoring(
-                trace,
-                telemetry,
-                is_executing=st.session_state.get("is_executing", False),
-            ),
-            unsafe_allow_html=True,
-        )
-        st.markdown(render_analytics_memory_card(st.session_state.get("analytics_memory")), unsafe_allow_html=True)
-        st.markdown(render_memory_inspection_card(st.session_state.get("workspace_memory", {})), unsafe_allow_html=True)
-        streams = st.session_state.get("live_assistant_streams", {})
-        st.markdown(
-            render_response_card(
-                "Agent Reasoning Snapshots",
-                "Short-lived streamed artifacts captured during generation, reflection, investigation, and insight phases.",
-                "".join(
-                    f'<div class="workspace-list-item"><div class="observability-label">{escape_html(phase)}</div>'
-                    f'<div class="workspace-body-copy">{escape_html(content).replace(chr(10), "<br/>")}</div></div>'
-                    for phase, content in streams.items()
-                    if content
-                )
-                or '<div class="workspace-body-copy">No reasoning snapshots are active for the current workflow.</div>',
-                tone="insight-module",
-            ),
-            unsafe_allow_html=True,
-        )
-    with right:
-        st.markdown(
-            render_execution_graph_card(
-                st.session_state.get("latest_execution_graph", {}),
-                st.session_state.get("latest_stage_confidence", {}),
-                st.session_state.get("latest_recovery", {}),
-                st.session_state.get("latest_policy_decision", {}),
-            ),
-            unsafe_allow_html=True,
-        )
-        validation = st.session_state.get("latest_sql_validation", {})
-        explanation = st.session_state.get("latest_sql_explanation", {})
-        quality = st.session_state.get("latest_result_quality", {})
-        schema_intelligence = st.session_state.get("latest_schema_intelligence", {})
-        st.markdown(
-            render_response_card(
-                "SQL Intelligence",
-                "Validation status, schema reasoning, query risk, explanation, and result quality.",
-                f'<div class="workspace-body-copy">Validation: {escape_html(validation.get("status", "pending"))}<br/>'
-                f'Risk: {escape_html(validation.get("risk_level", "unknown"))} ({escape_html(validation.get("risk_score", 0))})<br/>'
-                f'Confidence: {escape_html(validation.get("confidence", 0))}<br/>'
-                f'Schema confidence: {escape_html(schema_intelligence.get("confidence", 0))}<br/>'
-                f'Intent: {escape_html(explanation.get("intent_summary", ""))}<br/>'
-                f'Result quality: {escape_html(quality.get("status", "pending"))} ({escape_html(quality.get("confidence", 0))})</div>'
-                + "".join(
-                    f'<div class="workspace-list-item"><div class="observability-label">Warning</div><div class="workspace-body-copy">{escape_html(item)}</div></div>'
-                    for item in (validation.get("warnings", []) + quality.get("warnings", []))[:5]
-                ),
-                tone="summary-module",
-            ),
-            unsafe_allow_html=True,
-        )
-        st.markdown(render_workflow_timeline_cards(trace), unsafe_allow_html=True)
-        breakdown = phase_latency_breakdown(telemetry)
-        st.markdown(
-            render_response_card(
-                "Latency Breakdown",
-                "Per-phase runtime profile for model calls, retrieval, execution, and follow-up agents.",
-                "".join(
-                    f'<div class="workspace-list-item"><div class="observability-label">{escape_html(item["phase"])}</div>'
-                    f'<div class="workspace-body-copy">{escape_html(item["latency_ms"])} ms · {escape_html(item["tokens"])} tokens · {escape_html(item["status"])}</div></div>'
-                    for item in breakdown
-                )
-                or '<div class="workspace-body-copy">Run a workflow to populate latency breakdowns.</div>',
-                tone="observability-module",
-            ),
-            unsafe_allow_html=True,
-        )
-        render_telemetry_exports(telemetry, trace, scope="agents")
-
-        utilization = agent_utilization(st.session_state.get("latest_execution_graph", {}))
-        if utilization:
-            st.dataframe(pd.DataFrame(utilization), width="stretch", height=220)
-
-
-def render_api_workspace():
-    telemetry = validate_telemetry_payload(st.session_state.live_telemetry or st.session_state.workflow_telemetry)
-    trace = st.session_state.live_trace or st.session_state.workflow_trace
-    runtime = st.session_state.get("openai_runtime", {})
-    memory = st.session_state.get("workspace_memory", {})
-    workspace_report = workspace_summary(memory)
-    connector_diagnostics = get_connector_registry().diagnostics(validate=True)
-    left, right = st.columns([1, 1], gap="medium")
-    with left:
-        st.markdown(
-            render_response_card(
-                "API Runtime Diagnostics",
-                "Operational posture for backend, OpenAI runtime, proxy handling, and environment loading.",
-                f'<div class="observability-grid">{escape_html("")}</div>'
-                f'<div class="workspace-body-copy">Dotenv loaded: {escape_html(runtime.get("dotenv_loaded"))}<br/>'
-                f'API key configured: {escape_html(runtime.get("api_key_configured"))}<br/>'
-                f'Timeout: {escape_html(runtime.get("timeout_seconds"))}s<br/>'
-                f'Proxy trust: {escape_html(runtime.get("trust_env"))}<br/>'
-                f'Correlation ID: {escape_html(telemetry.get("correlation_id", "Pending"))}</div>',
-                tone="observability-module",
-            ),
-            unsafe_allow_html=True,
-        )
-        st.code(
-            "GET /health\nGET /ready\nGET /diagnostics\nPOST /execute\nGET /workflow/{workflow_id}\nGET /workflow/{workflow_id}/events\nGET /workflow/{workflow_id}/stream\nGET /connectors\nGET /connectors/{connector_id}/health\nGET /connectors/{connector_id}/schema\nPOST /connectors/validate\nGET /workspace/{workspace_id}/inspection\nGET /workspace/{workspace_id}/transcripts\nGET /workspace/{workspace_id}/sql-history",
-            language="http",
-        )
-        connector_rows = []
-        for connector in connector_diagnostics.get("connectors", []):
-            health = connector_diagnostics.get("health", {}).get(connector.get("connector_id"), {})
-            connector_rows.append(
-                f'<div class="workspace-list-item"><div class="observability-label">{escape_html(connector.get("name"))} · {escape_html(connector.get("kind"))}</div>'
-                f'<div class="workspace-body-copy">Status: {escape_html(health.get("status", "unknown"))}<br/>'
-                f'Latency: {escape_html(health.get("latency_ms", 0))} ms<br/>'
-                f'Enabled: {escape_html(connector.get("enabled"))}<br/>'
-                f'Message: {escape_html(health.get("message", ""))}</div></div>'
-            )
-        st.markdown(
-            render_response_card(
-                "Connector Diagnostics",
-                "Startup validation, health, schema readiness, and safe configuration posture.",
-                "".join(connector_rows)
-                + (
-                    '<div class="workspace-body-copy">'
-                    f'PostgreSQL configured: {escape_html(connector_diagnostics.get("configuration", {}).get("postgres_configured"))}<br/>'
-                    f'PostgreSQL schema: {escape_html(connector_diagnostics.get("configuration", {}).get("postgres_schema"))}<br/>'
-                    f'SQLite path: {escape_html(connector_diagnostics.get("configuration", {}).get("sqlite_database_path"))}'
-                    "</div>"
-                ),
-                tone="summary-module",
-            ),
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            render_response_card(
-                "Workspace Inspection",
-                "Session, transcript, saved SQL, memory, and telemetry rollup for the active workspace.",
-                f'<div class="workspace-body-copy">Workspace: {escape_html(workspace_report.get("workspace_id"))}<br/>'
-                f'Sessions: {escape_html(workspace_report.get("session_count"))}<br/>'
-                f'Transcripts: {escape_html(workspace_report.get("transcript_count"))}<br/>'
-                f'Saved SQL: {escape_html(len(saved_sql_history(memory)))}<br/>'
-                f'Error Rate: {escape_html(workspace_report.get("telemetry", {}).get("error_rate", 0.0))}%</div>',
-                tone="summary-module",
-            ),
-            unsafe_allow_html=True,
-        )
-        st.download_button(
-            "Export Workspace Report",
-            data=json.dumps(
-                {
-                    "summary": workspace_report,
-                    "transcripts": workflow_transcripts(memory),
-                    "sql_history": saved_sql_history(memory),
-                },
-                indent=2,
-            ),
-            file_name="workspace-report.json",
-            mime="application/json",
-            width="stretch",
-        )
-    with right:
-        st.markdown(render_observability_card(telemetry, trace), unsafe_allow_html=True)
-        events = st.session_state.get("streaming_workflow", {}).get("telemetry_events", [])
-        search = st.text_input("Telemetry search", placeholder="Filter runtime events by phase, status, or message...")
-        filtered_events = filter_telemetry_events(events, query=search)
-        st.markdown(
-            render_response_card(
-                "Telemetry Event Search",
-                "Filtered runtime events from the active Streamlit orchestration session.",
-                "".join(
-                    f'<div class="workspace-list-item"><div class="observability-label">{escape_html(item.get("phase", ""))} · {escape_html(item.get("status", ""))}</div>'
-                    f'<div class="workspace-body-copy">{escape_html(item.get("message", ""))}</div></div>'
-                    for item in filtered_events[-8:]
-                )
-                or '<div class="workspace-body-copy">No matching telemetry events for the current workflow.</div>',
-                tone="default-module",
-            ),
-            unsafe_allow_html=True,
-        )
-        render_telemetry_exports(telemetry, trace, scope="api")
-
-
-def render_workspace_history():
-    memory = st.session_state.get("workspace_memory", {})
-    render_history(st.session_state.history)
-    st.markdown(render_saved_assets_card(memory), unsafe_allow_html=True)
-    left, right = st.columns([1, 1], gap="medium")
-    with left:
-        saved_queries = saved_sql_history(memory, limit=8)
-        st.markdown(
-            render_response_card(
-                "Saved Query History",
-                "User-scoped SQL history restored from persistent workspace memory.",
-                "".join(
-                    f'<div class="workspace-list-item"><div class="observability-label">{escape_html(item.get("timestamp", ""))}</div>'
-                    f'<div class="workspace-body-copy">{escape_html(item.get("question", ""))}<br/><code>{escape_html(item.get("sql", ""))}</code></div></div>'
-                    for item in saved_queries
-                )
-                or '<div class="workspace-body-copy">No saved SQL history for this workspace.</div>',
-                tone="summary-module",
-            ),
-            unsafe_allow_html=True,
-        )
-    with right:
-        recent_activity = list(reversed(memory.get("recent_activity", [])[-8:]))
-        st.markdown(
-            render_response_card(
-                "Recent Activity",
-                "Workspace restoration, saved investigations, saved SQL, and workflow persistence events.",
-                "".join(
-                    f'<div class="workspace-list-item"><div class="observability-label">{escape_html(item.get("activity_type", ""))} · {escape_html(item.get("timestamp", ""))}</div>'
-                    f'<div class="workspace-body-copy">{escape_html(item.get("title", ""))}<br/>{escape_html(item.get("detail", ""))}</div></div>'
-                    for item in recent_activity
-                )
-                or '<div class="workspace-body-copy">No recent workspace activity yet.</div>',
-                tone="default-module",
-            ),
-            unsafe_allow_html=True,
-        )
-    lower_left, lower_right = st.columns([1, 1], gap="medium")
-    with lower_left:
-        bookmarks = list(reversed(memory.get("query_bookmarks", [])[-8:]))
-        st.markdown(
-            render_response_card(
-                "Bookmarked Queries",
-                "Reusable SQL workflows saved for repeat analysis.",
-                "".join(
-                    f'<div class="workspace-list-item"><div class="observability-label">{escape_html(item.get("created_at", ""))}</div>'
-                    f'<div class="workspace-body-copy">{escape_html(item.get("question", ""))}<br/><code>{escape_html(item.get("sql", ""))}</code></div></div>'
-                    for item in bookmarks
-                )
-                or '<div class="workspace-body-copy">No query bookmarks yet.</div>',
-                tone="recommendation-module",
-            ),
-            unsafe_allow_html=True,
-        )
-    with lower_right:
-        reports = list(reversed(memory.get("saved_reports", [])[-8:]))
-        st.markdown(
-            render_response_card(
-                "Saved Report Views",
-                "Executive summaries and report snapshots retained for workspace continuity.",
-                "".join(
-                    f'<div class="workspace-list-item"><div class="observability-label">{escape_html(item.get("scope", ""))} · {escape_html(item.get("created_at", ""))}</div>'
-                    f'<div class="workspace-body-copy">{escape_html(item.get("title", ""))}<br/>{escape_html(item.get("summary", ""))}</div></div>'
-                    for item in reports
-                )
-                or '<div class="workspace-body-copy">No saved report views yet.</div>',
-                tone="summary-module",
-            ),
-            unsafe_allow_html=True,
-        )
-    render_report_exports(scope="workspace")
+        render_report_exports(services, scope="analytics")
 
 
 st.set_page_config(
@@ -2590,9 +1838,11 @@ selected_nav = render_top_navigation(st.session_state.get("top_navigation", "Ove
 st.session_state.workspace_route = selected_nav
 sidebar_state = render_sidebar()
 configure_workspace_session(
-    authenticated_identity["user_id"],
-    authenticated_identity["team_id"],
-    authenticated_identity["role"],
+    sidebar_state["workspace_user"],
+    sidebar_state["workspace_team"],
+    sidebar_state["workspace_role"],
+    workspace_scope=sidebar_state["workspace_scope"],
+    display_name=authenticated_identity.get("display_name"),
 )
 render_auth_controls()
 st.session_state.monitoring_config = {
@@ -2618,22 +1868,45 @@ if sidebar_state["uploaded_file"] is not None:
 
 render_schema(sidebar_state["show_schema"])
 
+view_services = ViewServices(
+    ensure_schema_semantics=ensure_schema_semantics,
+    persist_workspace_memory=persist_workspace_memory,
+    persist_workspace_preferences=persist_workspace_preferences,
+    build_workspace_report_payload=build_workspace_report_payload,
+    persist_report_view=persist_report_view,
+    run_monitoring_workflow=run_monitoring_workflow,
+    run_query=run_query,
+    is_scalar_result=is_scalar_result,
+    can_render_chart=can_render_chart,
+    build_column_options=build_column_options,
+    get_numeric_column_options=get_numeric_column_options,
+    current_chart_state=current_chart_state,
+    build_ai_recommendations=build_ai_recommendations,
+    persist_query_bookmark=persist_query_bookmark,
+    persist_investigation_pin=persist_investigation_pin,
+    persist_investigation_bookmark=persist_investigation_bookmark,
+    persist_shared_query_bookmark=persist_shared_query_bookmark,
+    persist_shared_report_view=persist_shared_report_view,
+    persist_shared_investigation=persist_shared_investigation,
+    current_timestamp=current_timestamp,
+)
+
 nav = st.session_state.get("workspace_route") or sidebar_state["nav"]
 if nav == "Overview":
-    render_analytics_workspace(client)
+    render_analytics_workspace(client, view_services)
 elif nav == "Operations":
-    render_operations_center()
+    render_operations_center(view_services, render_telemetry_exports)
 elif nav == "Copilot":
     render_copilot_workspace()
 elif nav == "Investigations":
-    render_investigations_workspace()
+    render_investigations_workspace(view_services)
 elif nav == "Monitoring":
-    render_monitoring_workspace()
+    render_monitoring_workspace(view_services)
 elif nav == "Agents":
-    render_agents_workspace()
+    render_agents_workspace(view_services, agent_utilization)
 elif nav == "API":
-    render_api_workspace()
+    render_api_workspace(view_services, render_telemetry_exports)
 else:
-    render_workspace_history()
+    render_workspace_history(view_services)
 
 render_footer()

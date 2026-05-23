@@ -13,8 +13,8 @@ BASE_DIR = Path(__file__).resolve().parent
 WORKSPACE_DIR = BASE_DIR / "data" / "workspaces"
 
 ROLE_CAPABILITIES = {
-    "admin": ["query", "monitor", "investigate", "brief", "manage_workspace"],
-    "analyst": ["query", "monitor", "investigate", "brief"],
+    "admin": ["query", "monitor", "investigate", "brief", "manage_workspace", "share", "edit_shared"],
+    "analyst": ["query", "monitor", "investigate", "brief", "share"],
     "viewer": ["query", "brief"],
 }
 
@@ -53,6 +53,8 @@ def default_user_session() -> dict[str, Any]:
         "display_name": "Local Analyst",
         "team_id": "default-team",
         "workspace_id": "default-team.local.user",
+        "workspace_scope": "personal",
+        "workspace_label": "Personal workspace",
         "role": "admin",
         "auth_provider": "local-dev",
         "authenticated": True,
@@ -63,6 +65,9 @@ def default_workspace_memory(identity: dict[str, Any] | None = None) -> dict[str
     identity = identity or default_user_session()
     return {
         "workspace_id": identity.get("workspace_id", "default-team.local.user"),
+        "workspace_scope": identity.get("workspace_scope", "personal"),
+        "workspace_label": identity.get("workspace_label", "Personal workspace"),
+        "owner_id": identity.get("user_id", "local.user"),
         "team_id": identity.get("team_id", "default-team"),
         "members": {
             identity.get("user_id", "local.user"): {
@@ -82,6 +87,7 @@ def default_workspace_memory(identity: dict[str, Any] | None = None) -> dict[str
         "pinned_investigations": [],
         "saved_reports": [],
         "recent_activity": [],
+        "collaboration_events": [],
         "workspace_preferences": {
             "default_route": "Overview",
             "compact_results": False,
@@ -108,6 +114,10 @@ def workspace_id(team_id: str, user_id: str) -> str:
     return f"{_safe_id(team_id)}.{_safe_id(user_id)}"
 
 
+def team_workspace_id(team_id: str) -> str:
+    return f"{_safe_id(team_id)}.shared"
+
+
 def build_user_session(user_id: str, team_id: str, role: str, display_name: str | None = None) -> dict[str, Any]:
     safe_role = role if role in ROLE_CAPABILITIES else "viewer"
     return {
@@ -115,9 +125,30 @@ def build_user_session(user_id: str, team_id: str, role: str, display_name: str 
         "display_name": display_name or user_id or "Local Analyst",
         "team_id": _safe_id(team_id or "default-team"),
         "workspace_id": workspace_id(team_id or "default-team", user_id or "local.user"),
+        "workspace_scope": "personal",
+        "workspace_label": "Personal workspace",
         "role": safe_role,
         "auth_provider": "session-local",
         "authenticated": True,
+    }
+
+
+def as_team_workspace(identity: dict[str, Any]) -> dict[str, Any]:
+    team_id = identity.get("team_id", "default-team")
+    return {
+        **identity,
+        "workspace_id": team_workspace_id(team_id),
+        "workspace_scope": "team",
+        "workspace_label": f"{team_id} shared workspace",
+    }
+
+
+def as_personal_workspace(identity: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **identity,
+        "workspace_id": workspace_id(identity.get("team_id", "default-team"), identity.get("user_id", "local.user")),
+        "workspace_scope": "personal",
+        "workspace_label": "Personal workspace",
     }
 
 
@@ -160,6 +191,14 @@ def _normalize_workspace_memory(identity: dict[str, Any], stored: dict[str, Any]
         identity["user_id"],
         {"display_name": identity.get("display_name", identity["user_id"]), "role": identity.get("role", "viewer")},
     )
+    memory.setdefault("collaboration_events", [])
+    memory.setdefault("owner_id", identity.get("user_id", "local.user"))
+    if memory.get("workspace_id", "").endswith(".shared"):
+        memory["workspace_scope"] = "team"
+        memory["workspace_label"] = f"{memory.get('team_id', identity.get('team_id', 'default-team'))} shared workspace"
+    else:
+        memory.setdefault("workspace_scope", identity.get("workspace_scope", "personal"))
+        memory.setdefault("workspace_label", identity.get("workspace_label", "Personal workspace"))
     return memory
 
 
@@ -174,6 +213,13 @@ def save_workspace_memory(identity: dict[str, Any], memory: dict[str, Any]) -> d
     memory = dict(memory or defaults)
     memory["workspace_id"] = identity["workspace_id"]
     memory["team_id"] = identity["team_id"]
+    inferred_team_scope = identity["workspace_id"].endswith(".shared")
+    memory["workspace_scope"] = "team" if inferred_team_scope else identity.get("workspace_scope", memory.get("workspace_scope", "personal"))
+    memory["workspace_label"] = (
+        f"{identity['team_id']} shared workspace"
+        if inferred_team_scope
+        else identity.get("workspace_label", memory.get("workspace_label", "Personal workspace"))
+    )
     memory["workspace_preferences"] = {**defaults["workspace_preferences"], **memory.get("workspace_preferences", {})}
     memory["onboarding"] = onboarding_progress(memory)
     memory["updated_at"] = datetime.now().isoformat(timespec="seconds")
@@ -202,6 +248,12 @@ def _append_limited(memory: dict[str, Any], key: str, item: dict[str, Any], limi
     memory[key] = values[-limit:]
 
 
+def workspace_memory_fingerprint(memory: dict[str, Any] | None) -> str:
+    payload = dict(memory or {})
+    payload.pop("updated_at", None)
+    return json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
+
+
 def record_workspace_activity(
     memory: dict[str, Any],
     *,
@@ -209,7 +261,9 @@ def record_workspace_activity(
     title: str,
     detail: str = "",
     metadata: dict[str, Any] | None = None,
+    actor: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    actor = actor or {}
     _append_limited(
         memory,
         "recent_activity",
@@ -219,11 +273,70 @@ def record_workspace_activity(
             "title": title,
             "detail": detail,
             "metadata": metadata or {},
+            "actor_id": actor.get("user_id", ""),
+            "actor_name": actor.get("display_name", actor.get("user_id", "")),
             "timestamp": datetime.now().isoformat(timespec="seconds"),
         },
         limit=100,
     )
     return memory
+
+
+def record_collaboration_event(
+    memory: dict[str, Any],
+    *,
+    event_type: str,
+    resource_type: str,
+    resource_id: str,
+    title: str,
+    actor: dict[str, Any] | None = None,
+    detail: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    actor = actor or {}
+    event = {
+        "event_id": f"collab-{uuid4().hex[:10]}",
+        "event_type": event_type,
+        "resource_type": resource_type,
+        "resource_id": resource_id,
+        "title": title,
+        "detail": detail,
+        "actor_id": actor.get("user_id", ""),
+        "actor_name": actor.get("display_name", actor.get("user_id", "")),
+        "metadata": metadata or {},
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+    }
+    _append_limited(memory, "collaboration_events", event, limit=100)
+    record_workspace_activity(
+        memory,
+        activity_type=event_type,
+        title=title,
+        detail=detail,
+        metadata={"resource_type": resource_type, "resource_id": resource_id, **(metadata or {})},
+        actor=actor,
+    )
+    return memory
+
+
+def shared_metadata(identity: dict[str, Any] | None, visibility: str = "private") -> dict[str, Any]:
+    identity = identity or default_user_session()
+    timestamp = datetime.now().isoformat(timespec="seconds")
+    return {
+        "visibility": "team" if visibility == "team" else "private",
+        "owner_id": identity.get("user_id", "local.user"),
+        "owner_name": identity.get("display_name", identity.get("user_id", "Local Analyst")),
+        "created_by": identity.get("user_id", "local.user"),
+        "created_by_name": identity.get("display_name", identity.get("user_id", "Local Analyst")),
+        "created_at": timestamp,
+        "updated_at": timestamp,
+        "workspace_scope": identity.get("workspace_scope", "personal"),
+    }
+
+
+def can_edit_resource(identity: dict[str, Any] | None, resource: dict[str, Any] | None) -> bool:
+    identity = identity or {}
+    resource = resource or {}
+    return identity.get("user_id") == resource.get("owner_id") or user_can(identity, "edit_shared")
 
 
 def onboarding_progress(memory: dict[str, Any]) -> dict[str, Any]:
@@ -328,39 +441,57 @@ def append_session_transcript(
     return memory
 
 
-def bookmark_investigation(memory: dict[str, Any], investigation: dict[str, Any], note: str = "") -> dict[str, Any]:
+def bookmark_investigation(
+    memory: dict[str, Any],
+    investigation: dict[str, Any],
+    note: str = "",
+    *,
+    identity: dict[str, Any] | None = None,
+    visibility: str = "private",
+) -> dict[str, Any]:
     if not investigation or investigation.get("status") in {None, "idle", "skipped"}:
         return memory
+    record = {
+        **shared_metadata(identity, visibility),
+        "bookmark_id": f"bookmark-{uuid4().hex[:10]}",
+        "note": note,
+        "summary": investigation.get("summary", ""),
+        "severity": investigation.get("severity", "info"),
+        "queries": investigation.get("queries", [])[:3],
+    }
     _append_limited(
         memory,
         "bookmarks",
-        {
-            "bookmark_id": f"bookmark-{uuid4().hex[:10]}",
-            "created_at": datetime.now().isoformat(timespec="seconds"),
-            "note": note,
-            "summary": investigation.get("summary", ""),
-            "severity": investigation.get("severity", "info"),
-            "queries": investigation.get("queries", [])[:3],
-        },
+        record,
         limit=50,
     )
+    if visibility == "team":
+        record_collaboration_event(memory, event_type="investigation_shared", resource_type="investigation", resource_id=record["bookmark_id"], title="Investigation shared", detail=record["summary"], actor=identity)
     return memory
 
 
-def pin_investigation(memory: dict[str, Any], investigation: dict[str, Any], note: str = "") -> dict[str, Any]:
+def pin_investigation(
+    memory: dict[str, Any],
+    investigation: dict[str, Any],
+    note: str = "",
+    *,
+    identity: dict[str, Any] | None = None,
+    visibility: str = "private",
+) -> dict[str, Any]:
     if not investigation or investigation.get("status") in {None, "idle", "skipped"}:
         return memory
+    record = {
+        **shared_metadata(identity, visibility),
+        "pin_id": f"pin-{uuid4().hex[:10]}",
+        "note": note,
+        "summary": investigation.get("summary", ""),
+        "severity": investigation.get("severity", "info"),
+        "queries": investigation.get("queries", [])[:5],
+    }
     _append_limited(
         memory,
         "pinned_investigations",
-        {
-            "pin_id": f"pin-{uuid4().hex[:10]}",
-            "created_at": datetime.now().isoformat(timespec="seconds"),
-            "note": note,
-            "summary": investigation.get("summary", ""),
-            "severity": investigation.get("severity", "info"),
-            "queries": investigation.get("queries", [])[:5],
-        },
+        record,
         limit=25,
     )
     record_workspace_activity(
@@ -369,25 +500,35 @@ def pin_investigation(memory: dict[str, Any], investigation: dict[str, Any], not
         title="Investigation pinned",
         detail=investigation.get("summary", ""),
     )
+    if visibility == "team":
+        record_collaboration_event(memory, event_type="investigation_shared", resource_type="investigation", resource_id=record["pin_id"], title="Investigation pinned to team", detail=record["summary"], actor=identity)
     return memory
 
 
-def bookmark_query(memory: dict[str, Any], query: dict[str, Any], note: str = "") -> dict[str, Any]:
+def bookmark_query(
+    memory: dict[str, Any],
+    query: dict[str, Any],
+    note: str = "",
+    *,
+    identity: dict[str, Any] | None = None,
+    visibility: str = "private",
+) -> dict[str, Any]:
     sql = (query or {}).get("sql", "")
     if not sql.strip():
         return memory
+    record = {
+        **shared_metadata(identity, visibility),
+        "bookmark_id": f"query-{uuid4().hex[:10]}",
+        "note": note,
+        "question": query.get("question", ""),
+        "intent": query.get("intent", query.get("question", "")),
+        "sql": sql,
+        "rows": query.get("rows", 0),
+    }
     _append_limited(
         memory,
         "query_bookmarks",
-        {
-            "bookmark_id": f"query-{uuid4().hex[:10]}",
-            "created_at": datetime.now().isoformat(timespec="seconds"),
-            "note": note,
-            "question": query.get("question", ""),
-            "intent": query.get("intent", query.get("question", "")),
-            "sql": sql,
-            "rows": query.get("rows", 0),
-        },
+        record,
         limit=50,
     )
     record_workspace_activity(
@@ -397,22 +538,31 @@ def bookmark_query(memory: dict[str, Any], query: dict[str, Any], note: str = ""
         detail=query.get("question", "") or sql[:120],
         metadata={"rows": query.get("rows", 0)},
     )
+    if visibility == "team":
+        record_collaboration_event(memory, event_type="query_shared", resource_type="query_bookmark", resource_id=record["bookmark_id"], title="Query bookmark shared", detail=query.get("question", "") or sql[:120], actor=identity, metadata={"rows": query.get("rows", 0)})
     return memory
 
 
-def save_report_view(memory: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
+def save_report_view(
+    memory: dict[str, Any],
+    report: dict[str, Any],
+    *,
+    identity: dict[str, Any] | None = None,
+    visibility: str = "private",
+) -> dict[str, Any]:
     title = report.get("title") or "Analytics report"
+    record = {
+        **shared_metadata(identity, visibility),
+        "report_id": f"report-{uuid4().hex[:10]}",
+        "title": title,
+        "scope": report.get("scope", "workspace"),
+        "summary": report.get("summary", ""),
+        "payload": report.get("payload", {}),
+    }
     _append_limited(
         memory,
         "saved_reports",
-        {
-            "report_id": f"report-{uuid4().hex[:10]}",
-            "created_at": datetime.now().isoformat(timespec="seconds"),
-            "title": title,
-            "scope": report.get("scope", "workspace"),
-            "summary": report.get("summary", ""),
-            "payload": report.get("payload", {}),
-        },
+        record,
         limit=25,
     )
     record_workspace_activity(
@@ -422,13 +572,23 @@ def save_report_view(memory: dict[str, Any], report: dict[str, Any]) -> dict[str
         detail=title,
         metadata={"scope": report.get("scope", "workspace")},
     )
+    if visibility == "team":
+        record_collaboration_event(memory, event_type="report_shared", resource_type="report", resource_id=record["report_id"], title="Report shared", detail=title, actor=identity, metadata={"scope": report.get("scope", "workspace")})
     return memory
 
 
-def save_investigation_record(memory: dict[str, Any], investigation: dict[str, Any], note: str = "") -> dict[str, Any]:
+def save_investigation_record(
+    memory: dict[str, Any],
+    investigation: dict[str, Any],
+    note: str = "",
+    *,
+    identity: dict[str, Any] | None = None,
+    visibility: str = "private",
+) -> dict[str, Any]:
     if not investigation or investigation.get("status") in {None, "idle", "skipped"}:
         return memory
     record = {
+        **shared_metadata(identity, visibility),
         "saved_id": f"investigation-{uuid4().hex[:10]}",
         "saved_at": datetime.now().isoformat(timespec="seconds"),
         "note": note,
@@ -442,6 +602,8 @@ def save_investigation_record(memory: dict[str, Any], investigation: dict[str, A
         detail=record.get("summary", ""),
         metadata={"saved_id": record["saved_id"], "severity": record.get("severity", "info"), "note": note},
     )
+    if visibility == "team":
+        record_collaboration_event(memory, event_type="investigation_shared", resource_type="investigation", resource_id=record["saved_id"], title="Investigation saved to team", detail=record.get("summary", ""), actor=identity)
     return memory
 
 

@@ -209,6 +209,7 @@ class SavedSQLRequest(BaseModel):
 class SavedInvestigationRequest(BaseModel):
     investigation: dict[str, object] = Field(default_factory=dict)
     note: str = ""
+    visibility: str = "private"
 
 
 class WorkspacePreferencesRequest(BaseModel):
@@ -220,6 +221,7 @@ class SavedReportRequest(BaseModel):
     scope: str = "workspace"
     summary: str = ""
     payload: dict[str, object] = Field(default_factory=dict)
+    visibility: str = "private"
 
 
 @router.get("/health")
@@ -551,7 +553,7 @@ def save_workspace_investigation(
     identity = build_user_session(session.user_id, session.workspace_id.split(".", 1)[0], "admin", session.user.display_name)
     identity["workspace_id"] = workspace_id
     memory = load_workspace_memory(identity)
-    memory = save_investigation_record(memory, dict(payload.investigation), note=payload.note)
+    memory = save_investigation_record(memory, dict(payload.investigation), note=payload.note, identity=identity, visibility=payload.visibility)
     memory = save_workspace_memory(identity, memory)
     return {"workspace_id": workspace_id, "investigations": memory.get("investigations", [])}
 
@@ -584,6 +586,8 @@ def save_workspace_report(
     memory = save_report_view(
         memory,
         {"title": payload.title, "scope": payload.scope, "summary": payload.summary, "payload": payload.payload},
+        identity=identity,
+        visibility=payload.visibility,
     )
     memory = save_workspace_memory(identity, memory)
     return {"workspace_id": workspace_id, "reports": memory.get("saved_reports", [])}
@@ -667,7 +671,9 @@ def _telemetry_response(telemetry: WorkflowTelemetry) -> WorkflowTelemetryRespon
 def _ensure_workspace_access(session: RequestSession, workspace_id: str) -> None:
     if session.user_id == DEFAULT_USER_ID:
         raise HTTPException(status_code=401, detail="Authentication required")
-    if session.workspace_id != workspace_id:
+    session_team = session.workspace_id.split(".", 1)[0]
+    allowed = {session.workspace_id, f"{session_team}.shared"}
+    if workspace_id not in allowed:
         raise HTTPException(status_code=403, detail="Workspace access denied")
 
 
