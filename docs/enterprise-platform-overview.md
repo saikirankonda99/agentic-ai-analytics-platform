@@ -297,6 +297,7 @@ Core environment variables:
 | `OPENAI_TIMEOUT_SECONDS` | OpenAI request timeout | `30` |
 | `OPENAI_MAX_ATTEMPTS` | OpenAI retry attempts | `2` |
 | `OPENAI_TRUST_ENV` | allow proxy env vars for OpenAI client | `false` |
+| `DATABASE_URL` | workspace/auth/report platform persistence URL | `sqlite:///data/platform_persistence.db` |
 | `WORKFLOW_DATABASE_URL` | workflow runtime persistence URL | `sqlite:///data/workflow_runtime.db` |
 | `POSTGRES_URL` | PostgreSQL connector DSN | unset |
 | `POSTGRES_SCHEMA` | PostgreSQL schema to inspect | `public` |

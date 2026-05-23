@@ -10,7 +10,9 @@ For the production architecture, orchestration lifecycle, telemetry flow, invest
 
 For the first-time user flow, workspace walkthrough, analytics examples, result explorer, recovery guidance, and deployment checklist, see [Usability and Onboarding Guide](docs/usability-onboarding.md).
 
-For durable SQLite/PostgreSQL persistence setup, `DATABASE_URL` configuration, schema bootstrap, and troubleshooting, see [PostgreSQL Persistence Guide](docs/postgresql-persistence.md).
+For durable SQLite/PostgreSQL persistence setup, `DATABASE_URL` and `WORKFLOW_DATABASE_URL` configuration, schema bootstrap, and troubleshooting, see [PostgreSQL Persistence Guide](docs/postgresql-persistence.md).
+
+For browser-based workflow validation, local setup, CI execution, and trace/screenshot debugging, see [Playwright E2E Testing](docs/e2e-testing.md).
 
 ---
 
