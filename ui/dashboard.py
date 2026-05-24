@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from html import escape
-
+import re
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -84,9 +84,14 @@ def next_plotly_key(scope: str) -> str:
     return f"{scope}_{run_id}_{st.session_state.plotly_key_seq}"
 
 
+def test_id(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug or "workspace-section"
+
+
 def section_header_html(title: str, subtitle: str, class_name: str = "section-card compact-card") -> str:
     return (
-        f'<div class="{class_name}">'
+        f'<div class="{class_name}" data-testid="{test_id(title)}">'
         f'<div class="section-title">{escape_html(title)}</div>'
         f'<div class="section-subtitle">{escape_html(subtitle)}</div>'
         f"</div>"
@@ -104,7 +109,7 @@ def render_response_card(
     tone: str = "default",
 ) -> str:
     return (
-        f'<div class="workspace-module {tone}">'
+        f'<div class="workspace-module {tone}" data-testid="{test_id(title)}">'
         f'<div class="workspace-module-head">'
         f'<div class="section-title">{escape_html(title)}</div>'
         f'<div class="section-subtitle">{escape_html(subtitle)}</div>'
@@ -178,11 +183,18 @@ def render_quick_actions_card(actions: list[dict]) -> str:
 
 def render_saved_assets_card(memory: dict | None) -> str:
     memory = memory or {}
+    shared_count = sum(
+        1
+        for collection in ("query_bookmarks", "investigations", "bookmarks", "pinned_investigations", "saved_reports")
+        for item in memory.get(collection, [])
+        if item.get("visibility") == "team"
+    )
     items = [
         ("Saved Queries", len(memory.get("query_bookmarks", []))),
         ("Saved Investigations", len(memory.get("investigations", []))),
         ("Pinned Investigations", len(memory.get("pinned_investigations", []))),
         ("Saved Reports", len(memory.get("saved_reports", []))),
+        ("Shared Items", shared_count),
         ("Recent Activities", len(memory.get("recent_activity", []))),
         ("Sessions", len(memory.get("sessions", []))),
     ]
@@ -306,6 +318,12 @@ def render_sidebar() -> dict:
 
         with st.expander("Workspace Context", expanded=True):
             current_identity = st.session_state.get("user_identity") or {}
+            workspace_scope = st.radio(
+                "Workspace scope",
+                ["Personal", "Shared team"],
+                index=1 if current_identity.get("workspace_scope") == "team" else 0,
+                horizontal=True,
+            )
             workspace_user = st.text_input("User", value=current_identity.get("user_id", "local.user"))
             workspace_team = st.text_input("Team", value=current_identity.get("team_id", "default-team"))
             workspace_role = st.selectbox(
@@ -357,6 +375,7 @@ def render_sidebar() -> dict:
             "workspace_user": workspace_user,
             "workspace_team": workspace_team,
             "workspace_role": workspace_role,
+            "workspace_scope": workspace_scope,
             "monitoring_enabled": monitoring_enabled,
             "monitoring_targets": monitoring_targets,
             "monitoring_interval": monitoring_interval,
@@ -1330,6 +1349,7 @@ def render_workspace_card(identity: dict | None, memory: dict | None) -> str:
     memory = memory or {}
     items = [
         ("Workspace", identity.get("workspace_id", "default")),
+        ("Scope", identity.get("workspace_label", identity.get("workspace_scope", "personal")).title()),
         ("Role", identity.get("role", "viewer").title()),
         ("Queries", len(memory.get("query_history", []))),
         ("Runs", len(memory.get("workflow_runs", []))),
@@ -1339,8 +1359,8 @@ def render_workspace_card(identity: dict | None, memory: dict | None) -> str:
     body = (
         f'<div class="observability-grid">{metric_grid_html(items)}</div>'
         f'<div class="workspace-body-copy">Team {escape_html(identity.get("team_id", "default-team"))} '
-        f'is isolated for {escape_html(identity.get("display_name", identity.get("user_id", "user")))}. '
-        f'Auth provider is {escape_html(identity.get("auth_provider", "unconfigured"))}; role capabilities are ready for external auth integration.</div>'
+        f'is active for {escape_html(identity.get("display_name", identity.get("user_id", "user")))}. '
+        f'Workspace scope is {escape_html(identity.get("workspace_scope", "personal"))}; shared assets retain owner and visibility metadata.</div>'
     )
     return render_response_card(
         "Enterprise Workspace",

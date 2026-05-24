@@ -25,6 +25,8 @@ logs/
 *.log
 architecture_snapshot.txt
 git_history.txt
+test-results/
+playwright-report/
 
 # Generated backend/runtime database state
 data/workflow_runtime.db
