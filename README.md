@@ -24,6 +24,33 @@ For browser-based workflow validation, local setup, CI execution, and trace/scre
 
 ---
 
+# Deploying on Render
+
+This repository includes Render-ready Streamlit scaffolding:
+- `runtime.txt`: `python-3.11.9`
+- `Procfile`: `web: streamlit run app.py --server.port=$PORT --server.address=0.0.0.0`
+- `.streamlit/config.toml`: headless server mode, file watcher disabled, usage stats disabled
+
+Render setup:
+1. Create a new Render Web Service from this repository.
+2. Use the Python runtime and let Render install dependencies from `requirements.txt`.
+3. Set the start command to the Procfile command, or leave Render to detect the Procfile:
+   `streamlit run app.py --server.port=$PORT --server.address=0.0.0.0`
+4. Add environment variables in Render, not in `.env` or Streamlit secrets.
+
+Required environment variable:
+- `OPENAI_API_KEY`: API key used by the SQL generation and insight workflows.
+
+Recommended production environment variables:
+- `APP_ENV=production`
+- `LOG_LEVEL=INFO`
+- `DATABASE_URL=sqlite:///data/platform_persistence.db` for default SQLite platform persistence, or a PostgreSQL URL for durable external persistence.
+- `WORKFLOW_DATABASE_URL=sqlite:///data/workflow_runtime.db` for default SQLite workflow persistence, or a PostgreSQL URL for durable external workflow state.
+
+Render's filesystem is ephemeral unless a persistent disk or external database is configured. For long-lived workspace memory, auth sessions, workflow history, and saved reports, use PostgreSQL or attach persistent storage.
+
+---
+
 # Why I Built This
 
 I started this project after noticing that most text-to-SQL demos work for about 30 seconds before things start breaking.

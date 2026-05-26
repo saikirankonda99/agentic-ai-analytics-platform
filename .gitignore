@@ -3,8 +3,10 @@
 .env.*
 !.env.example
 
-# Streamlit local secrets/config
-.streamlit/
+# Streamlit deployment config and local secrets
+.streamlit/*
+!.streamlit/config.toml
+.streamlit/secrets.toml
 
 # Python and tool caches
 __pycache__/
