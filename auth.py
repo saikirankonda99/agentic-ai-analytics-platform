@@ -3,24 +3,47 @@ import streamlit as st
 from backend.auth_sessions import login_user, revoke_session, validate_session_token
 
 
+def _apply_authenticated_identity(identity: dict) -> None:
+    st.session_state.user = identity["user_id"]
+    st.session_state.auth_session = identity
+    st.session_state.user_identity = identity
+    st.session_state.workspace_loaded = False
+
+
+def _complete_login(username: str, password: str) -> None:
+    identity = login_user(username, password)
+    if identity:
+        _apply_authenticated_identity(identity)
+        st.success(f"Welcome {identity['display_name']}")
+        st.rerun()
+    st.error("Invalid credentials")
+
+
 def login() -> None:
-    st.sidebar.title("Login")
+    st.sidebar.title("Sign in")
     with st.sidebar.form("login_form"):
-        username = st.text_input("Username", value="admin")
-        password = st.text_input("Password", type="password")
+        username = st.text_input("Username", value="admin", key="sidebar_login_username")
+        password = st.text_input("Password", type="password", key="sidebar_login_password")
         submitted = st.form_submit_button("Login", width="stretch")
 
     if submitted:
-        identity = login_user(username, password)
-        if identity:
-            st.session_state.user = identity["user_id"]
-            st.session_state.auth_session = identity
-            st.session_state.user_identity = identity
-            st.session_state.workspace_loaded = False
-            st.success(f"Welcome {identity['display_name']}")
-            st.rerun()
-        else:
-            st.error("Invalid credentials")
+        _complete_login(username, password)
+
+
+def render_main_login_fallback() -> None:
+    left, middle, right = st.columns([1, 0.92, 1])
+    with middle:
+        st.header("Sign in to continue")
+        st.info("Authentication is required to open the analytics workspace.")
+        st.caption("Use your workspace credentials. You can also sign in from the sidebar.")
+
+        with st.form("main_login_form"):
+            username = st.text_input("Workspace username", value="admin", key="main_login_username")
+            password = st.text_input("Workspace password", type="password", key="main_login_password")
+            submitted = st.form_submit_button("Login", width="stretch")
+
+    if submitted:
+        _complete_login(username, password)
 
 
 def logout() -> None:
@@ -56,4 +79,5 @@ def require_login() -> dict:
         st.warning("Session expired. Please log in again.")
         st.session_state.pop("auth_session", None)
     login()
+    render_main_login_fallback()
     st.stop()

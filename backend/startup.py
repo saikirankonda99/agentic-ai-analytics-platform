@@ -26,7 +26,7 @@ class StartupCheck:
         return asdict(self)
 
 
-def run_startup_validation(*, strict: bool | None = None, validate_connectors: bool = True) -> dict[str, Any]:
+def run_startup_validation(*, strict: bool | None = None, validate_connectors: bool = False) -> dict[str, Any]:
     strict = _strict_startup_enabled() if strict is None else strict
     checks = [
         _environment_check(),
@@ -75,16 +75,22 @@ def _environment_check() -> StartupCheck:
 
 
 def _openai_check() -> StartupCheck:
-    try:
-        from llm import validate_openai_runtime
-
-        runtime = validate_openai_runtime()
-    except Exception as exc:  # pragma: no cover - defensive startup boundary
-        return StartupCheck("openai", "error", f"OpenAI runtime validation failed: {type(exc).__name__}: {exc}")
-
-    status = "ok" if runtime.get("api_key_configured") else "warning"
-    message = "OpenAI runtime configured." if status == "ok" else "OPENAI_API_KEY is not configured; model calls will degrade."
-    return StartupCheck("openai", status, message, _redact_openai_runtime(runtime))
+    api_key_configured = bool(os.getenv("OPENAI_API_KEY"))
+    status = "ok" if api_key_configured else "warning"
+    message = (
+        "OpenAI runtime configuration detected; client initialization is deferred."
+        if status == "ok"
+        else "OPENAI_API_KEY is not configured; model calls will degrade when invoked."
+    )
+    return StartupCheck(
+        "openai",
+        status,
+        message,
+        {
+            "api_key_configured": api_key_configured,
+            "initialization": "deferred",
+        },
+    )
 
 
 def _connector_check(*, validate_connectors: bool) -> StartupCheck:
@@ -159,18 +165,11 @@ def _telemetry_check() -> StartupCheck:
 
 
 def _orchestration_check() -> StartupCheck:
-    try:
-        from graph.workflow import workflow
-        from backend.runtime import orchestration_runtime
-
-        initialized = workflow is not None or orchestration_runtime is not None
-    except Exception as exc:
-        return StartupCheck("orchestration", "error", f"Orchestration initialization failed: {type(exc).__name__}: {exc}")
     return StartupCheck(
         name="orchestration",
-        status="ok" if initialized else "warning",
-        message="Orchestration runtime initialized." if initialized else "Orchestration runtime is using degraded linear mode.",
-        metadata={"langgraph_compiled": workflow is not None},
+        status="ok",
+        message="Orchestration runtime initialization is deferred until workflow execution.",
+        metadata={"initialization": "deferred"},
     )
 
 

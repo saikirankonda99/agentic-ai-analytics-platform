@@ -246,18 +246,17 @@ def render_hero() -> None:
         """
         <div class="enterprise-hero">
             <div>
-                <div class="hero-eyebrow">Enterprise AI Analytics Workspace</div>
-                <h1 class="hero-title">Agentic analytics command center</h1>
+                <div class="hero-eyebrow">Governed AI Analytics Platform</div>
+                <h1 class="hero-title">AI business analytics assistant</h1>
                 <p class="hero-copy">
-                    Ask in natural language, inspect governed SQL, monitor orchestration, and publish executive-ready
-                    insights from one production workspace.
+                    Ask business questions in plain English and get governed AI analytics insights with charts,
+                    transparent SQL, and executive-ready summaries.
                 </p>
             </div>
             <div class="hero-badges">
-                <span class="hero-badge">Multi-agent</span>
-                <span class="hero-badge">Telemetry-ready</span>
-                <span class="hero-badge">RBAC-aware</span>
-                <span class="hero-badge">Workflow-native</span>
+                <span class="hero-badge">Plain-English SQL</span>
+                <span class="hero-badge">Executive Insights</span>
+                <span class="hero-badge">Governed Workflow</span>
             </div>
         </div>
         """
@@ -273,8 +272,8 @@ def render_top_navigation(active_nav: str = "Overview") -> str:
         """
         <div class="top-nav-shell">
             <div>
-                <div class="top-nav-title">Analytics Operations Workspace</div>
-                <div class="top-nav-subtitle">Unified workspace for query execution, orchestration, monitoring, and audit trails.</div>
+                <div class="top-nav-title">Executive Insight Workspace</div>
+                <div class="top-nav-subtitle">Ask a question, review the answer, and expand audit details only when needed.</div>
             </div>
         </div>
         """
@@ -294,13 +293,13 @@ def render_sidebar() -> dict:
         markdown_html(
             """
             <div class="sidebar-brand">
-                <p class="sidebar-brand-title">GenAI SQL Assistant</p>
-                <div class="sidebar-brand-copy">Analytics operations cockpit for AI-native querying.</div>
+                <p class="sidebar-brand-title">AI Analytics Assistant</p>
+                <div class="sidebar-brand-copy">Governed business analytics for teams that need answers and auditability.</div>
             </div>
             """
         )
 
-        with st.expander("Orchestration Controls", expanded=True):
+        with st.expander("Workspace Controls", expanded=True):
             clear_chat = st.button("Clear session", width="stretch")
             show_schema = st.toggle("Show database schema", value=False)
 
@@ -386,45 +385,49 @@ def render_prompt_launcher() -> str | None:
             "Launch a workflow from a recommended question or type your own below.",
         )
     )
-    c1, c2, c3 = st.columns(3)
     prompt = None
-    if c1.button("Top Customers", width="stretch"):
-        prompt = "Top 10 customers by invoices"
-    if c2.button("Revenue by Country", width="stretch"):
-        prompt = "Revenue by country"
-    if c3.button("Top Tracks", width="stretch"):
-        prompt = "Top 10 tracks"
+    for row in (SAMPLE_PROMPTS[1:3], ["Top 10 tracks"]):
+        columns = st.columns(len(row), gap="small")
+        for column, sample_prompt in zip(columns, row):
+            label = {
+                "Top 10 customers by invoices": "Top Customers",
+                "Revenue by country": "Revenue by Country",
+                "Top 10 tracks": "Top Tracks",
+            }.get(sample_prompt, sample_prompt)
+            if column.button(label, width="stretch"):
+                prompt = sample_prompt
     return prompt
 
 
 def render_command_bar() -> str | None:
     markdown_html(
         section_header_html(
-            "Command Workspace",
-            "Submit a question and keep orchestration anchored to the analytics workspace.",
+            "Ask a Business Question",
+            "Type a plain-English question. The assistant returns trusted SQL, results, a chart, and an executive summary.",
             class_name="workspace-shell compact-shell",
         )
     )
     prompt = None
     with st.form("command_bar_form", clear_on_submit=False):
-        query_col, action_col = st.columns([6, 1.2], vertical_alignment="bottom")
-        with query_col:
-            question = st.text_input(
-                "Command",
-                value=st.session_state.get("command_text", ""),
-                placeholder="Ask a revenue, customer, or product question...",
-                label_visibility="collapsed",
-            )
-        with action_col:
-            submitted = st.form_submit_button("Run", width="stretch")
+        question = st.text_input(
+            "Command",
+            value=st.session_state.get("command_text", ""),
+            placeholder="Example: Which countries generated the most revenue last quarter?",
+            label_visibility="collapsed",
+        )
+        submitted = st.form_submit_button("Run Query", width="stretch")
+    markdown_html('<div class="query-assurance">Suggested questions are ready to run, or use your own business question above.</div>')
 
-    c1, c2, c3 = st.columns(3)
-    if c1.button("Top Customers", width="stretch"):
-        prompt = "Top 10 customers by invoices"
-    if c2.button("Revenue by Country", width="stretch"):
-        prompt = "Revenue by country"
-    if c3.button("Top Tracks", width="stretch"):
-        prompt = "Top 10 tracks"
+    suggested_prompts = [
+        ("Top Customers", "Top 10 customers by invoices"),
+        ("Revenue by Country", "Revenue by country"),
+        ("Top Tracks", "Top 10 tracks"),
+    ]
+    for row in (suggested_prompts[:2], suggested_prompts[2:]):
+        columns = st.columns(len(row), gap="small")
+        for column, (label, sample_prompt) in zip(columns, row):
+            if column.button(f"Try: {label}", width="stretch"):
+                prompt = sample_prompt
 
     if submitted and question.strip():
         st.session_state.command_text = question.strip()
@@ -489,10 +492,12 @@ def kpi_card_html(metric: dict) -> str:
 
 
 def render_kpi_cards(metrics: list[dict]) -> None:
-    columns = st.columns(len(metrics))
-    for column, metric in zip(columns, metrics):
-        with column:
-            markdown_html(kpi_card_html(metric))
+    for idx in range(0, len(metrics), 2):
+        row_metrics = metrics[idx : idx + 2]
+        columns = st.columns(len(row_metrics))
+        for column, metric in zip(columns, row_metrics):
+            with column:
+                markdown_html(kpi_card_html(metric))
 
 
 def glass_widget_html(widget: dict) -> str:
@@ -511,10 +516,12 @@ def glass_widget_html(widget: dict) -> str:
 
 
 def render_glass_widgets(widgets: list[dict]) -> None:
-    columns = st.columns(len(widgets))
-    for column, widget in zip(columns, widgets):
-        with column:
-            markdown_html(glass_widget_html(widget))
+    for idx in range(0, len(widgets), 2):
+        row_widgets = widgets[idx : idx + 2]
+        columns = st.columns(len(row_widgets), gap="small")
+        for column, widget in zip(columns, row_widgets):
+            with column:
+                markdown_html(glass_widget_html(widget))
 
 
 # ---------------------------------------------------------------------------
@@ -525,16 +532,16 @@ def render_glass_widgets(widgets: list[dict]) -> None:
 def apply_chart_theme(fig: go.Figure, height: int = 410) -> go.Figure:
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(15,23,42,0.32)",
-        font=dict(color="#e2e8f0"),
+        plot_bgcolor="#ffffff",
+        font=dict(color="#1f2937", family="Inter, Segoe UI, system-ui, sans-serif"),
         margin=dict(l=10, r=10, t=30, b=10),
         height=height,
         xaxis_title=None,
         yaxis_title=None,
         legend_title=None,
     )
-    fig.update_xaxes(showgrid=False, zeroline=False, color="#94a3b8")
-    fig.update_yaxes(gridcolor="rgba(148, 163, 184, 0.14)", zeroline=False, color="#94a3b8")
+    fig.update_xaxes(showgrid=False, zeroline=False, color="#64748b")
+    fig.update_yaxes(gridcolor="rgba(148, 163, 184, 0.22)", zeroline=False, color="#64748b")
     return fig
 
 
@@ -551,12 +558,12 @@ def build_plotly_figure(df: pd.DataFrame, x_col: str, y_col: str, chart_type: st
         if getattr(trace, "type", "") == "bar":
             trace.update(
                 marker=dict(
-                    color="#56ccf2",
-                    line=dict(color="rgba(86, 204, 242, 0.45)", width=1),
+                    color="#2563eb",
+                    line=dict(color="rgba(37, 99, 235, 0.32)", width=1),
                 )
             )
         else:
-            trace.update(marker=dict(color="#56ccf2"), line=dict(color="#56ccf2", width=3))
+            trace.update(marker=dict(color="#2563eb"), line=dict(color="#2563eb", width=3))
     return fig
 
 
@@ -575,10 +582,10 @@ def build_default_operations_figure() -> go.Figure:
             y=mock_df["Throughput"],
             mode="lines+markers",
             name="Workflow Throughput",
-            line=dict(color="#56ccf2", width=3),
+            line=dict(color="#2563eb", width=3),
             marker=dict(size=7),
             fill="tozeroy",
-            fillcolor="rgba(86, 204, 242, 0.12)",
+            fillcolor="rgba(37, 99, 235, 0.10)",
         )
     )
     fig.add_trace(
@@ -587,12 +594,12 @@ def build_default_operations_figure() -> go.Figure:
             y=mock_df["Quality"],
             mode="lines",
             name="Signal Quality",
-            line=dict(color="#34d399", width=2, dash="dot"),
+            line=dict(color="#059669", width=2, dash="dot"),
         )
     )
     apply_chart_theme(fig, height=420)
     fig.update_layout(
-        plot_bgcolor="rgba(15,23,42,0.34)",
+        plot_bgcolor="#ffffff",
         margin=dict(l=10, r=10, t=24, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
     )
@@ -661,8 +668,8 @@ def workflow_node_html(step: str, item: dict, active_step: str | None, show_conn
 
 def workflow_timeline_html(trace: list[dict]) -> tuple[str, list[str]]:
     header = section_header_html(
-        "AI Orchestration Workflow",
-        "Enterprise workflow view from planning through execution, with agent status and telemetry context.",
+        "Workflow Audit Trail",
+        "Compact view of the governed AI steps behind this answer.",
     )
     if not trace:
         return header + '<div class="workflow-empty">Run a query to activate the workflow timeline.</div>', []
@@ -881,9 +888,9 @@ def render_workflow_timeline(trace: list[dict], chart_key: str | None = None) ->
 
 def live_execution_summary_html(question: str) -> str:
     return render_response_card(
-        "Live Execution System",
-        f"Autonomous orchestration is currently processing: {question}",
-        "",
+        "Analyzing Your Question",
+        f"Building a governed answer for: {question}",
+        '<div class="workspace-body-copy">Generating SQL, running the query, preparing the chart, and drafting the executive insight brief.</div>',
         tone="summary-module",
     )
 
@@ -903,8 +910,8 @@ def execution_log_html(logs: list[dict]) -> str:
     if not log_items:
         log_items = '<div class="workflow-empty">Waiting for workflow events.</div>'
     return render_response_card(
-        "Execution Log Stream",
-        "Live operational events from the orchestration layer.",
+        "Execution Events",
+        "Compact operational events from the AI workflow.",
         f'<div class="log-stream">{log_items}</div>',
         tone="default-module",
     )
@@ -935,8 +942,8 @@ def live_telemetry_items(telemetry: dict) -> list[tuple[str, object]]:
 
 def progressive_telemetry_html(telemetry: dict) -> str:
     return render_response_card(
-        "Progressive Telemetry",
-        "Runtime usage and observability revealed as agents complete.",
+        "Runtime Usage",
+        "Model usage and latency details for audit review.",
         f'<div class="observability-grid">{metric_grid_html(live_telemetry_items(telemetry))}</div>',
         tone="observability-module",
     )
@@ -989,7 +996,7 @@ def render_telemetry_panel(telemetry: dict) -> None:
     markdown_html(
         section_header_html(
             "Model Telemetry",
-            "Runtime visibility into token usage, latency, and model execution.",
+            "Token, latency, and model execution details for audit review.",
         )
     )
     if not telemetry:
@@ -1025,7 +1032,7 @@ def render_sql_and_results(sql: str, df: pd.DataFrame) -> None:
     markdown_html(
         section_header_html(
             "Analytics Workspace",
-            "SQL generation and result exploration inside the same dark command surface.",
+            "Generated SQL and result exploration in one analytics workspace.",
             class_name="workspace-shell",
         )
     )
@@ -1059,12 +1066,12 @@ def render_sql_card(sql: str) -> None:
         return
     markdown_html(
         section_header_html(
-            "SQL Generation",
-            "Collapsed by default to keep the workspace dense and operator-focused.",
+            "SQL Preview",
+            "Transparent generated query, available for validation and reuse.",
             class_name="workspace-shell compact-shell",
         )
     )
-    with st.expander("SQL Trace", expanded=False):
+    with st.expander("View Generated SQL", expanded=False):
         st.code(sql, language="sql")
 
 
@@ -1092,8 +1099,8 @@ def render_recommendation_card(recommendations: list[str]) -> str:
 
     body = "".join(f'<div class="workspace-list-item">{escape_html(item)}</div>' for item in recommendations)
     return render_response_card(
-        "AI Recommendations",
-        "Suggested next actions based on the current result shape and workflow state.",
+        "Suggested Follow-Ups",
+        "Business questions that naturally build on this result.",
         body,
         tone="recommendation-module",
     )
@@ -1129,8 +1136,8 @@ def render_observability_card(telemetry: dict, trace: list[dict]) -> str:
             f"</div>"
         )
     return render_response_card(
-        "Observability",
-        "Operational telemetry across model usage, workflow state, and execution behavior.",
+        "Audit & Observability",
+        "Operational details across model usage, workflow state, and execution behavior.",
         f'<div class="observability-grid">{metric_grid_html(telemetry_bits)}</div>{error_html}',
         tone="observability-module",
     )

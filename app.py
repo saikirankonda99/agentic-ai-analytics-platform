@@ -1,6 +1,7 @@
 import os
 import time
 import json
+import logging
 from datetime import datetime
 
 import pandas as pd
@@ -15,27 +16,11 @@ from analytics_memory import (
 )
 from auth import render_auth_controls, require_login
 from autonomous_insights import analyze_result_set, empty_insight_state, insight_prompt_block
-from backend.connectors import get_connector_registry
 from backend.operations import agent_utilization, operations_summary
 from backend.recommendations import autonomous_recommendations, recommendation_messages
-from backend.services import execute_query_workflow
 from backend.telemetry import filter_telemetry_events, phase_latency_breakdown, telemetry_export_rows, validate_telemetry_payload
 from backend.workspace_inspection import saved_sql_history, workflow_transcripts, workspace_summary
 from db import get_schema
-from investigation import (
-    empty_investigation_state,
-    investigation_prompt_block,
-    run_investigation,
-    should_investigate,
-)
-from llm import DEFAULT_SQL_MODEL, stream_text_with_telemetry, validate_openai_runtime
-from monitoring import (
-    default_monitoring_config,
-    empty_briefing_state,
-    empty_monitoring_state,
-    monitoring_due,
-    run_monitoring_checks,
-)
 from workspace import (
     ONBOARDING_STEPS,
     bookmark_query,
@@ -56,15 +41,12 @@ from workspace import (
     retrieve_workspace_context,
     user_can,
 )
-from semantic import profile_dataframe, profile_schema, recommend_chart_fields, semantic_prompt_block
 from styles.theme import get_theme_css
 from ui.dashboard import (
     build_plotly_figure,
     build_default_operations_figure,
     escape_html,
     render_chat_history,
-    render_activity_feed,
-    render_agent_row,
     render_command_bar,
     render_executive_summary,
     render_footer,
@@ -98,6 +80,162 @@ from ui.dashboard import (
     render_workflow_timeline,
     render_workflow_timeline_cards,
 )
+
+logger = logging.getLogger("streamlit.startup")
+STARTUP_STARTED_AT = time.perf_counter()
+DEFAULT_SQL_MODEL = "gpt-4o-mini"
+
+
+def log_startup_stage(stage):
+    logger.info("streamlit_startup_stage stage=%s elapsed_ms=%s", stage, int((time.perf_counter() - STARTUP_STARTED_AT) * 1000))
+
+
+def render_block(label, fn, *args, **kwargs):
+    try:
+        result = fn(*args, **kwargs)
+        log_startup_stage(label)
+        return result
+    except Exception as exc:
+        st.error(f"Render failed during: {label}")
+        st.exception(exc)
+        raise
+
+
+def execute_query_workflow_deferred(*args, **kwargs):
+    log_startup_stage("lazy_import_backend_services")
+    from backend.services import execute_query_workflow
+
+    return execute_query_workflow(*args, **kwargs)
+
+
+def connector_diagnostics_deferred(*, validate=False):
+    log_startup_stage("lazy_import_connectors")
+    from backend.connectors import get_connector_registry
+
+    return get_connector_registry().diagnostics(validate=validate)
+
+
+def stream_text_with_telemetry_deferred(*args, **kwargs):
+    from llm import stream_text_with_telemetry
+
+    return stream_text_with_telemetry(*args, **kwargs)
+
+
+def validate_openai_runtime_deferred():
+    from llm import validate_openai_runtime
+
+    return validate_openai_runtime()
+
+
+def semantic_prompt_block_deferred(context):
+    from semantic import semantic_prompt_block
+
+    return semantic_prompt_block(context)
+
+
+def profile_schema_deferred(schema, name):
+    from semantic import profile_schema
+
+    return profile_schema(schema, name=name)
+
+
+def profile_dataframe_deferred(df, name):
+    from semantic import profile_dataframe
+
+    return profile_dataframe(df, name=name)
+
+
+def recommend_chart_fields_deferred(df, context):
+    from semantic import recommend_chart_fields
+
+    return recommend_chart_fields(df, context)
+
+
+def run_investigation_deferred(*args, **kwargs):
+    from investigation import run_investigation
+
+    return run_investigation(*args, **kwargs)
+
+
+def investigation_prompt_block_deferred(state):
+    from investigation import investigation_prompt_block
+
+    return investigation_prompt_block(state)
+
+
+def run_monitoring_checks_deferred(*args, **kwargs):
+    from monitoring import run_monitoring_checks
+
+    return run_monitoring_checks(*args, **kwargs)
+
+
+def default_monitoring_config():
+    return {
+        "enabled": False,
+        "targets": ["revenue", "customers", "orders", "growth", "anomalies"],
+        "interval_minutes": 60,
+        "last_run_at": None,
+    }
+
+
+def empty_monitoring_state():
+    return {
+        "status": "idle",
+        "targets": [],
+        "checks": [],
+        "severity": "info",
+        "summary": "No scheduled monitoring run has executed yet.",
+        "telemetry": {
+            "steps": [],
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cost_usd": 0.0,
+            "latency_ms": 0,
+            "model": "sqlite",
+            "usage_available": False,
+        },
+    }
+
+
+def empty_briefing_state():
+    return {
+        "status": "idle",
+        "severity": "info",
+        "summary": "No executive briefing has been generated yet.",
+        "sections": [],
+        "generated_at": None,
+    }
+
+
+def empty_investigation_state():
+    return {
+        "status": "idle",
+        "severity": "info",
+        "queries": [],
+        "summary": "No autonomous investigation has run yet.",
+        "lifecycle": [],
+        "evidence": [],
+        "score": 0.0,
+        "reasoning_trace": [],
+        "telemetry": {
+            "steps": [],
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cost_usd": 0.0,
+            "latency_ms": 0,
+            "model": "",
+            "usage_available": False,
+        },
+    }
+
+
+def should_investigate_state(insight_state):
+    if not insight_state:
+        return False
+    return insight_state.get("severity") in {"warning", "critical"} and bool(insight_state.get("findings"))
+
 
 def get_openai_api_key():
     api_key = os.getenv("OPENAI_API_KEY")
@@ -163,16 +301,16 @@ Question:
 Sample:
 {sample}
 """
-    result = stream_text_with_telemetry(prompt, model=DEFAULT_SQL_MODEL, temperature=0.2)
+    result = stream_text_with_telemetry_deferred(prompt, model=DEFAULT_SQL_MODEL, temperature=0.2)
     return result.get("text", "")
 
 
 def build_insight_prompt(question, df):
     sample = df.head(5).to_string()
-    semantic_block = semantic_prompt_block(st.session_state.get("semantic_context"))
+    semantic_block = semantic_prompt_block_deferred(st.session_state.get("semantic_context"))
     conversation_block = memory_prompt_block(st.session_state.get("analytics_memory"))
     autonomous_block = insight_prompt_block(st.session_state.get("autonomous_insights"))
-    investigation_block = investigation_prompt_block(st.session_state.get("investigation_state"))
+    investigation_block = investigation_prompt_block_deferred(st.session_state.get("investigation_state"))
     scheduled_briefing_block = briefing_prompt_block(st.session_state.get("executive_briefing"))
     return f"""
 Explain this SQL result in simple business terms for an analytics operator.
@@ -271,7 +409,7 @@ def stream_insight_narration(question, df, sql="", live_placeholder=None):
                 st.session_state.live_render_seq += 1
                 render_live_workspace_snapshot(question, live_placeholder)
 
-    result = stream_text_with_telemetry(
+    result = stream_text_with_telemetry_deferred(
         build_insight_prompt(question, df),
         model=DEFAULT_SQL_MODEL,
         temperature=0.2,
@@ -368,17 +506,17 @@ def build_ai_recommendations(df, telemetry, trace):
 def build_default_activity_feed():
     return [
         {"title": "Copilot standby initialized", "subtitle": "Natural-language query intake is ready for the next request.", "time": "Now", "tone": "live"},
-        {"title": "Schema context cached", "subtitle": "Database structure is warm for low-latency retrieval.", "time": "2m", "tone": "stable"},
-        {"title": "Telemetry observers connected", "subtitle": "Token, latency, and cost tracking are listening for the next run.", "time": "5m", "tone": "stable"},
-        {"title": "Recommendation engine primed", "subtitle": "Default guidance prepared from recent workflow patterns.", "time": "9m", "tone": "live"},
+        {"title": "Schema loading deferred", "subtitle": "Database structure will be read only when a query or schema view needs it.", "time": "Idle", "tone": "stable"},
+        {"title": "Telemetry awaiting run", "subtitle": "Token, latency, and cost tracking starts with the next invoked workflow.", "time": "Idle", "tone": "stable"},
+        {"title": "AI runtime on demand", "subtitle": "OpenAI clients are initialized only after an AI feature is invoked.", "time": "Idle", "tone": "live"},
     ]
 
 
 def build_default_agent_states():
     return [
-        {"name": "Planner", "status": "Ready", "caption": "Intent routing active.", "active": True},
-        {"name": "Schema", "status": "Warm", "caption": "Context cache hydrated.", "active": False},
-        {"name": "Memory", "status": "Listening", "caption": "History retrieval on standby.", "active": False},
+        {"name": "Planner", "status": "Ready", "caption": "Intent routing will start after submission.", "active": True},
+        {"name": "Schema", "status": "Deferred", "caption": "Context loads on demand.", "active": False},
+        {"name": "Memory", "status": "Idle", "caption": "History retrieval waits for a workflow.", "active": False},
         {"name": "SQL Agent", "status": "Idle", "caption": "Generation lane available.", "active": False},
     ]
 
@@ -666,12 +804,12 @@ def store_semantic_context(key, context):
 def ensure_schema_semantics():
     memory = st.session_state.get("semantic_memory", {})
     if "sql_schema" not in memory:
-        store_semantic_context("sql_schema", profile_schema(get_schema(), name="Chinook SQL schema"))
+        store_semantic_context("sql_schema", profile_schema_deferred(get_schema(), name="Chinook SQL schema"))
     return st.session_state.semantic_memory["sql_schema"]
 
 
 def profile_active_dataframe(df, name):
-    context = profile_dataframe(df, name=name)
+    context = profile_dataframe_deferred(df, name=name)
     store_semantic_context(name, context)
     return context
 
@@ -973,7 +1111,7 @@ def run_monitoring_workflow(live_placeholder=None):
         if live_placeholder is not None:
             render_live_workspace_snapshot(question, live_placeholder)
 
-    monitoring_state, briefing = run_monitoring_checks(
+    monitoring_state, briefing = run_monitoring_checks_deferred(
         targets,
         st.session_state.get("semantic_context"),
         callback=on_monitoring_event,
@@ -1069,7 +1207,7 @@ def run_monitoring_workflow(live_placeholder=None):
 
 
 def run_autonomous_investigation_phase(question, sql, base_trace, live_placeholder=None):
-    if not sql or st.session_state.get("latest_mode") == "csv" or not should_investigate(st.session_state.autonomous_insights):
+    if not sql or st.session_state.get("latest_mode") == "csv" or not should_investigate_state(st.session_state.autonomous_insights):
         skipped_at = current_timestamp()
         st.session_state.investigation_state = {
             **empty_investigation_state(),
@@ -1116,7 +1254,7 @@ def run_autonomous_investigation_phase(question, sql, base_trace, live_placehold
         if live_placeholder is not None:
             render_live_workspace_snapshot(question, live_placeholder)
 
-    investigation_state = run_investigation(
+    investigation_state = run_investigation_deferred(
         question,
         sql,
         st.session_state.autonomous_insights,
@@ -1140,7 +1278,7 @@ def run_autonomous_investigation_phase(question, sql, base_trace, live_placehold
     ]
     stream = st.session_state.streaming_workflow
     stream["trace"] = completed_trace
-    stream.setdefault("assistant_streams", {})["investigation"] = investigation_prompt_block(investigation_state).strip()
+    stream.setdefault("assistant_streams", {})["investigation"] = investigation_prompt_block_deferred(investigation_state).strip()
     st.session_state.streaming_workflow = stream
     append_live_log("investigation", investigation_state.get("summary", "Investigation finished."), status=status)
     if live_placeholder is not None:
@@ -1214,12 +1352,13 @@ def run_query(question, live_placeholder=None):
             if live_placeholder is not None:
                 render_live_workspace_snapshot(question, live_placeholder)
 
+            append_live_log("schema retrieval", "Loading database schema for the requested workflow.", status="active")
             schema_context = ensure_schema_semantics()
             workflow_context = {
                 **schema_context,
-                "prompt_block": semantic_prompt_block(schema_context),
+                "prompt_block": semantic_prompt_block_deferred(schema_context),
             }
-            workflow_result = execute_query_workflow(
+            workflow_result = execute_query_workflow_deferred(
                 question,
                 callback=workflow_callback,
                 semantic_context=workflow_context,
@@ -1506,92 +1645,141 @@ def render_report_exports(scope="analytics"):
             st.success("Report view saved to this workspace.")
 
 
-def render_analytics_workspace(client):
-    df = st.session_state.latest_df
-    telemetry = st.session_state.workflow_telemetry
-    exec_time = st.session_state.latest_exec_time
-    history = st.session_state.history
-    active_mode = "CSV Workspace" if st.session_state.latest_mode == "csv" and df is not None else "Live SQL"
-    if df is None and not st.session_state.get("semantic_context"):
-        ensure_schema_semantics()
-
-    top_metrics = [
-        {
-            "label": "Active Rows",
-            "value": f"{len(df):,}" if df is not None else "0",
-            "caption": "Current dataset in focus",
-        },
-        {
-            "label": "Queries Run",
-            "value": len(history),
-            "caption": "Session workflow executions",
-        },
-        {
-            "label": "Execution Time",
-            "value": f"{exec_time:.2f}s" if exec_time is not None else "Standby",
-            "caption": "Latest end-to-end latency",
-        },
-        {
-            "label": "Estimated Cost",
-            "value": f'${telemetry.get("cost_usd", 0.0):.4f}',
-            "caption": telemetry.get("model") or "Awaiting model run",
-        },
-    ]
-    render_kpi_cards(top_metrics)
-    render_onboarding_workspace_panel()
-
-    widget_data = [
-        {
-            "label": "Active Mode",
-            "value": active_mode,
-            "caption": "Switches automatically between workflow-backed SQL and uploaded CSV analysis.",
-            "badge": "Online" if df is not None else "Idle",
-        },
-        {
-            "label": "Copilot State",
-            "value": st.session_state.latest_question or "Awaiting prompt",
-            "caption": "Latest question currently shaping the analytics canvas.",
-            "badge": "Ready",
-        },
-        {
-            "label": "Telemetry",
-            "value": f'{telemetry.get("total_tokens", 0):,} tokens' if telemetry else "No usage yet",
-            "caption": "Prompt, completion, and latency visibility for enterprise governance.",
-            "badge": telemetry.get("model") or "Standby",
-        },
-    ]
-    render_glass_widgets(widget_data)
-    render_quick_actions_panel()
-    active_trace = st.session_state.live_trace or st.session_state.workflow_trace
-    active_telemetry = st.session_state.live_telemetry or telemetry
-    st.markdown(
-        render_orchestration_status_badges(
-            active_trace,
-            active_telemetry,
-            is_executing=st.session_state.get("is_executing", False),
-        ),
-        unsafe_allow_html=True,
-    )
-    workflow_left, workflow_right = st.columns([1.1, 0.9], gap="medium")
-    with workflow_left:
-        st.markdown(render_workflow_timeline_cards(active_trace), unsafe_allow_html=True)
-    with workflow_right:
+def render_workflow_trace_section(active_trace, active_telemetry):
+    expanded = st.session_state.get("is_executing", False)
+    with st.expander("Workflow Trace & Audit", expanded=expanded):
         st.markdown(
-            render_active_agent_monitoring(
+            render_orchestration_status_badges(
                 active_trace,
                 active_telemetry,
                 is_executing=st.session_state.get("is_executing", False),
             ),
             unsafe_allow_html=True,
         )
+        timeline_tab, agents_tab, investigation_tab, telemetry_tab = st.tabs(
+            ["Timeline", "Agents", "Investigation", "Telemetry"]
+        )
+        with timeline_tab:
+            st.markdown(render_workflow_timeline_cards(active_trace), unsafe_allow_html=True)
+        with agents_tab:
+            st.markdown(
+                render_active_agent_monitoring(
+                    active_trace,
+                    active_telemetry,
+                    is_executing=st.session_state.get("is_executing", False),
+                ),
+                unsafe_allow_html=True,
+            )
+        with investigation_tab:
+            st.markdown(render_investigation_card(st.session_state.get("investigation_state")), unsafe_allow_html=True)
+            st.markdown(render_autonomous_insight_card(st.session_state.get("autonomous_insights")), unsafe_allow_html=True)
+        with telemetry_tab:
+            render_telemetry_panel(active_telemetry)
+
+
+def render_advanced_context_sections(df, telemetry, active_trace, active_mode, history, exec_time):
+    with st.expander("Advanced Context & Governance", expanded=False):
+        overview_tab, telemetry_tab, memory_tab, monitoring_tab = st.tabs(
+            ["Run Summary", "Telemetry", "Semantic Memory", "Monitoring"]
+        )
+        with overview_tab:
+            top_metrics = [
+                {
+                    "label": "Active Rows",
+                    "value": f"{len(df):,}" if df is not None else "0",
+                    "caption": "Current dataset in focus",
+                },
+                {
+                    "label": "Queries Run",
+                    "value": len(history),
+                    "caption": "Session workflow executions",
+                },
+                {
+                    "label": "Execution Time",
+                    "value": f"{exec_time:.2f}s" if exec_time is not None else "Standby",
+                    "caption": "Latest end-to-end latency",
+                },
+                {
+                    "label": "Estimated Cost",
+                    "value": f'${telemetry.get("cost_usd", 0.0):.4f}',
+                    "caption": telemetry.get("model") or "Awaiting model run",
+                },
+            ]
+            render_kpi_cards(top_metrics)
+            render_glass_widgets(
+                [
+                    {
+                        "label": "Active Mode",
+                        "value": active_mode,
+                        "caption": "Switches automatically between workflow-backed SQL and uploaded CSV analysis.",
+                        "badge": "Online" if df is not None else "Idle",
+                    },
+                    {
+                        "label": "Copilot State",
+                        "value": st.session_state.latest_question or "Awaiting prompt",
+                        "caption": "Latest question currently shaping the analytics canvas.",
+                        "badge": "Ready",
+                    },
+                    {
+                        "label": "Telemetry",
+                        "value": f'{telemetry.get("total_tokens", 0):,} tokens' if telemetry else "No usage yet",
+                        "caption": "Prompt, completion, and latency visibility for enterprise governance.",
+                        "badge": telemetry.get("model") or "Standby",
+                    },
+                ]
+            )
+            render_quick_actions_panel()
+        with telemetry_tab:
+            st.markdown(render_observability_card(telemetry, active_trace), unsafe_allow_html=True)
+            st.markdown(
+                render_recovery_guidance_card(
+                    telemetry,
+                    st.session_state.get("latest_sql_validation", {}),
+                    st.session_state.get("latest_recovery", {}),
+                ),
+                unsafe_allow_html=True,
+            )
+            render_telemetry_exports(telemetry, active_trace, scope="analytics")
+        with memory_tab:
+            st.markdown(render_semantic_profile_card(st.session_state.get("semantic_context")), unsafe_allow_html=True)
+            st.markdown(
+                render_workspace_card(
+                    st.session_state.get("user_identity"),
+                    st.session_state.get("workspace_memory"),
+                ),
+                unsafe_allow_html=True,
+            )
+            st.markdown(render_analytics_memory_card(st.session_state.get("analytics_memory")), unsafe_allow_html=True)
+            st.markdown(render_saved_assets_card(st.session_state.get("workspace_memory")), unsafe_allow_html=True)
+        with monitoring_tab:
+            st.markdown(
+                render_monitoring_card(
+                    st.session_state.get("monitoring_state"),
+                    st.session_state.get("monitoring_config"),
+                ),
+                unsafe_allow_html=True,
+            )
+            st.markdown(render_executive_briefing_card(st.session_state.get("executive_briefing")), unsafe_allow_html=True)
+
+
+def render_analytics_workspace(client):
+    df = st.session_state.latest_df
+    telemetry = st.session_state.workflow_telemetry
+    exec_time = st.session_state.latest_exec_time
+    history = st.session_state.history
+    active_mode = "CSV Workspace" if st.session_state.latest_mode == "csv" and df is not None else "Live SQL"
+
     question = render_command_bar()
     live_panel_placeholder = st.empty()
-    if st.session_state.get("pending_monitoring_run") or monitoring_due(st.session_state.get("monitoring_config", {})):
+    if st.session_state.get("pending_monitoring_run"):
         st.session_state.pending_monitoring_run = False
         run_monitoring_workflow(live_placeholder=live_panel_placeholder)
+        df = st.session_state.latest_df
         telemetry = st.session_state.workflow_telemetry
         exec_time = st.session_state.latest_exec_time
     elif question:
+        with live_panel_placeholder.container():
+            st.info("Running your governed AI analytics workflow. Results, chart, insight, SQL, and audit details will appear here.")
         run_query(question, live_placeholder=live_panel_placeholder)
         df = st.session_state.latest_df
         telemetry = st.session_state.workflow_telemetry
@@ -1606,83 +1794,26 @@ def render_analytics_workspace(client):
                 chart_key=next_plotly_key("workflow_chart_summary"),
             )
 
+    render_onboarding_workspace_panel()
+    active_trace = st.session_state.live_trace or st.session_state.workflow_trace
+    active_telemetry = st.session_state.live_telemetry or telemetry
     if df is None:
-        status_left, status_right = st.columns([1.45, 0.92], gap="medium")
-        with status_left:
-            system_metrics = [
-                {"label": "System Health", "value": "99.98%", "caption": "Service readiness across AI orchestration"},
-                {"label": "Active Agents", "value": "4", "caption": "Core agents on warm standby"},
-                {"label": "Avg Latency", "value": "842 ms", "caption": "Trailing control-plane estimate"},
-                {"label": "Signal Quality", "value": "96.4", "caption": "Composite confidence benchmark"},
-            ]
-            render_kpi_cards(system_metrics)
-            st.markdown(
-                """
-                <div class="workspace-shell compact-shell">
-                    <div class="section-title">Operations Canvas</div>
-                    <div class="section-subtitle">Mock analytics view that keeps the workspace populated and operational between runs.</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            st.plotly_chart(
-                build_default_operations_figure(),
-                width="stretch",
-                key=next_plotly_key("default_ops_chart"),
-            )
-            st.markdown(render_agent_row(build_default_agent_states()), unsafe_allow_html=True)
-        with status_right:
-            st.markdown(
-                render_response_card(
-                    "Analytics Ready",
-                    "The workspace is preloaded with operational defaults until the next query executes.",
-                    '<div class="workspace-body-copy">Launch a sample prompt or ask your own question below. Until then, the dashboard stays populated with live-looking orchestration posture, health metrics, and recommendations.</div>',
-                    tone="summary-module",
-                ),
-                unsafe_allow_html=True,
-            )
-            st.markdown(render_activity_feed(build_default_activity_feed()), unsafe_allow_html=True)
-            st.markdown(
-                render_recommendation_card(
-                    [
-                        "Start with a revenue, customer, or top-track query to immediately populate the executive workspace.",
-                        "Upload a CSV to inspect ad hoc datasets while keeping observability and orchestration modules available.",
-                        "Use the workflow rail above to sanity-check which agent stages should remain warm for your next run.",
-                    ]
-                ),
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                render_observability_card(
-                    {
-                        "model": "gpt-4.1-mini",
-                        "total_tokens": 18240,
-                        "latency_ms": 842,
-                        "cost_usd": 0.021384,
-                    },
-                    [{"step": "planner", "status": "success"}],
-                ),
-                unsafe_allow_html=True,
-            )
-            st.markdown(render_semantic_profile_card(st.session_state.get("semantic_context")), unsafe_allow_html=True)
-            st.markdown(
-                render_workspace_card(
-                    st.session_state.get("user_identity"),
-                    st.session_state.get("workspace_memory"),
-                ),
-                unsafe_allow_html=True,
-            )
-            st.markdown(render_analytics_memory_card(st.session_state.get("analytics_memory")), unsafe_allow_html=True)
-            st.markdown(render_autonomous_insight_card(st.session_state.get("autonomous_insights")), unsafe_allow_html=True)
-            st.markdown(render_investigation_card(st.session_state.get("investigation_state")), unsafe_allow_html=True)
-            st.markdown(
-                render_monitoring_card(
-                    st.session_state.get("monitoring_state"),
-                    st.session_state.get("monitoring_config"),
-                ),
-                unsafe_allow_html=True,
-            )
-            st.markdown(render_executive_briefing_card(st.session_state.get("executive_briefing")), unsafe_allow_html=True)
+        st.markdown(
+            render_response_card(
+                "Ready for Your First Question",
+                "Ask in plain English to generate trusted SQL, a result preview, a chart, and an executive summary.",
+                '<div class="workspace-body-copy">Use a suggested question or type your own. Workflow and audit details stay available below without taking over the main workspace.</div>',
+                tone="summary-module",
+            ),
+            unsafe_allow_html=True,
+        )
+        st.plotly_chart(
+            build_default_operations_figure(),
+            width="stretch",
+            key=next_plotly_key("default_ops_chart"),
+        )
+        render_workflow_trace_section(active_trace, active_telemetry)
+        render_advanced_context_sections(df, telemetry, active_trace, active_mode, history, exec_time)
         return
     main_left, main_right = st.columns([1.42, 0.92], gap="medium")
     with main_left:
@@ -1690,15 +1821,6 @@ def render_analytics_workspace(client):
             render_executive_summary(st.session_state.latest_question, df, exec_time, telemetry),
             unsafe_allow_html=True,
         )
-        st.markdown(render_semantic_profile_card(st.session_state.get("semantic_context")), unsafe_allow_html=True)
-        st.markdown(
-            render_workspace_card(
-                st.session_state.get("user_identity"),
-                st.session_state.get("workspace_memory"),
-            ),
-            unsafe_allow_html=True,
-        )
-        st.markdown(render_analytics_memory_card(st.session_state.get("analytics_memory")), unsafe_allow_html=True)
 
         chart_rendered = False
         if is_scalar_result(df):
@@ -1716,9 +1838,9 @@ def render_analytics_workspace(client):
         elif can_render_chart(df):
             st.markdown(
                 """
-                <div class="workspace-shell compact-shell">
-                    <div class="section-title">Visualization Workspace</div>
-                    <div class="section-subtitle">Interactive insight canvas for executive-ready narratives and deeper operator exploration.</div>
+                    <div class="workspace-shell compact-shell">
+                    <div class="section-title">Chart Preview</div>
+                    <div class="section-subtitle">A clean visual summary of the current result set.</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -1728,7 +1850,7 @@ def render_analytics_workspace(client):
             numeric_labels = [option["label"] for option in numeric_options]
             all_labels = [option["label"] for option in all_options]
             option_lookup = {option["label"]: option for option in all_options}
-            recommended_x, recommended_y = recommend_chart_fields(df, st.session_state.get("semantic_context"))
+            recommended_x, recommended_y = recommend_chart_fields_deferred(df, st.session_state.get("semantic_context"))
             if st.session_state.x_col not in all_labels and recommended_x in all_labels:
                 st.session_state.x_col = recommended_x
             if st.session_state.y_col not in numeric_labels and recommended_y in numeric_labels:
@@ -1808,26 +1930,6 @@ def render_analytics_workspace(client):
     with main_right:
         recommendations = build_ai_recommendations(df, telemetry, st.session_state.workflow_trace)
         st.markdown(render_recommendation_card(recommendations), unsafe_allow_html=True)
-        st.markdown(render_autonomous_insight_card(st.session_state.get("autonomous_insights")), unsafe_allow_html=True)
-        st.markdown(render_investigation_card(st.session_state.get("investigation_state")), unsafe_allow_html=True)
-        st.markdown(
-            render_monitoring_card(
-                st.session_state.get("monitoring_state"),
-                st.session_state.get("monitoring_config"),
-            ),
-            unsafe_allow_html=True,
-        )
-        st.markdown(render_executive_briefing_card(st.session_state.get("executive_briefing")), unsafe_allow_html=True)
-        st.markdown(render_observability_card(telemetry, st.session_state.workflow_trace), unsafe_allow_html=True)
-        st.markdown(
-            render_recovery_guidance_card(
-                telemetry,
-                st.session_state.get("latest_sql_validation", {}),
-                st.session_state.get("latest_recovery", {}),
-            ),
-            unsafe_allow_html=True,
-        )
-        st.markdown(render_saved_assets_card(st.session_state.get("workspace_memory")), unsafe_allow_html=True)
 
         if not df.empty:
             explanation = st.session_state.get("latest_insight", "")
@@ -1835,7 +1937,7 @@ def render_analytics_workspace(client):
                 st.markdown(
                     render_response_card(
                         "AI Insight Brief",
-                        "Natural-language interpretation of the current result set.",
+                        "Executive summary of the current result set.",
                         f'<div class="workspace-body-copy">{escape_html(explanation)}</div>',
                         tone="insight-module",
                     ),
@@ -1845,7 +1947,7 @@ def render_analytics_workspace(client):
                 st.markdown(
                     render_response_card(
                         "AI Insight Brief",
-                        "Natural-language interpretation of the current result set.",
+                        "Executive summary of the current result set.",
                         '<div class="workspace-body-copy">Insight narration is unavailable for this run.</div>',
                         tone="insight-module",
                     ),
@@ -1882,6 +1984,9 @@ def render_analytics_workspace(client):
                 persist_workspace_memory()
                 st.success("Export step marked complete.")
         render_report_exports(scope="analytics")
+
+    render_workflow_trace_section(active_trace, active_telemetry)
+    render_advanced_context_sections(df, telemetry, active_trace, active_mode, history, exec_time)
 
 
 def render_copilot_workspace():
@@ -2403,7 +2508,7 @@ def render_api_workspace():
     runtime = st.session_state.get("openai_runtime", {})
     memory = st.session_state.get("workspace_memory", {})
     workspace_report = workspace_summary(memory)
-    connector_diagnostics = get_connector_registry().diagnostics(validate=True)
+    connector_diagnostics = connector_diagnostics_deferred(validate=True)
     left, right = st.columns([1, 1], gap="medium")
     with left:
         st.markdown(
@@ -2577,24 +2682,44 @@ st.set_page_config(
     layout="wide",
     page_icon=":bar_chart:",
 )
+log_startup_stage("page_config")
 
 st.markdown(get_theme_css(), unsafe_allow_html=True)
+log_startup_stage("theme_applied")
 client = None
 init_session_state()
-authenticated_identity = require_login()
+log_startup_stage("session_state_initialized")
+authenticated_identity = render_block("auth init", require_login)
 st.session_state.user_identity = authenticated_identity
-st.session_state.openai_runtime = validate_openai_runtime()
+if "openai_runtime" not in st.session_state:
+    st.session_state.openai_runtime = {"status": "deferred", "api_key_configured": bool(get_openai_api_key())}
+log_startup_stage("runtime_diagnostics_deferred")
 
-render_hero()
-selected_nav = render_top_navigation(st.session_state.get("top_navigation", "Overview"))
-st.session_state.workspace_route = selected_nav
-sidebar_state = render_sidebar()
-configure_workspace_session(
-    authenticated_identity["user_id"],
-    authenticated_identity["team_id"],
-    authenticated_identity["role"],
-)
-render_auth_controls()
+
+def render_navigation_block():
+    render_hero()
+    selected = render_top_navigation(st.session_state.get("top_navigation", "Overview"))
+    st.session_state.workspace_route = selected
+    return selected
+
+
+def render_sidebar_block():
+    state = render_sidebar()
+    render_auth_controls()
+    return state
+
+
+def render_workspace_block():
+    configure_workspace_session(
+        authenticated_identity["user_id"],
+        authenticated_identity["team_id"],
+        authenticated_identity["role"],
+    )
+
+
+selected_nav = render_block("navigation render", render_navigation_block)
+sidebar_state = render_block("sidebar render", render_sidebar_block)
+render_block("workspace render", render_workspace_block)
 st.session_state.monitoring_config = {
     **st.session_state.get("monitoring_config", default_monitoring_config()),
     "enabled": sidebar_state["monitoring_enabled"],
@@ -2617,23 +2742,31 @@ if sidebar_state["uploaded_file"] is not None:
         st.success("CSV uploaded successfully. The workspace is now using uploaded data.")
 
 render_schema(sidebar_state["show_schema"])
+log_startup_stage("schema_panel_checked")
 
 nav = st.session_state.get("workspace_route") or sidebar_state["nav"]
-if nav == "Overview":
-    render_analytics_workspace(client)
-elif nav == "Operations":
-    render_operations_center()
-elif nav == "Copilot":
-    render_copilot_workspace()
-elif nav == "Investigations":
-    render_investigations_workspace()
-elif nav == "Monitoring":
-    render_monitoring_workspace()
-elif nav == "Agents":
-    render_agents_workspace()
-elif nav == "API":
-    render_api_workspace()
-else:
-    render_workspace_history()
+
+
+def render_route_block():
+    if nav == "Overview":
+        render_analytics_workspace(client)
+    elif nav == "Operations":
+        render_operations_center()
+    elif nav == "Copilot":
+        render_copilot_workspace()
+    elif nav == "Investigations":
+        render_investigations_workspace()
+    elif nav == "Monitoring":
+        render_monitoring_workspace()
+    elif nav == "Agents":
+        render_agents_workspace()
+    elif nav == "API":
+        render_api_workspace()
+    else:
+        render_workspace_history()
+
+
+render_block(f"route rendering: {nav}", render_route_block)
 
 render_footer()
+log_startup_stage("footer_rendered")
