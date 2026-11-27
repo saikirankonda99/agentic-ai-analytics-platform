@@ -247,6 +247,18 @@ OPENAI_API_KEY=your_api_key_here
 
 The app can still run without an API key for diagnostics, onboarding, CSV-backed workflows, and most local tests.
 
+### Windows PowerShell: retail demo
+
+From the repository folder, use the Python 3.11 launcher and the virtual environment's interpreter directly. No PowerShell activation-policy change is needed:
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
+.\.venv\Scripts\python.exe -m streamlit run app.py --server.port 8501
+```
+
+Open `http://localhost:8501`, sign in with the development credentials above, and choose **Load retail demo**. This CSV demo does not require an `.env` file, a separate FastAPI process, or an API key. The lock file excludes the optional `uvloop` dependency on Windows. Native Windows installation has not been exercised by the Linux CI jobs.
+
 Start Streamlit:
 
 ```bash
