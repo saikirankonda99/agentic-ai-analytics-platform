@@ -117,6 +117,8 @@ def customer_chart(df: pd.DataFrame, currency: str = "") -> go.Figure | None:
             marker_line_width=0,
             hovertemplate=f"%{{x}}<br>{label}: %{{y:,.2f}}{_html(suffix)}<extra></extra>",
         ))
+        # Numeric-looking product codes are labels, not a continuous measure.
+        figure.update_xaxes(type="category")
     figure.update_layout(
         height=310, margin={"l": 12, "r": 12, "t": 24, "b": 12},
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",

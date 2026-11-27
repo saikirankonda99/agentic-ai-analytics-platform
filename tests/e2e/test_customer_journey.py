@@ -100,6 +100,7 @@ def test_nonadmin_customer_maps_reconciles_downloads_and_logs_out(page, running_
     }
     _open_expander(page, "Common questions")
     _run_and_wait(page, lambda: page.get_by_role("button", name="Revenue by Product", exact=True).click())
+    expect(page.get_by_test_id("stPlotlyChart").locator(".xtick text")).to_have_text(["0007", "0010"])
     products = _download_rows(page)
     assert {row["product"]: Decimal(row["revenue"]) for row in products} == {
         "0007": Decimal("60.00"), "0010": Decimal("10.00"),

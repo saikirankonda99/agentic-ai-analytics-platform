@@ -249,7 +249,7 @@ jobs:
 
   persistence-services:
     name: PostgreSQL and pgvector
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [lint, test]
     services:
       postgres:
@@ -274,8 +274,37 @@ jobs:
           cache-dependency-path: requirements-lock.txt
       - name: Install dependencies
         run: python -m pip install -r requirements-lock.txt
-      - name: Set PostgreSQL client tools
-        run: echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"
+      - name: Install PostgreSQL 16 client tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends postgresql-client-16
+          test -x /usr/lib/postgresql/16/bin/pg_dump
+          test -x /usr/lib/postgresql/16/bin/pg_restore
+          echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"
+      - name: Require matching PostgreSQL client and server versions
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import re
+          import shutil
+          import subprocess
+          import psycopg
+
+          expected_directory = Path("/usr/lib/postgresql/16/bin")
+          for name in ("pg_dump", "pg_restore"):
+              executable = shutil.which(name)
+              if not executable or Path(executable).resolve().parent != expected_directory:
+                  raise SystemExit(f"{name} must resolve to the installed PostgreSQL 16 client")
+              version = subprocess.check_output([executable, "--version"], text=True).strip()
+              match = re.search(r"\(PostgreSQL\) (\d+)", version)
+              if not match or int(match.group(1)) != 16:
+                  raise SystemExit(f"{name} must have major version 16")
+              print(version)
+          with psycopg.connect(os.environ["TEST_POSTGRES_URL"]) as connection:
+              if connection.info.server_version // 10000 != 16:
+                  raise SystemExit("The recovery drill requires a PostgreSQL 16 server")
+          PY
       - name: Enable vector extension
         run: |
           python - <<'PY'
@@ -284,7 +313,20 @@ jobs:
               conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
           PY
       - name: Verify real database round trips, isolation, and worker leases
-        run: python -m pytest tests/integration -v
+        run: python -m pytest tests/integration -v --junitxml=test-results/postgresql-junit.xml
+      - name: Require every service integration test to run
+        run: |
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+
+          cases = ET.parse("test-results/postgresql-junit.xml").getroot().findall(".//testcase")
+          if not cases:
+              raise SystemExit("No service integration tests ran")
+          skipped = [case.attrib.get("name", "unknown") for case in cases if case.find("skipped") is not None]
+          if skipped:
+              raise SystemExit("Service integration tests must not skip: " + ", ".join(skipped))
+          print(f"All {len(cases)} service integration tests ran")
+          PY
 
   deployment-safety:
     name: Deployment Safety
