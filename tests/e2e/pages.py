@@ -135,7 +135,11 @@ def select_csv_import_option(
     if combobox.input_value() == option:
         expect(combobox).to_have_value(option)
         return
-    combobox.click()
+    # The explicit trigger focuses before opening; clicking the input can open
+    # on pointerdown and then close again when focus scrolls a low control.
+    control.scroll_into_view_if_needed()
+    control.get_by_role("button", name="Open", exact=True).click()
+    expect(combobox).to_have_attribute("aria-expanded", "true")
     selected_option = page.get_by_role("option", name=option, exact=True)
     expect(selected_option).to_be_visible()
     if screenshot_path is not None:
