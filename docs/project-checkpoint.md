@@ -36,9 +36,12 @@ See the [README](../README.md), [release-readiness checklist](release-readiness.
 
 The general application job's 22 skips are browser and service tests handled in dedicated jobs. The live-provider browser case still requires a private API key. This CI evidence does not establish live model accuracy, hosted capacity, or customer impact.
 
+The subsequent documentation checkpoint `1216f2df288e7a4889873effc5362a961b5b94e0` also passed [Platform CI run 46035073168](https://github.com/saikirankonda99/agentic-ai-analytics-platform/actions/runs/46035073168). Google Cloud preparation adds 23 local tests for the runtime secret loader; these use synthetic responses and do not access a cloud account. Its focused tests, Ruff checks, documentation links, and Bash syntax checks passed. Check the pull request for CI evidence on any newer revision.
+
 ## Hosting checkpoint
 
 - Google Cloud Compute Engine with the existing Docker Compose stack is the next pilot option to evaluate. Account eligibility, available credits, expiration, region, and the complete deployment estimate still need confirmation. No Google Cloud infrastructure has been provisioned in this work.
+- A [Google Cloud private pilot runbook](google-cloud-pilot.md) and [itemized cost proposal](google-cloud-costs.md) now prepare that option. The runtime secret loader uses the VM's service account and explicit Secret Manager versions. These are deployment preparation, not evidence of a running Google Cloud instance; account access, private secret initialization, and cloud acceptance remain pending.
 - The [Render proposal](render-release.md) and `render.yaml` remain available. Provider planning was blocked by a payment-information requirement; the proposed paid stack was not deployed.
 - The existing Render demo was last observed running the older main revision with local SQLite. Preserve any required data before a future migration or retirement.
 - Cloud-provider credits and the existing direct OpenAI API billing relationship must be budgeted separately. Startup-program eligibility is not established by this repository; verify current program requirements before applying.

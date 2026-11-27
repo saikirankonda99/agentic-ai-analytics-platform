@@ -59,6 +59,8 @@ For Render, use Docker web services for the frontend/API and a background worker
 
 The root `render.yaml` and [Render release proposal](render-release.md) prepare a separate paid pilot stack, including its current cost estimate, private secret-entry steps, and preservation of the existing service's local data. Review and approve the provider's concrete plan before applying it.
 
+For an initial Google Cloud operator pilot, follow the [private Compute Engine runbook](google-cloud-pilot.md) and review its [cost proposal](google-cloud-costs.md). This path reuses Docker Compose with IAP access and a dedicated service account for Secret Manager. A public customer HTTPS endpoint, off-server backup scheduling, and hosted acceptance still require separate completion.
+
 The default memory store uses ordinary PostgreSQL. To enable optional pgvector, install the extension administratively and set `VECTOR_DATABASE_URL` to that database. The application does not assume extension-install privileges.
 
 ## Verify the deployed revision
