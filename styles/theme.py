@@ -1256,7 +1256,9 @@ def get_theme_css() -> str:
     }
 
     .stButton > button,
-    .stDownloadButton > button {
+    .stDownloadButton > button,
+    [data-testid="stFormSubmitButton"] button,
+    [data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"] {
         border-radius: 14px;
         border: 1px solid rgba(86, 204, 242, 0.26);
         background: linear-gradient(135deg, rgba(47, 128, 237, 0.22), rgba(86, 204, 242, 0.12));
@@ -1266,7 +1268,9 @@ def get_theme_css() -> str:
     }
 
     .stButton > button:hover,
-    .stDownloadButton > button:hover {
+    .stDownloadButton > button:hover,
+    [data-testid="stFormSubmitButton"] button:hover,
+    [data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"]:hover {
         border-color: rgba(86, 204, 242, 0.45);
         color: white;
     }
@@ -1447,7 +1451,7 @@ def get_theme_css() -> str:
         background: transparent !important;
     }
 
-    [data-testid="stAlert"] {
+    [data-testid="stAlertContainer"] {
         background: rgba(15, 23, 42, 0.86) !important;
         border: 1px solid rgba(148, 163, 184, 0.14) !important;
         color: var(--text) !important;
@@ -1472,6 +1476,11 @@ def get_theme_css() -> str:
         border: 1px dashed rgba(86, 204, 242, 0.22) !important;
         color: var(--text) !important;
         border-radius: 18px !important;
+    }
+
+    [data-testid="stFileUploaderDropzoneInstructions"],
+    [data-testid="stFileUploaderDropzoneInstructions"] small {
+        color: var(--muted) !important;
     }
 
     [data-testid="stMetric"],
