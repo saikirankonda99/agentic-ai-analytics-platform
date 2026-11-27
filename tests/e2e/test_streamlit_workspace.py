@@ -16,6 +16,7 @@ from tests.e2e.pages import (
     review_csv_upload,
     run_command,
     seed_workspace_assets,
+    select_admin_workspace,
     select_csv_import_option,
     select_nav,
     upload_csv,
@@ -184,13 +185,10 @@ def test_custom_csv_mapping_validates_and_exports_all_sales_rows(logged_in_page,
     expect(page.get_by_role("button", name="Run", exact=True)).to_have_count(0)
 
     page.get_by_label("Calculate revenue from").get_by_text("Quantity × unit price", exact=True).click()
-    quantity_control = page.get_by_test_id("stSelectbox").filter(has=page.get_by_text("Quantity column", exact=True))
-    quantity_control.get_by_role("combobox").click()
-    quantity_option = page.get_by_role("option", name="Sold units", exact=True)
-    expect(quantity_option).to_be_visible()
-    page.screenshot(path=running_services.output_dir / "screenshots" / "csv-import-column-options.png")
-    quantity_option.click()
-    expect(quantity_control.get_by_role("combobox")).to_have_value("Sold units")
+    select_csv_import_option(
+        page, "Quantity column", "Sold units",
+        screenshot_path=running_services.output_dir / "screenshots" / "csv-import-column-options.png",
+    )
     select_csv_import_option(page, "Unit price column", "Each amount")
     select_csv_import_option(page, "Product column", "Item description")
     select_csv_import_option(page, "Date column", "Sold on")
@@ -296,6 +294,8 @@ def test_csv_review_rejects_hidden_bad_row_and_clears_old_results(logged_in_page
     # Sign in on the existing page: navigating anew would hide stale session state.
     password.fill(running_services.admin_password)
     page.get_by_role("button", name="Login", exact=True).click()
+    expect(page.get_by_role("button", name="Try sample data", exact=True)).to_be_visible(timeout=30_000)
+    select_admin_workspace(page)
     expect(page.get_by_text("Quick Actions", exact=True)).to_be_visible(timeout=30_000)
     expect(by_test_id(page, "csv-import-review")).to_have_count(0)
     expect(page.get_by_text(re.compile(r"Active data: Chinook example database"))).to_be_visible()

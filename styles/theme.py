@@ -1550,7 +1550,10 @@ def get_theme_css() -> str:
     [role="option"] { color: #3D2939 !important; }
     [role="option"]:hover, [aria-selected="true"][role="option"] { background: #F1E3D8 !important; }
     .stTextInput input, .stTextArea textarea, .stSelectbox [data-baseweb="select"] > div {
-        background: #FFF9F0 !important; border-color: #D8C6BB; min-height: 44px;
+        background: #FFF9F0 !important; border-color: #D8C6BB;
+    }
+    [data-testid="stTextInputRootElement"], .stTextArea textarea, .stSelectbox [data-baseweb="select"] > div {
+        min-height: 44px;
     }
     .stButton > button, .stDownloadButton > button, [data-testid="stFormSubmitButton"] button {
         background: #FFF9F0; border: 1px solid #D4BFAF; color: #563548;
