@@ -61,6 +61,7 @@ from semantic import profile_dataframe, profile_schema, recommend_chart_fields, 
 from styles.theme import get_theme_css
 from ui.views.common import ViewServices
 from ui.views.connectors import render_api_workspace
+from ui.views.data_import import render_sales_import_review
 from ui.views.investigations import render_investigations_workspace
 from ui.views.orchestration import render_copilot_workspace, render_operations_center
 from ui.views.onboarding import render_onboarding_workspace_panel, render_quick_actions_panel
@@ -448,7 +449,15 @@ def init_session_state():
             st.session_state[key] = value
 
 
+def clear_import_review():
+    """Discard staged data and widget choices when a source or workspace changes."""
+    for key in list(st.session_state):
+        if key.startswith("csv_import_"):
+            del st.session_state[key]
+
+
 def clear_session():
+    clear_import_review()
     st.session_state.upload_generation = st.session_state.get("upload_generation", 0) + 1
     st.session_state.messages = []
     st.session_state.history = []
@@ -530,6 +539,33 @@ def clear_analysis_result():
         "_render_export_cache": {},
     }.items():
         st.session_state[key] = value
+
+
+def stage_sales_upload(content, filename, fingerprint):
+    """Read a candidate file without making it available to analysis yet."""
+    clear_import_review()
+    clear_analysis_result()
+    st.session_state.pop("uploaded_df", None)
+    st.session_state.uploaded_name = None
+    st.session_state.uploaded_fingerprint = None
+    st.session_state.latest_question = ""
+    st.session_state.latest_mode = "csv"
+    st.session_state.active_intent = ""
+    st.session_state.messages = []
+    st.session_state.analytics_memory = empty_analytics_memory()
+    st.session_state.semantic_context = {}
+    st.session_state.pending_monitoring_run = False
+    st.session_state.csv_upload_error = ""
+    st.session_state.csv_import_fingerprint = fingerprint
+    st.session_state.csv_import_name = filename
+    try:
+        frame = read_sales_csv(content)
+    except CSVAnalysisError as exc:
+        st.session_state.csv_upload_error = str(exc)
+        st.session_state.csv_import_pending = False
+    else:
+        st.session_state.csv_import_raw = frame
+        st.session_state.csv_import_pending = True
 
 
 def configure_workspace_session(user_id, team_id, role, workspace_scope="Personal", display_name=None):
@@ -1290,6 +1326,9 @@ def run_query(question, live_placeholder=None):
     if not user_can(st.session_state.get("user_identity"), "query"):
         st.warning("Your current workspace role does not allow query execution.")
         return
+    if st.session_state.get("csv_import_pending"):
+        st.warning("Review the uploaded CSV and choose Use this data before running an analysis.")
+        return
     if st.session_state.get("csv_upload_error"):
         st.warning("Replace the invalid CSV, load the retail demo, or choose the example database before running an analysis.")
         return
@@ -1515,7 +1554,9 @@ def render_analytics_workspace(client, services):
         live_panel_placeholder = st.empty()
 
     with result_area:
-        if st.session_state.get("pending_monitoring_run") or monitoring_due(st.session_state.get("monitoring_config", {})):
+        if "uploaded_df" not in st.session_state and (
+            st.session_state.get("pending_monitoring_run") or monitoring_due(st.session_state.get("monitoring_config", {}))
+        ):
             st.session_state.pending_monitoring_run = False
             run_monitoring_workflow(live_placeholder=live_panel_placeholder)
         elif question:
@@ -1824,37 +1865,25 @@ if sidebar_state["use_database"]:
 if sidebar_state["uploaded_file"] is not None:
     uploaded_name = sidebar_state["uploaded_file"].name
     uploaded_bytes = sidebar_state["uploaded_file"].getvalue()
-    uploaded_fingerprint = hashlib.sha256(uploaded_bytes).hexdigest()
-    if st.session_state.get("uploaded_fingerprint") != uploaded_fingerprint:
-        clear_analysis_result()
-        st.session_state.analytics_memory = empty_analytics_memory()
-        st.session_state.latest_question = ""
-        try:
-            uploaded_df = read_sales_csv(uploaded_bytes)
-        except CSVAnalysisError as exc:
-            st.warning(str(exc))
-            st.session_state.pop("uploaded_df", None)
-            st.session_state.csv_upload_error = str(exc)
-            st.session_state.uploaded_name = None
-            st.session_state.uploaded_fingerprint = None
-        else:
-            st.session_state.uploaded_df = uploaded_df
-            st.session_state.uploaded_name = uploaded_name
-            st.session_state.uploaded_fingerprint = uploaded_fingerprint
-            st.session_state.csv_upload_error = ""
-            st.session_state.latest_mode = "csv"
-            st.session_state.latest_df = None
-            st.session_state.latest_sql = ""
-            st.session_state.latest_insight = ""
-            st.session_state.analytics_memory = empty_analytics_memory()
-            st.session_state.latest_csv_analysis = None
-            profile_active_dataframe(uploaded_df, f"Uploaded CSV: {uploaded_name}")
-            st.success("CSV uploaded successfully. The workspace is now using uploaded data.")
+    uploaded_fingerprint = hashlib.sha256(uploaded_name.encode("utf-8") + b"\0" + uploaded_bytes).hexdigest()
+    if st.session_state.get("csv_import_fingerprint") != uploaded_fingerprint:
+        stage_sales_upload(uploaded_bytes, uploaded_name, uploaded_fingerprint)
+elif st.session_state.get("csv_import_pending") or st.session_state.get("csv_upload_error"):
+    # Removing a candidate from the uploader also discards its pending review.
+    clear_session()
+    st.rerun()
+else:
+    st.session_state.csv_import_fingerprint = None
 
-if "uploaded_df" in st.session_state:
+if st.session_state.pop("csv_import_applied_notice", False):
+    st.success("CSV ready for analysis.")
+
+if st.session_state.get("csv_import_pending"):
+    st.caption(f"Pending data: {st.session_state.csv_import_name} · Review and apply the column choices below.")
+elif "uploaded_df" in st.session_state:
     st.caption(f"Active data: {st.session_state.uploaded_name} · {len(st.session_state.uploaded_df):,} sales rows · Local calculations, no model calls.")
 elif st.session_state.get("csv_upload_error"):
-    st.warning("The uploaded CSV could not be read. Choose a valid sales file or another data source.")
+    st.error(st.session_state.csv_upload_error)
 else:
     st.caption("Active data: Chinook example database · Natural-language SQL requires an OpenAI API key.")
 
@@ -1884,7 +1913,34 @@ view_services = ViewServices(
 )
 
 nav = st.session_state.get("workspace_route") or sidebar_state["nav"]
-if nav == "Overview":
+if st.session_state.get("csv_import_pending"):
+    st.session_state.pending_monitoring_run = False
+    review = render_sales_import_review(
+        st.session_state.csv_import_raw,
+        st.session_state.csv_import_name,
+        st.session_state.csv_import_fingerprint,
+    )
+    if st.session_state.get("csv_import_cancel_requested"):
+        clear_session()
+        st.rerun()
+    if review is not None:
+        st.session_state.uploaded_df = review.frame
+        st.session_state.uploaded_name = st.session_state.csv_import_name
+        st.session_state.uploaded_fingerprint = st.session_state.csv_import_fingerprint
+        st.session_state.csv_import_available_questions = review.available_questions
+        st.session_state.csv_import_pending = False
+        st.session_state.pop("csv_import_raw", None)
+        st.session_state.csv_import_applied_notice = True
+        st.session_state.csv_upload_error = ""
+        st.session_state.latest_mode = "csv"
+        profile_active_dataframe(review.frame, f"Uploaded CSV: {st.session_state.uploaded_name}")
+        st.rerun()
+elif st.session_state.get("csv_upload_error"):
+    st.info("Upload a valid sales CSV or choose another data source from the sidebar.")
+    if st.button("Cancel upload"):
+        clear_session()
+        st.rerun()
+elif nav == "Overview":
     render_analytics_workspace(client, view_services)
 elif nav == "Operations":
     render_operations_center(view_services, render_telemetry_exports)

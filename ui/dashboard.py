@@ -328,10 +328,12 @@ def render_sidebar() -> dict:
                 markdown_html(f'<div class="sample-query">{escape_html(query)}</div>')
 
         with st.expander("Dataset Upload", expanded=True):
-            st.caption("Use revenue, or quantity and unit_price. Optional columns: product, date (YYYY-MM-DD), country, currency. Currency: USD, CAD, EUR, GBP, AUD, or NZD. Up to 10 MB / 50,000 rows.")
+            st.caption("Upload a sales CSV, preview its rows, and choose which columns to use. Use a revenue amount or quantity × unit price. Up to 10 MB / 50,000 rows.")
             uploaded_file = st.file_uploader(
                 "Upload CSV", type=["csv"], label_visibility="collapsed",
+                max_upload_size=10,
                 key=f"sales_upload_{workspace_team}_{workspace_user}_{workspace_scope}_{st.session_state.get('upload_generation', 0)}",
+                on_change=_open_overview,
             )
             load_demo = st.button("Load retail demo", width="stretch", on_click=_open_overview)
             st.download_button("Download sample sales CSV", DEMO_PATH.read_bytes(), "retail-sales.csv", "text/csv", width="stretch")
@@ -363,7 +365,11 @@ def render_sidebar() -> dict:
                 ),
                 format_func=lambda value: f"{value} min" if value < 1440 else "Daily",
             )
-            run_monitoring = st.button("Run scheduled check", width="stretch")
+            run_monitoring = st.button(
+                "Run scheduled check", width="stretch",
+                disabled="uploaded_df" in st.session_state or bool(st.session_state.get("csv_import_pending") or st.session_state.get("csv_upload_error")),
+                help="Choose the example database to run scheduled database checks.",
+            )
 
         return {
             "nav": st.session_state.get("top_navigation", "Overview"),
@@ -431,8 +437,9 @@ def render_command_bar() -> str | None:
     )
     prompt = None
     csv_mode = "uploaded_df" in st.session_state
+    available_questions = st.session_state.get("csv_import_available_questions", SUPPORTED_QUESTIONS)
     if csv_mode:
-        st.caption("Supported CSV questions: " + "; ".join(SUPPORTED_QUESTIONS) + ". Each answer uses the entire upload.")
+        st.caption("Available CSV questions: " + "; ".join(available_questions) + ". Each answer uses the entire upload.")
     with st.form("command_bar_form", clear_on_submit=False):
         query_col, action_col = st.columns([6, 1.2], vertical_alignment="bottom")
         with query_col:
@@ -451,9 +458,11 @@ def render_command_bar() -> str | None:
     third_prompt = "Revenue by month" if csv_mode else "Top 10 tracks"
     if c1.button("Total Revenue" if csv_mode else "Top Customers", width="stretch", on_click=_set_command_prompt, args=(first_prompt,)):
         prompt = first_prompt
-    if c2.button("Revenue by Product" if csv_mode else "Revenue by Country", width="stretch", on_click=_set_command_prompt, args=(second_prompt,)):
+    if c2.button("Revenue by Product" if csv_mode else "Revenue by Country", width="stretch", on_click=_set_command_prompt, args=(second_prompt,),
+                 disabled=csv_mode and "Revenue by product" not in available_questions):
         prompt = second_prompt
-    if c3.button("Monthly Revenue" if csv_mode else "Top Tracks", width="stretch", on_click=_set_command_prompt, args=(third_prompt,)):
+    if c3.button("Monthly Revenue" if csv_mode else "Top Tracks", width="stretch", on_click=_set_command_prompt, args=(third_prompt,),
+                 disabled=csv_mode and "Revenue by month" not in available_questions):
         prompt = third_prompt
 
     if submitted and question.strip():

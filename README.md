@@ -23,7 +23,9 @@ Load the included synthetic retail dataset, ask a supported sales question, insp
 
 The 12 sample transactions total **352.00 USD**. Product totals are Coffee Beans **180.00**, Tea **100.00**, and Mug **72.00**. Monthly totals are January **144.00**, February **117.00**, and March **91.00**. These are synthetic demonstration results, not customer outcomes.
 
-Own-file uploads support total revenue, revenue by product/month/country, units sold by product, and a sales summary. Every row is included in the calculation. Unsupported questions receive a message instead of an unrelated answer. See [Sales Demo and Milestone Status](docs/small-business-milestone.md) for the CSV contract, validation, and remaining work.
+For your own CSV, choose **Upload**, preview the first 10 rows, match the sales fields to your columns, and choose **Use this data** after reviewing the checks and total. Choose whether revenue comes from a line-amount column or quantity × unit price, and select the date format and currency when needed. The entire upload is validated before it becomes active.
+
+Own-file uploads support total revenue, revenue by product/month/country, units sold by product, and a sales summary, depending on the columns selected. Every row is included in the calculation. Unsupported questions receive a message instead of an unrelated answer. See [Sales Demo and Milestone Status](docs/small-business-milestone.md) for the CSV contract, validation, and remaining work.
 
 ### Current implementation boundaries
 

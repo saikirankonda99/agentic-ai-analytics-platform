@@ -2,12 +2,24 @@ from __future__ import annotations
 
 import csv
 import os
+import re
 from pathlib import Path
 
 import pytest
 from playwright.sync_api import expect
 
-from tests.e2e.pages import by_test_id, login, login_expect_error, run_command, seed_workspace_assets, select_nav, upload_csv
+from tests.e2e.pages import (
+    by_test_id,
+    download_full_csv,
+    login,
+    login_expect_error,
+    review_csv_upload,
+    run_command,
+    seed_workspace_assets,
+    select_csv_import_option,
+    select_nav,
+    upload_csv,
+)
 
 pytestmark = pytest.mark.e2e
 
@@ -152,6 +164,142 @@ def test_csv_analytics_workflow_exports_reports_and_saved_state(logged_in_page, 
     expect(by_test_id(page, "saved-report-views")).to_be_visible()
     expect(by_test_id(page, "saved-report-views").get_by_text("Shared")).to_be_visible()
     expect(by_test_id(page, "performance-diagnostics")).to_be_visible()
+
+
+def test_custom_csv_mapping_validates_and_exports_all_sales_rows(logged_in_page, tmp_path, running_services) -> None:
+    page = logged_in_page
+    sales_csv = tmp_path / "custom-header-sales.csv"
+    sales_csv.write_text(
+        "Item description,Sold units,Each amount,Sold on\n"
+        "Tea,2,15.00,01/05/2026\n"
+        "Coffee,1,10.00,01/20/2026\n"
+        "Tea,3,6.00,02/03/2026\n",
+        encoding="utf-8",
+    )
+    select_nav(page, "Copilot")
+    expect(page.get_by_text("AI Copilot Conversation", exact=True)).to_be_visible()
+    review_csv_upload(page, sales_csv)
+    by_test_id(page, "csv-import-review").scroll_into_view_if_needed()
+    page.screenshot(path=running_services.output_dir / "screenshots" / "csv-import-preview.png")
+    expect(page.get_by_role("button", name="Run", exact=True)).to_have_count(0)
+
+    page.get_by_label("Calculate revenue from").get_by_text("Quantity × unit price", exact=True).click()
+    quantity_control = page.get_by_test_id("stSelectbox").filter(has=page.get_by_text("Quantity column", exact=True))
+    quantity_control.get_by_role("combobox").click()
+    quantity_option = page.get_by_role("option", name="Sold units", exact=True)
+    expect(quantity_option).to_be_visible()
+    page.screenshot(path=running_services.output_dir / "screenshots" / "csv-import-column-options.png")
+    quantity_option.click()
+    expect(quantity_control.get_by_text("Sold units", exact=True)).to_be_visible()
+    select_csv_import_option(page, "Unit price column", "Each amount")
+    select_csv_import_option(page, "Product column", "Item description")
+    select_csv_import_option(page, "Date column", "Sold on")
+    select_csv_import_option(page, "Date format", "MM/DD/YYYY")
+    select_csv_import_option(page, "Currency for all rows", "USD")
+
+    revenue_metric = page.get_by_test_id("stMetric").filter(has=page.get_by_text("Total revenue", exact=True))
+    expect(revenue_metric).to_contain_text("58.00 USD")
+    expect(page.get_by_text("All 3 rows passed the required checks.", exact=True)).to_be_visible()
+    apply_button = page.get_by_role("button", name="Use this data", exact=True)
+    expect(apply_button).to_be_enabled()
+    apply_button.scroll_into_view_if_needed()
+    page.screenshot(path=running_services.output_dir / "screenshots" / "csv-import-review-ready.png")
+    apply_button.click()
+    expect(page.get_by_text("CSV ready for analysis.", exact=True)).to_be_visible(timeout=20_000)
+    expect(by_test_id(page, "csv-import-review")).to_have_count(0)
+
+    run_command(page, "Total revenue")
+    expect(by_test_id(page, "sales-summary")).to_contain_text("Total revenue: 58.00 USD.")
+    total_rows = download_full_csv(page)
+    assert len(total_rows) == 1
+    assert float(total_rows[0]["revenue"]) == 58.0
+
+    page.get_by_role("button", name="Monthly Revenue", exact=True).click()
+    expect(by_test_id(page, "sales-summary")).to_contain_text("Monthly totals cover 2026-01 through 2026-02")
+    months = download_full_csv(page)
+    assert {row["month"]: float(row["revenue"]) for row in months} == {"2026-01": 40.0, "2026-02": 18.0}
+
+    page.get_by_role("button", name="Revenue by Product", exact=True).click()
+    expect(by_test_id(page, "sales-summary")).to_contain_text("Highest revenue: Tea (48.00).")
+    products = download_full_csv(page)
+    assert {row["product"]: float(row["revenue"]) for row in products} == {"Tea": 48.0, "Coffee": 10.0}
+
+
+def test_csv_review_rejects_hidden_bad_row_and_clears_old_results(logged_in_page, tmp_path, running_services) -> None:
+    page = logged_in_page
+    page.get_by_role("button", name="Load retail demo", exact=True).click()
+    run_command(page, "Total revenue")
+    expect(by_test_id(page, "sales-summary")).to_contain_text("Total revenue: 352.00 USD.")
+    expect(page.get_by_role("button", name="Download Full CSV", exact=True)).to_be_visible()
+
+    invalid_csv = tmp_path / "invalid-after-preview.csv"
+    lines = ["product,quantity,unit_price,date,currency"]
+    lines.extend(
+        f"Item {row},{'not-a-number' if row == 12 else '1'},2.50,2026-01-{row:02d},USD"
+        for row in range(1, 13)
+    )
+    invalid_csv.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    review_csv_upload(page, invalid_csv)
+    error = page.get_by_text(re.compile(r"Quantity.*data rows:\s*12\b"))
+    expect(error).to_be_visible(timeout=20_000)
+    expect(page.get_by_role("button", name="Use this data", exact=True)).to_be_disabled()
+    expect(page.get_by_role("button", name="Run", exact=True)).to_have_count(0)
+    expect(page.get_by_role("button", name="Total Revenue", exact=True)).to_have_count(0)
+    expect(page.get_by_placeholder("Ask a revenue, customer, or product question...")).to_have_count(0)
+    expect(by_test_id(page, "sales-summary")).to_have_count(0)
+    expect(page.get_by_text("Result Explorer", exact=True)).to_have_count(0)
+    expect(page.get_by_role("button", name="Download Full CSV", exact=True)).to_have_count(0)
+    expect(page.get_by_role("button", name="Executive Summary", exact=True)).to_have_count(0)
+    error.scroll_into_view_if_needed()
+    page.screenshot(path=running_services.output_dir / "screenshots" / "csv-import-validation-errors.png")
+
+    replacement_csv = tmp_path / "replacement-revenue.csv"
+    replacement_csv.write_text("product,revenue,currency\nReplacement,7.50,USD\n", encoding="utf-8")
+    review_csv_upload(page, replacement_csv)
+    expect(page.get_by_role("radio", name="Revenue column", exact=True)).to_be_checked()
+    revenue_control = page.get_by_test_id("stSelectbox").filter(has=page.get_by_text("Revenue column", exact=True))
+    expect(revenue_control.get_by_text("revenue", exact=True)).to_be_visible()
+    revenue_metric = page.get_by_test_id("stMetric").filter(has=page.get_by_text("Total revenue", exact=True))
+    expect(revenue_metric).to_contain_text("7.50 USD")
+    expect(page.get_by_text(re.compile(r"data rows:\s*12\b"))).to_have_count(0)
+    expect(page.get_by_role("button", name="Use this data", exact=True)).to_be_enabled()
+
+    page.get_by_role("button", name="Cancel upload", exact=True).click()
+    expect(by_test_id(page, "csv-import-review")).to_have_count(0)
+    expect(page.get_by_text(re.compile(r"Active data: Chinook example database"))).to_be_visible()
+    expect(page.get_by_role("button", name="Run", exact=True)).to_be_enabled()
+    expect(page.get_by_role("button", name="Download Full CSV", exact=True)).to_have_count(0)
+
+    review_csv_upload(page, replacement_csv)
+    sidebar = page.get_by_test_id("stSidebarUserContent")
+    sidebar.get_by_text("Shared team", exact=True).click()
+    expect(by_test_id(page, "csv-import-review")).to_have_count(0)
+    expect(page.get_by_text(re.compile(r"Active data: Chinook example database"))).to_be_visible()
+    expect(page.locator("input[type=file]")).to_have_value("")
+    expect(page.get_by_role("button", name="Download Full CSV", exact=True)).to_have_count(0)
+    expect(page.get_by_role("button", name="Executive Summary", exact=True)).to_have_count(0)
+
+    sidebar.get_by_text("Personal", exact=True).click()
+    review_csv_upload(page, replacement_csv)
+    session_details = sidebar.get_by_test_id("stExpander").filter(has=page.get_by_text("Session", exact=True))
+    session_details.locator("summary").click()
+    session_details.get_by_role("button", name="Logout", exact=True).click()
+    password = page.get_by_role("textbox", name="Password")
+    expect(password).to_be_visible()
+    expect(by_test_id(page, "csv-import-review")).to_have_count(0)
+    expect(page.get_by_text(re.compile(r"Pending data:"))).to_have_count(0)
+    expect(page.get_by_role("button", name="Download Full CSV", exact=True)).to_have_count(0)
+
+    # Sign in on the existing page: navigating anew would hide stale session state.
+    password.fill(running_services.admin_password)
+    page.get_by_role("button", name="Login", exact=True).click()
+    expect(page.get_by_text("Quick Actions", exact=True)).to_be_visible(timeout=30_000)
+    expect(by_test_id(page, "csv-import-review")).to_have_count(0)
+    expect(page.get_by_text(re.compile(r"Active data: Chinook example database"))).to_be_visible()
+    expect(page.locator("input[type=file]")).to_have_value("")
+    page.get_by_role("button", name="Load retail demo", exact=True).click()
+    expect(by_test_id(page, "csv-import-review")).to_have_count(0)
+    expect(page.get_by_role("button", name="Total Revenue", exact=True)).to_be_enabled()
 
 
 def test_api_workspace_exports_and_telemetry_shell(logged_in_page) -> None:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import re
 from pathlib import Path
 
 from playwright.sync_api import APIRequestContext, Page, TimeoutError as PlaywrightTimeoutError, expect
@@ -34,9 +36,36 @@ def select_nav(page: Page, label: str) -> None:
     page.get_by_label("Primary navigation").get_by_text(label, exact=True).click()
 
 
-def upload_csv(page: Page, csv_path: Path) -> None:
+def review_csv_upload(page: Page, csv_path: Path) -> None:
     page.locator("input[type=file]").set_input_files(str(csv_path))
-    expect(page.get_by_text("CSV uploaded successfully.")).to_be_visible(timeout=20_000)
+    expect(by_test_id(page, "csv-import-review")).to_be_visible(timeout=20_000)
+    expect(page.get_by_text(re.compile(rf"^File: {re.escape(csv_path.name)} ·"))).to_be_visible(timeout=20_000)
+
+
+def upload_csv(page: Page, csv_path: Path) -> None:
+    """Review and accept a fixture whose standard sales headers map automatically."""
+    review_csv_upload(page, csv_path)
+    apply_button = page.get_by_role("button", name="Use this data", exact=True)
+    expect(apply_button).to_be_enabled()
+    apply_button.click()
+    expect(page.get_by_text("CSV ready for analysis.", exact=True)).to_be_visible(timeout=20_000)
+    expect(by_test_id(page, "csv-import-review")).to_have_count(0)
+
+
+def select_csv_import_option(page: Page, label: str, option: str) -> None:
+    control = page.get_by_test_id("stSelectbox").filter(has=page.get_by_text(label, exact=True))
+    control.get_by_role("combobox").click()
+    page.get_by_role("option", name=option, exact=True).click()
+    expect(control.get_by_text(option, exact=True)).to_be_visible()
+
+
+def download_full_csv(page: Page) -> list[dict[str, str]]:
+    with page.expect_download() as download_info:
+        page.get_by_role("button", name="Download Full CSV", exact=True).click()
+    download = download_info.value
+    assert download.suggested_filename == "analytics-result.csv"
+    with Path(download.path()).open(newline="", encoding="utf-8") as source:
+        return list(csv.DictReader(source))
 
 
 def run_command(page: Page, question: str) -> None:

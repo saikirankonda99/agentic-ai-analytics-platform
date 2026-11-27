@@ -28,16 +28,26 @@ The file `data/demo/retail_sales.csv` contains 12 synthetic transactions. Its ex
 
 Monthly sales totals are descriptive. They do not adjust for incomplete reporting periods or explain why sales changed. The example contains no costs, so it cannot calculate profit or margin.
 
+## Review an uploaded file
+
+1. Choose **Upload** in the sidebar. The app opens a review with the first 10 raw rows and the full source row/column counts. It clears the previous current answer and pauses analysis while the file is being reviewed.
+2. Choose **Revenue column** or **Quantity × unit price**. Select the matching source columns. Recognized names are suggested only when there is one unambiguous match; other headers can be mapped manually.
+3. Optionally map product, date, country, and currency. For dates, explicitly choose `YYYY-MM-DD`, `MM/DD/YYYY`, or `DD/MM/YYYY`. When currency is not mapped, choose the single currency used by all rows.
+4. Review the data checks, total, and available questions. Checks use every row, including rows outside the preview. Invalid selected fields block **Use this data** and identify the affected data-row numbers, counting from 1 after the header. Correct the file or change the mapping. Missing optional mappings simply make their questions unavailable.
+5. Click **Use this data**. The accepted file becomes the active source and the usual sales commands appear. **Cancel upload** discards the candidate and returns to the example database. Loading the built-in retail demo remains a one-click action.
+
+Numeric values must be plain numbers. Values are not silently stripped, dropped, or changed to zero. Negative amounts and exact duplicate source rows are retained and flagged for review. Selecting an amount column uses that column as supplied: tax, shipping, and discounts are not adjusted. Selecting quantity × unit price ignores other amount columns. A mapped currency column must be complete and contain one supported currency; a default does not fill its missing cells.
+
 ## CSV contract
 
-Use one transaction or line item per row. Provide an amount column such as `revenue`, or both `quantity` and `unit_price`. The sample CSV is a reusable format and can be downloaded from the sidebar.
+Use one transaction or line item per row. Map an amount column to `revenue`, or map both `quantity` and `unit_price`. The names below describe the sales fields; your source file can use different headers. The sample CSV is a reusable format and can be downloaded from the sidebar.
 
 | Field | Requirement |
 |---|---|
 | `revenue` | Numeric line amount; used when supplied. Otherwise calculated from quantity × unit price |
 | `quantity`, `unit_price` | Both required when revenue is absent; quantity also needed for units by product |
 | `product` | Needed for product questions |
-| `date` | Needed for monthly revenue; use YYYY-MM-DD |
+| `date` | Needed for monthly revenue; choose its exact format during review; accepted dates normalize to YYYY-MM-DD |
 | `country` | Needed for country questions |
 | `currency` | Optional single code: USD, CAD, EUR, GBP, AUD, or NZD; no currency conversion |
 
@@ -45,9 +55,9 @@ Supported questions are **Total revenue**, **Revenue by product**, **Revenue by 
 
 Limits are 10 MB, 50,000 rows, and 100 columns. Money is calculated from original numeric text, rounded to two decimal places per line using half-up rounding, and aggregated as integer cents. Product codes retain leading zeros. Duplicate or ambiguous headers and malformed rows are rejected. Invalid amounts, missing required group fields, and mixed currencies are rejected. An absent currency produces an explicit same-currency assumption. Duplicate rows are retained with a warning because repeated sales may be legitimate. Negative amounts remain in totals and are flagged as possible returns or adjustments. Values such as `$1,000` must be cleaned to plain numeric values.
 
-The supplied revenue column is authoritative when present. Users should make clear whether it includes discounts, tax, or shipping. The demo does not reconcile multiple amount definitions or automatically identify duplicate orders.
+The selected revenue mode determines the calculation. Users should make clear whether their selected line amount includes discounts, tax, or shipping. The demo does not reconcile multiple amount definitions or automatically identify duplicate orders.
 
-The active dataset stays selected until a replacement is uploaded or **Use example database** is selected. Switching workspace or logging out clears the uploaded data and current results. Unsupported or failed questions clear the previous answer so it is not displayed as the new result.
+The active dataset stays selected until a replacement is uploaded or another data source is selected. A new upload clears the current answer and must pass review before analysis resumes. Removing a pending file also cancels its review. Switching workspace, clearing the session, or logging out clears the uploaded data, pending review, and mapping choices. Unsupported or failed questions clear the previous answer so it is not displayed as the new result. Scheduled database checks are available when the example database is selected.
 
 ## Engineering corrections
 
@@ -85,7 +95,7 @@ No paid model calls, real PostgreSQL integration tests, Docker builds, load test
 ## Remaining work before a customer pilot
 
 1. Pick one pilot business and define its export format and one useful decision, such as which products contributed most to this month's sales. Reconcile totals with the business's existing report before using the output.
-2. Add an upload preview and column-mapping step for real exports, with explicit treatment of returns, tax, discounts, missing dates, and duplicates. Add period comparison only after reporting-window completeness is defined.
+2. Validate the upload preview and column mappings against a pilot business's real export. Agree how its returns, tax, discounts, missing dates, and duplicates should be interpreted. Add period comparison only after reporting-window completeness is defined.
 3. Run browser upload/download tests, package the demo, and verify the deployment from a clean environment. Exercise PostgreSQL with a real service if it will be used.
 4. Connect the FastAPI execution endpoint to the actual SQL/analysis pipeline if an API-backed product is needed. Add failure handling and observed execution telemetry; its current lifecycle simulation is not customer analytics.
 5. Separate every customer's database credentials, uploaded files, vector/retrieval history, and reports. The bundled Chinook connector and historical retrieval paths are still shared demonstration infrastructure.
