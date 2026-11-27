@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from backend.persistence import WorkspaceDocument, build_workspace_repository
+from backend.persistence import PersistenceError, WorkspaceDocument, build_workspace_repository
+from backend.retention import apply_workspace_retention
 
 BASE_DIR = Path(__file__).resolve().parent
 WORKSPACE_DIR = BASE_DIR / "data" / "workspaces"
@@ -163,13 +165,35 @@ def _workspace_path(workspace_key: str) -> Path:
 
 
 def load_workspace_memory(identity: dict[str, Any]) -> dict[str, Any]:
+    generation = 0
     try:
-        document = build_workspace_repository().get(identity["workspace_id"])
-    except Exception:
+        repository = build_workspace_repository()
+        document = repository.get(identity["workspace_id"])
+        generation = repository.generation(identity["workspace_id"])
+    except Exception as exc:
+        if _production_mode():
+            raise PersistenceError("Saved workspace data is unavailable. Please retry when storage is restored.") from exc
         document = None
     if document is not None:
+        if document.team_id != identity["team_id"]:
+            raise PersistenceError("Workspace ownership does not match your account.")
         memory = _normalize_workspace_memory(identity, document.memory)
-        return memory
+        retained = apply_workspace_retention(memory)
+        if retained != memory:
+            changed = repository.replace_if_unchanged(
+                WorkspaceDocument(identity["workspace_id"], identity["team_id"], retained), document.memory,
+            )
+            if not changed:
+                latest = repository.get(identity["workspace_id"])
+                if latest is None:
+                    return {**default_workspace_memory(identity), "_data_generation": repository.generation(identity["workspace_id"])}
+                if latest.team_id != identity["team_id"]:
+                    raise PersistenceError("Workspace ownership does not match your account.")
+                retained = apply_workspace_retention(_normalize_workspace_memory(identity, latest.memory))
+        return retained
+
+    if _production_mode() or generation:
+        return {**default_workspace_memory(identity), "_data_generation": generation}
 
     path = _workspace_path(identity["workspace_id"])
     if not path.exists():
@@ -178,12 +202,18 @@ def load_workspace_memory(identity: dict[str, Any]) -> dict[str, Any]:
         stored = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         stored = {}
-    return _normalize_workspace_memory(identity, stored)
+    return apply_workspace_retention(_normalize_workspace_memory(identity, stored))
+
+
+def _production_mode() -> bool:
+    return os.getenv("APP_ENV", "development").strip().lower() == "production"
 
 
 def _normalize_workspace_memory(identity: dict[str, Any], stored: dict[str, Any]) -> dict[str, Any]:
     memory = default_workspace_memory(identity)
     memory.update(stored)
+    memory["workspace_id"] = identity["workspace_id"]
+    memory["team_id"] = identity["team_id"]
     defaults = default_workspace_memory(identity)
     memory["workspace_preferences"] = {**defaults["workspace_preferences"], **memory.get("workspace_preferences", {})}
     memory["onboarding"] = onboarding_progress({"onboarding": memory.get("onboarding", {})})
@@ -202,15 +232,16 @@ def _normalize_workspace_memory(identity: dict[str, Any], stored: dict[str, Any]
     return memory
 
 
-def load_workspace_memory_by_id(workspace_key: str) -> dict[str, Any]:
+def load_workspace_memory_by_id(workspace_key: str, *, team_id: str) -> dict[str, Any]:
     identity = default_user_session()
     identity["workspace_id"] = _safe_id(workspace_key)
+    identity["team_id"] = team_id
     return load_workspace_memory(identity)
 
 
 def save_workspace_memory(identity: dict[str, Any], memory: dict[str, Any]) -> dict[str, Any]:
     defaults = default_workspace_memory(identity)
-    memory = dict(memory or defaults)
+    memory = apply_workspace_retention(dict(memory or defaults))
     memory["workspace_id"] = identity["workspace_id"]
     memory["team_id"] = identity["team_id"]
     inferred_team_scope = identity["workspace_id"].endswith(".shared")
@@ -237,7 +268,11 @@ def save_workspace_memory(identity: dict[str, Any], memory: dict[str, Any]) -> d
             )
         )
         memory["updated_at"] = document.updated_at or memory["updated_at"]
-    except Exception:
+    except PersistenceError:
+        raise
+    except Exception as exc:
+        if _production_mode():
+            raise PersistenceError("Your workspace could not be saved. Please retry when storage is restored.") from exc
         _workspace_path(identity["workspace_id"]).write_text(json.dumps(memory, indent=2), encoding="utf-8")
     return memory
 
@@ -673,18 +708,19 @@ def snapshot_workspace_run(
     _append_limited(
         memory,
         "workflow_runs",
-        {"run_id": run_id, "trace": workflow_trace[-12:], "status": workflow_trace[-1].get("status") if workflow_trace else "unknown"},
+        {"run_id": run_id, "timestamp": timestamp, "trace": workflow_trace[-12:], "status": workflow_trace[-1].get("status") if workflow_trace else "unknown"},
     )
     if investigation and investigation.get("status") not in {None, "idle"}:
-        _append_limited(memory, "investigations", {"run_id": run_id, **investigation}, limit=25)
+        _append_limited(memory, "investigations", {"run_id": run_id, "timestamp": timestamp, **investigation}, limit=25)
     if insights and insights.get("findings"):
-        _append_limited(memory, "generated_insights", {"run_id": run_id, **insights}, limit=25)
+        _append_limited(memory, "generated_insights", {"run_id": run_id, "timestamp": timestamp, **insights}, limit=25)
     if telemetry:
         _append_limited(
             memory,
             "telemetry_summaries",
             {
                 "run_id": run_id,
+                "timestamp": timestamp,
                 "total_tokens": telemetry.get("total_tokens", 0),
                 "latency_ms": telemetry.get("latency_ms", 0),
                 "cost_usd": telemetry.get("cost_usd", 0.0),

@@ -9,8 +9,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Protocol
 
+from backend.config import database_backend_for_url
+from backend.redaction import redact_text
 
-SCHEMA_VERSION = 1
+
+SCHEMA_VERSION = 2
 DEFAULT_DATABASE_URL = "sqlite:///data/platform_persistence.db"
 
 
@@ -24,18 +27,19 @@ class PersistenceSettings:
     retries: int = 2
     retry_delay_seconds: float = 0.05
 
+    def __post_init__(self) -> None:
+        database_backend_for_url(self.database_url)
+
     @property
     def backend(self) -> str:
-        if self.database_url.startswith("postgresql://") or self.database_url.startswith("postgres://"):
-            return "postgresql"
-        return "sqlite"
+        return database_backend_for_url(self.database_url)
 
     @property
     def sqlite_path(self) -> Path:
         prefix = "sqlite:///"
         if self.database_url.startswith(prefix):
             return Path(self.database_url.removeprefix(prefix))
-        return Path("data/platform_persistence.db")
+        raise ValueError("A SQLite URL is required for a SQLite path.")
 
 
 @dataclass(frozen=True)
@@ -62,6 +66,15 @@ class WorkspaceRepository(Protocol):
 
     def save(self, document: WorkspaceDocument) -> WorkspaceDocument:
         """Persist a workspace memory document."""
+
+    def generation(self, workspace_id: str) -> int:
+        """Return the deletion generation used to reject stale browser saves."""
+
+    def delete(self, workspace_id: str, team_id: str) -> int:
+        """Delete a workspace document and invalidate previously loaded copies."""
+
+    def replace_if_unchanged(self, document: WorkspaceDocument, expected_json: Any) -> bool:
+        """Prune an unchanged snapshot without overwriting another session's work."""
 
 
 class AuthSessionRepository(Protocol):
@@ -150,6 +163,11 @@ class SQLitePlatformStore:
                 CREATE INDEX IF NOT EXISTS idx_workspace_documents_team
                     ON workspace_documents(team_id, updated_at);
 
+                CREATE TABLE IF NOT EXISTS workspace_generations (
+                    workspace_id TEXT PRIMARY KEY,
+                    generation INTEGER NOT NULL DEFAULT 0
+                );
+
                 CREATE TABLE IF NOT EXISTS persistence_errors (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     operation TEXT NOT NULL,
@@ -178,6 +196,39 @@ class SQLitePlatformStore:
 
 
 class SQLiteWorkspaceRepository(SQLitePlatformStore):
+    def replace_if_unchanged(self, document: WorkspaceDocument, expected_json: Any) -> bool:
+        expected = expected_json if isinstance(expected_json, str) else json.dumps(expected_json, sort_keys=True)
+        with self.connect() as connection:
+            changed = connection.execute(
+                "UPDATE workspace_documents SET memory_json = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE workspace_id = ? AND team_id = ? AND memory_json = ?",
+                (json.dumps(document.memory, sort_keys=True), document.workspace_id, document.team_id, expected),
+            ).rowcount
+        return changed == 1
+
+    def generation(self, workspace_id: str) -> int:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT generation FROM workspace_generations WHERE workspace_id = ?", (workspace_id,)
+            ).fetchone()
+        return int(row["generation"]) if row else 0
+
+    def delete(self, workspace_id: str, team_id: str) -> int:
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT team_id FROM workspace_documents WHERE workspace_id = ?", (workspace_id,)
+            ).fetchone()
+            if row and row["team_id"] != team_id:
+                raise PersistenceError("Workspace ownership does not match.")
+            connection.execute(
+                "INSERT INTO workspace_generations (workspace_id, generation) VALUES (?, 1) "
+                "ON CONFLICT(workspace_id) DO UPDATE SET generation = generation + 1", (workspace_id,)
+            )
+            return connection.execute(
+                "DELETE FROM workspace_documents WHERE workspace_id = ? AND team_id = ?", (workspace_id, team_id)
+            ).rowcount
+
     def get(self, workspace_id: str) -> WorkspaceDocument | None:
         with self.connect() as connection:
             row = connection.execute(
@@ -196,6 +247,17 @@ class SQLiteWorkspaceRepository(SQLitePlatformStore):
     def save(self, document: WorkspaceDocument) -> WorkspaceDocument:
         payload = json.dumps(document.memory, sort_keys=True)
         with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            owner = connection.execute(
+                "SELECT team_id FROM workspace_documents WHERE workspace_id = ?", (document.workspace_id,)
+            ).fetchone()
+            if owner and owner["team_id"] != document.team_id:
+                raise PersistenceError("Workspace ownership does not match.")
+            row = connection.execute(
+                "SELECT generation FROM workspace_generations WHERE workspace_id = ?", (document.workspace_id,)
+            ).fetchone()
+            if document.memory.get("_data_generation", 0) != (int(row["generation"]) if row else 0):
+                raise PersistenceError("Workspace data was deleted in another session. Reload before saving.")
             connection.execute(
                 """
                 INSERT INTO workspace_documents (workspace_id, team_id, memory_json)
@@ -305,7 +367,7 @@ class PostgreSQLPlatformStore:
             from psycopg.rows import dict_row
         except ImportError as exc:  # pragma: no cover - dependency installed in production image
             raise PersistenceError("psycopg is required for PostgreSQL persistence") from exc
-        connection = psycopg.connect(self.settings.database_url, row_factory=dict_row)
+        connection = psycopg.connect(self.settings.database_url, row_factory=dict_row, connect_timeout=10)
         try:
             yield connection
             connection.commit()
@@ -317,6 +379,7 @@ class PostgreSQLPlatformStore:
 
     def initialize(self) -> None:
         with self.connect() as connection:
+            connection.execute("SELECT pg_advisory_xact_lock(%s)", (846231905,))
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -364,6 +427,10 @@ class PostgreSQLPlatformStore:
                 "CREATE INDEX IF NOT EXISTS idx_workspace_documents_team ON workspace_documents(team_id, updated_at)"
             )
             connection.execute(
+                "CREATE TABLE IF NOT EXISTS workspace_generations "
+                "(workspace_id TEXT PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 0)"
+            )
+            connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS persistence_errors (
                     id BIGSERIAL PRIMARY KEY,
@@ -392,6 +459,43 @@ class PostgreSQLPlatformStore:
 
 
 class PostgreSQLWorkspaceRepository(PostgreSQLPlatformStore):
+    def replace_if_unchanged(self, document: WorkspaceDocument, expected_json: Any) -> bool:
+        expected = expected_json if isinstance(expected_json, str) else json.dumps(expected_json, sort_keys=True)
+        with self.connect() as connection:
+            changed = connection.execute(
+                "UPDATE workspace_documents SET memory_json = %s::jsonb, updated_at = NOW() "
+                "WHERE workspace_id = %s AND team_id = %s AND memory_json = %s::jsonb",
+                (json.dumps(document.memory, sort_keys=True), document.workspace_id, document.team_id, expected),
+            ).rowcount
+        return changed == 1
+
+    def generation(self, workspace_id: str) -> int:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT generation FROM workspace_generations WHERE workspace_id = %s", (workspace_id,)
+            ).fetchone()
+        return int(row["generation"]) if row else 0
+
+    def delete(self, workspace_id: str, team_id: str) -> int:
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO workspace_generations (workspace_id) VALUES (%s) ON CONFLICT DO NOTHING", (workspace_id,)
+            )
+            connection.execute(
+                "SELECT generation FROM workspace_generations WHERE workspace_id = %s FOR UPDATE", (workspace_id,)
+            )
+            row = connection.execute(
+                "SELECT team_id FROM workspace_documents WHERE workspace_id = %s", (workspace_id,)
+            ).fetchone()
+            if row and row["team_id"] != team_id:
+                raise PersistenceError("Workspace ownership does not match.")
+            connection.execute(
+                "UPDATE workspace_generations SET generation = generation + 1 WHERE workspace_id = %s", (workspace_id,)
+            )
+            return connection.execute(
+                "DELETE FROM workspace_documents WHERE workspace_id = %s AND team_id = %s", (workspace_id, team_id)
+            ).rowcount
+
     def get(self, workspace_id: str) -> WorkspaceDocument | None:
         with self.connect() as connection:
             row = connection.execute(
@@ -409,6 +513,19 @@ class PostgreSQLWorkspaceRepository(PostgreSQLPlatformStore):
 
     def save(self, document: WorkspaceDocument) -> WorkspaceDocument:
         with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO workspace_generations (workspace_id) VALUES (%s) ON CONFLICT DO NOTHING", (document.workspace_id,)
+            )
+            generation = connection.execute(
+                "SELECT generation FROM workspace_generations WHERE workspace_id = %s FOR UPDATE", (document.workspace_id,)
+            ).fetchone()["generation"]
+            owner = connection.execute(
+                "SELECT team_id FROM workspace_documents WHERE workspace_id = %s", (document.workspace_id,)
+            ).fetchone()
+            if owner and owner["team_id"] != document.team_id:
+                raise PersistenceError("Workspace ownership does not match.")
+            if document.memory.get("_data_generation", 0) != generation:
+                raise PersistenceError("Workspace data was deleted in another session. Reload before saving.")
             row = connection.execute(
                 """
                 INSERT INTO workspace_documents (workspace_id, team_id, memory_json)
@@ -531,7 +648,7 @@ def validate_platform_database(database_url: str | None = None) -> dict[str, Any
             "status": "error",
             "schema_version": None,
             "error_type": type(exc).__name__,
-            "message": str(exc),
+            "message": redact_text(str(exc)),
         }
 
 

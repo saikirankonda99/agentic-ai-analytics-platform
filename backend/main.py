@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from backend.config import settings
 from backend.logging import configure_logging, get_logger
 from backend.middleware import RequestContextMiddleware
+from backend.lifecycle_routes import router as lifecycle_router
 from backend.routes import SERVICE_VERSION, router
 from backend.startup import run_startup_validation
 
@@ -31,6 +32,7 @@ app = FastAPI(
 )
 app.add_middleware(RequestContextMiddleware)
 app.include_router(router)
+app.include_router(lifecycle_router)
 
 
 __all__ = ["app"]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
 from uuid import uuid4
@@ -31,6 +32,7 @@ from backend.models import (
     WorkflowStreamUpdate,
     WorkflowTelemetry,
     RequestSession,
+    STAGE_AGENTS,
 )
 from backend.ports import BackendConfig, InMemoryCache, InlineWorker
 from backend.storage import (
@@ -117,9 +119,19 @@ class OrchestrationService:
         workspace_id: str = DEFAULT_WORKSPACE_ID,
         organization_id: str = DEFAULT_ORGANIZATION_ID,
         user_id: str = DEFAULT_USER_ID,
+        *,
+        workflow_id: str | None = None,
     ) -> OrchestrationExecution:
+        if workflow_id:
+            existing = self.get_workflow(workflow_id)
+            if existing is not None:
+                if (existing.organization_id, existing.workspace_id, existing.user_id, existing.question) != (
+                    organization_id, workspace_id, user_id, question
+                ):
+                    raise PermissionError("Workflow identity mismatch.")
+                return existing
         execution = OrchestrationExecution(
-            workflow_id=f"workflow:{uuid4()}",
+            workflow_id=workflow_id or f"workflow:{uuid4()}",
             organization_id=organization_id,
             workspace_id=workspace_id,
             user_id=user_id,
@@ -128,7 +140,17 @@ class OrchestrationService:
             created_at=datetime.now(timezone.utc).isoformat(),
             telemetry=WorkflowTelemetry(),
         )
-        self._save_workflow(execution)
+        if not self.workflow_storage.create_if_absent(execution):
+            existing = self.get_workflow(execution.workflow_id)
+            if existing is None:
+                raise RuntimeError("Workflow creation could not be confirmed.")
+            if (existing.organization_id, existing.workspace_id, existing.user_id, existing.question) != (
+                organization_id, workspace_id, user_id, question
+            ):
+                raise PermissionError("Workflow identity mismatch.")
+            return existing
+        # Initial telemetry/agent rows are unnecessary: reads already default to
+        # empty values. Late initial upserts could erase a worker's measured state.
         logger.info(
             "workflow_created workflow_id=%s workspace_id=%s",
             execution.workflow_id,
@@ -204,6 +226,51 @@ class OrchestrationService:
 
     def complete_stage(self, workflow_id: str, stage: WorkflowStage) -> OrchestrationExecution:
         return self._transition_stage(workflow_id, stage)
+
+    def record_analytics_result(
+        self, workflow_id: str, result: dict[str, Any], *, status: WorkflowLifecycleState | None = None,
+    ) -> OrchestrationExecution:
+        """Persist measured pipeline events and provider usage, without synthetic stage completions."""
+        workflow = self.get_workflow(workflow_id)
+        if workflow is None:
+            raise ValueError("Workflow not found.")
+        status = status or ("failed" if result.get("error") else "completed")
+        finished = datetime.now(timezone.utc)
+        started = workflow.telemetry.started_at or finished.isoformat()
+        measured = validate_telemetry_payload(result.get("telemetry", {}))
+        telemetry = WorkflowTelemetry(
+            started_at=started,
+            completed_at=finished.isoformat() if status in {"failed", "completed"} else None,
+            latency_ms=max(0, int((finished - datetime.fromisoformat(started)).total_seconds() * 1000)),
+            estimated_cost_usd=measured.get("cost_usd", 0.0),
+            token_usage=TokenUsage(
+                prompt_tokens=measured.get("prompt_tokens", 0), completion_tokens=measured.get("completion_tokens", 0),
+                total_tokens=measured.get("total_tokens", 0),
+            ),
+        )
+        stage_names = {"planner": "planning", "schema retrieval": "schema_analysis",
+                       "sql generation": "sql_generation", "validation": "validation", "execution": "execution"}
+        stages = []
+        agents = []
+        for event in result.get("trace", []):
+            stage = stage_names.get(event.get("step"))
+            if stage is None:
+                continue
+            stage_status = "completed" if event.get("status") in {"success", "completed", "warning"} else "failed"
+            timestamp = event.get("timestamp") or finished.isoformat()
+            stages.append(WorkflowStageProgress(stage=stage, status=stage_status, timestamp=timestamp))
+            name, role = STAGE_AGENTS[stage]
+            agents.append(AgentExecution(agent_name=name, agent_role=role, assigned_stage=stage, agent_status=stage_status))
+        updated = replace(workflow, status=status, telemetry=telemetry, stage_progression=tuple(stages),
+                          agent_executions=tuple(agents), current_stage=stages[-1].stage if stages else workflow.current_stage)
+        self._save_workflow(updated)
+        self._append_event(workflow_id, "lifecycle_transition", f"Analytics execution {status}.",
+                           organization_id=workflow.organization_id, workspace_id=workflow.workspace_id)
+        self._append_event(workflow_id, "telemetry_update", "Measured analytics telemetry saved.",
+                           organization_id=workflow.organization_id, workspace_id=workflow.workspace_id)
+        if status in {"failed", "completed"}:
+            self._record_telemetry_usage(updated, deduplicate=True)
+        return updated
 
     def get_workflow(self, workflow_id: str) -> OrchestrationExecution | None:
         workflow = self.workflow_storage.get(workflow_id)
@@ -438,7 +505,7 @@ class OrchestrationService:
             workspace_id=workspace_id,
         )
 
-    def _record_telemetry_usage(self, workflow: OrchestrationExecution) -> None:
+    def _record_telemetry_usage(self, workflow: OrchestrationExecution, *, deduplicate: bool = False) -> None:
         token_usage = workflow.telemetry.token_usage
         if token_usage.total_tokens:
             self.usage_service.record(
@@ -448,6 +515,7 @@ class OrchestrationService:
                 user_id=workflow.user_id,
                 quantity=float(token_usage.total_tokens),
                 metadata={"workflow_id": workflow.workflow_id},
+                idempotency_key=workflow.workflow_id if deduplicate else None,
             )
         if workflow.telemetry.estimated_cost_usd:
             self.usage_service.record(
@@ -458,6 +526,7 @@ class OrchestrationService:
                 quantity=workflow.telemetry.estimated_cost_usd,
                 estimated_cost_usd=workflow.telemetry.estimated_cost_usd,
                 metadata={"workflow_id": workflow.workflow_id},
+                idempotency_key=workflow.workflow_id if deduplicate else None,
             )
 
     def _event_stream_updates(self, events: tuple[WorkflowEvent, ...]) -> list[WorkflowStreamUpdate]:
@@ -624,6 +693,23 @@ class AnalyticsBackendService:
         self.connector_registry = get_connector_registry()
 
     def execute_query(
+        self, question: str, *, semantic_context: dict[str, Any] | None = None,
+        conversation_context: dict[str, Any] | None = None, workspace_context: dict[str, Any] | None = None,
+        callback: WorkflowCallback | None = None, organization_id: str | None = None,
+        workspace_id: str | None = None, connector_id: str = "sqlite",
+    ) -> dict[str, Any]:
+        from contextlib import nullcontext
+        from backend.workers import get_worker_queue
+        if bool(organization_id) != bool(workspace_id):
+            raise PermissionError("Both organization and workspace are required for analytics.")
+        activity = (get_worker_queue().workspace_activity(organization_id, workspace_id)
+                    if organization_id and workspace_id else nullcontext())
+        with activity:
+            return self._execute_query(question, semantic_context=semantic_context,
+                conversation_context=conversation_context, workspace_context=workspace_context, callback=callback,
+                organization_id=organization_id, workspace_id=workspace_id, connector_id=connector_id)
+
+    def _execute_query(
         self,
         question: str,
         *,
@@ -631,12 +717,17 @@ class AnalyticsBackendService:
         conversation_context: dict[str, Any] | None = None,
         workspace_context: dict[str, Any] | None = None,
         callback: WorkflowCallback | None = None,
+        organization_id: str | None = None,
+        workspace_id: str | None = None,
+        connector_id: str = "sqlite",
     ) -> dict[str, Any]:
         from db import get_schema
         from graph.workflow import run_workflow
         from semantic import profile_schema, semantic_prompt_block
 
-        schema_context = semantic_context or profile_schema(get_schema(), name="Chinook SQL schema")
+        scope = {"organization_id": organization_id, "workspace_id": workspace_id, "connector_id": connector_id}
+        schema = get_schema(**scope) if organization_id or workspace_id or connector_id != "sqlite" else get_schema()
+        schema_context = semantic_context or profile_schema(schema, name=f"{connector_id} SQL schema")
         workflow_context = {**schema_context, "prompt_block": semantic_prompt_block(schema_context)}
         raw_result = run_workflow(
             question,
@@ -644,12 +735,14 @@ class AnalyticsBackendService:
             semantic_context=workflow_context,
             conversation_context=conversation_context,
             workspace_context=workspace_context,
+            **scope,
         )
         raw_result["telemetry"] = validate_telemetry_payload(raw_result.get("telemetry", {}))
         result = AnalyticsWorkflowResult.from_mapping(raw_result).as_dict()
-        run_id = f"workflow:{datetime.now().isoformat(timespec='seconds')}"
-        self.cache.set(run_id, result)
-        self.cache.set("workflow:latest", result)
+        run_id = f"workflow:{uuid4()}"
+        cache_scope = f"{organization_id}:{workspace_id}:{connector_id}:" if organization_id and workspace_id else ""
+        self.cache.set(f"{cache_scope}{run_id}", result)
+        self.cache.set(f"{cache_scope}workflow:latest", result)
         return dict(result)
 
     def workflow_status(self, run_id: str = "workflow:latest") -> dict[str, Any]:
@@ -746,8 +839,10 @@ class AnalyticsBackendService:
         self.cache.set("insight:latest", result)
         return result
 
-    def execute_sql(self, sql: str) -> dict[str, Any]:
-        columns, rows = self.connector_registry.get("sqlite").execute_read(sql)
+    def execute_sql(self, sql: str, *, organization_id: str | None = None,
+                    workspace_id: str | None = None, connector_id: str = "sqlite") -> dict[str, Any]:
+        from db import run_query
+        columns, rows = run_query(sql, organization_id=organization_id, workspace_id=workspace_id, connector_id=connector_id)
         return {"columns": columns, "rows": rows, "count": len(rows)}
 
     def connectors(self) -> dict[str, Any]:
@@ -828,6 +923,9 @@ def execute_query_workflow(
     conversation_context: dict[str, Any] | None = None,
     workspace_context: dict[str, Any] | None = None,
     callback: WorkflowCallback | None = None,
+    organization_id: str | None = None,
+    workspace_id: str | None = None,
+    connector_id: str = "sqlite",
 ) -> dict[str, Any]:
     return backend_service.execute_query(
         question,
@@ -835,4 +933,7 @@ def execute_query_workflow(
         conversation_context=conversation_context,
         workspace_context=workspace_context,
         callback=callback,
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+        connector_id=connector_id,
     )

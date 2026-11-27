@@ -1,24 +1,26 @@
-import streamlit as st
+"""Read-only analytics access with authorization before every database operation."""
 
 from backend.connectors import get_connector_registry
 
 
-# ---------------- RUN QUERY ---------------- #
-@st.cache_data(show_spinner=False)
-@st.cache_data(ttl=600)
-def run_query(sql):
-    try:
-        return get_connector_registry().get("sqlite").execute_read(sql)
-
-    except Exception as e:
-        raise Exception(f"Database error: {e}")
+def _connector(*, organization_id: str | None, workspace_id: str | None, connector_id: str):
+    registry = get_connector_registry()
+    if organization_id is None and workspace_id is None:
+        return registry.get_public_demo(connector_id)
+    if not organization_id or not workspace_id:
+        raise PermissionError("Both organization and workspace are required for analytics access.")
+    return registry.get_for_workspace(connector_id, organization_id=organization_id, workspace_id=workspace_id)
 
 
-# ---------------- GET SCHEMA ---------------- #
-@st.cache_data(show_spinner=False)
-def get_schema():
-    try:
-        return get_connector_registry().get("sqlite").inspect_schema().get("schema_text", "")
+def run_query(sql, *, organization_id=None, workspace_id=None, connector_id="sqlite"):
+    # Do not wrap this boundary in Streamlit's global cache: grants may change,
+    # and cached rows must never bypass a current authorization check.
+    return _connector(
+        organization_id=organization_id, workspace_id=workspace_id, connector_id=connector_id,
+    ).execute_read(sql)
 
-    except Exception as e:
-        return f"Schema error: {e}"
+
+def get_schema(*, organization_id=None, workspace_id=None, connector_id="sqlite"):
+    return _connector(
+        organization_id=organization_id, workspace_id=workspace_id, connector_id=connector_id,
+    ).inspect_schema().get("schema_text", "")

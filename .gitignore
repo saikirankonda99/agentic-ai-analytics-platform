@@ -37,3 +37,8 @@ data/*.db-shm
 data/*.db-wal
 data/test-runtime/
 data/workspaces/
+data/cost_log.db
+data/history_store/
+backups/
+*.snapshot
+*.manifest.json

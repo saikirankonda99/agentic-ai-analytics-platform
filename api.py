@@ -50,7 +50,9 @@ def execute_query(req: QueryExecutionRequest, session: RequestSession = Depends(
             req.question,
             semantic_context=req.semantic_context,
             conversation_context=req.conversation_context,
-            workspace_context=load_workspace_memory_by_id(session.workspace_id),
+            workspace_context=load_workspace_memory_by_id(session.workspace_id, team_id=session.organization.name),
+            workspace_id=session.workspace_id,
+            organization_id=session.organization_id,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Query execution failed") from exc

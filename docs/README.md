@@ -1,3 +1,11 @@
+# Current release guides
+
+- [Release readiness](release-readiness.md)
+- [Actual analytics API](actual-api.md)
+- [Data isolation](data-isolation.md)
+- [Deployment](deployment.md)
+- [Operations, retention and recovery](operations.md)
+
 # Documentation Index
 
 This directory contains architecture, deployment, testing, and operations notes for the Agentic AI Analytics Platform.

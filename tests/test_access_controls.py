@@ -46,7 +46,7 @@ def test_session_identity_ignores_spoofed_headers(authenticated_api_client):
 
 def test_workflow_read_routes_and_websockets_enforce_ownership(authenticated_api_client, isolated_auth_config, monkeypatch):
     client = authenticated_api_client
-    created = client.post("/execute", json={"question": "Synthetic orchestration check"}).json()
+    created = client.post("/execute/simulation", json={"question": "Synthetic orchestration check"}).json()
     workflow_id = created["workflow_id"]
     viewer_headers = _login(client, "viewer", isolated_auth_config["viewer"])
     for suffix in ("", "/events", "/telemetry", "/replay", "/execution-graph", "/telemetry/events", "/telemetry/aggregate", "/stream"):

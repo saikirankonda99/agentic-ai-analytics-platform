@@ -6,6 +6,7 @@ from html import escape
 import streamlit as st
 
 from csv_analytics import DEMO_PATH, SUPPORTED_QUESTIONS
+from ui.views.customer import SALES_CALCULATION_NOTES
 
 
 def _open_sales() -> None:
@@ -22,6 +23,7 @@ def render_customer_sidebar() -> dict:
             horizontal=True, key="workspace_scope_choice",
         )
         clear = st.button("Clear session", width="stretch")
+        st.caption("Clears the active file and answers. Saved workspace history is unchanged.")
     config = st.session_state.get("monitoring_config", {})
     return {
         "nav": "Overview", "clear_chat": clear, "show_schema": False,
@@ -51,7 +53,7 @@ def render_step_progress(stage: int) -> None:
     )
 
 
-def render_customer_data_controls(sidebar_state: dict) -> dict:
+def render_customer_data_controls(sidebar_state: dict, *, on_remove=None) -> dict:
     ready = "uploaded_df" in st.session_state
     title = "Your sales data · Change file" if ready else "1 · Upload your sales file"
     with st.expander(title, expanded=not ready):
@@ -69,8 +71,12 @@ def render_customer_data_controls(sidebar_state: dict) -> dict:
         load_demo = left.button("Try sample data", width="stretch", on_click=_open_sales)
         right.download_button(
             "Download sample CSV", DEMO_PATH.read_bytes(), "retail-sales.csv", "text/csv", width="stretch",
+            on_click="ignore",
         )
         st.caption("Sample data is fictional. For an Excel file, export the sheet as CSV first.")
+        if ready and on_remove is not None:
+            st.button("Remove active file", on_click=on_remove, width="stretch")
+            st.caption("Removes this session's file and results. Saved workspace history is managed in Data & privacy.")
     return {"uploaded_file": uploaded_file, "load_demo": load_demo, "use_database": False}
 
 
@@ -134,6 +140,7 @@ def render_customer_downloads() -> None:
         "Data: " + (st.session_state.get("uploaded_name") or "Sales CSV"),
         f"Source rows: {analysis.get('source_rows', len(frame))}",
         "## Calculated answer\n" + st.session_state.get("latest_insight", ""),
+        "## How figures are calculated\n" + "\n".join(SALES_CALCULATION_NOTES),
     ]
     if ai.get("text"):
         sections.append("## AI assistance\n" + ai["text"])
@@ -143,9 +150,9 @@ def render_customer_downloads() -> None:
     left, right = st.columns(2)
     left.download_button(
         "Download results CSV", frame.to_csv(index=False).encode("utf-8"),
-        "sales-results.csv", "text/csv", width="stretch",
+        "sales-results.csv", "text/csv", width="stretch", on_click="ignore",
     )
     right.download_button(
         "Download summary", "\n\n".join(sections).encode("utf-8"),
-        "sales-summary.md", "text/markdown", width="stretch",
+        "sales-summary.md", "text/markdown", width="stretch", on_click="ignore",
     )

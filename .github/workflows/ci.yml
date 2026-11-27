@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: platform-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   PYTHON_VERSION: "3.11"
   OPENAI_API_KEY: ""
@@ -210,7 +214,8 @@ jobs:
           context: .
           file: Dockerfile.backend
           push: false
-          load: false
+          load: true
+          tags: agentic-analytics-backend:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -220,14 +225,113 @@ jobs:
           context: .
           file: Dockerfile.frontend
           push: false
-          load: false
+          load: true
+          tags: agentic-analytics-frontend:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Prepare isolated stack credentials
+        run: python ops/stack_smoke.py prepare
+
+      - name: Start complete stack
+        run: docker compose up -d --no-build --wait --wait-timeout 180
+
+      - name: Verify authentication, persistence, and worker failure handling
+        run: python ops/stack_smoke.py verify
+
+      - name: Stack diagnostics
+        if: failure()
+        run: docker compose logs --no-color --tail 100
+
+      - name: Stop stack
+        if: always()
+        run: docker compose down -v
+
+  persistence-services:
+    name: PostgreSQL and pgvector
+    runs-on: ubuntu-24.04
+    needs: [lint, test]
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: analytics_test
+          POSTGRES_PASSWORD: isolated-ci-password
+          POSTGRES_DB: analytics_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U analytics_test -d analytics_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      RUN_SERVICE_TESTS: "1"
+      TEST_POSTGRES_URL: postgresql://analytics_test:isolated-ci-password@localhost:5432/analytics_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-lock.txt
+      - name: Install dependencies
+        run: python -m pip install -r requirements-lock.txt
+      - name: Install PostgreSQL 16 client tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends postgresql-client-16
+          test -x /usr/lib/postgresql/16/bin/pg_dump
+          test -x /usr/lib/postgresql/16/bin/pg_restore
+          echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"
+      - name: Require matching PostgreSQL client and server versions
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import re
+          import shutil
+          import subprocess
+          import psycopg
+
+          expected_directory = Path("/usr/lib/postgresql/16/bin")
+          for name in ("pg_dump", "pg_restore"):
+              executable = shutil.which(name)
+              if not executable or Path(executable).resolve().parent != expected_directory:
+                  raise SystemExit(f"{name} must resolve to the installed PostgreSQL 16 client")
+              version = subprocess.check_output([executable, "--version"], text=True).strip()
+              match = re.search(r"\(PostgreSQL\) (\d+)", version)
+              if not match or int(match.group(1)) != 16:
+                  raise SystemExit(f"{name} must have major version 16")
+              print(version)
+          with psycopg.connect(os.environ["TEST_POSTGRES_URL"]) as connection:
+              if connection.info.server_version // 10000 != 16:
+                  raise SystemExit("The recovery drill requires a PostgreSQL 16 server")
+          PY
+      - name: Enable vector extension
+        run: |
+          python - <<'PY'
+          import os, psycopg
+          with psycopg.connect(os.environ["TEST_POSTGRES_URL"]) as conn:
+              conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+          PY
+      - name: Verify real database round trips, isolation, and worker leases
+        run: python -m pytest tests/integration -v --junitxml=test-results/postgresql-junit.xml
+      - name: Require every service integration test to run
+        run: |
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+
+          cases = ET.parse("test-results/postgresql-junit.xml").getroot().findall(".//testcase")
+          if not cases:
+              raise SystemExit("No service integration tests ran")
+          skipped = [case.attrib.get("name", "unknown") for case in cases if case.find("skipped") is not None]
+          if skipped:
+              raise SystemExit("Service integration tests must not skip: " + ", ".join(skipped))
+          print(f"All {len(cases)} service integration tests ran")
+          PY
 
   deployment-safety:
     name: Deployment Safety
     runs-on: ubuntu-latest
-    needs: [startup, docker, e2e]
+    needs: [startup, docker, e2e, persistence-services]
     steps:
       - name: Checkout
         uses: actions/checkout@v4

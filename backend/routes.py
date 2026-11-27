@@ -3,18 +3,21 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from json import dumps
+import os
 from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.responses import StreamingResponse
 
 from backend.auth_context import get_request_session, session_from_token
-from backend.auth_sessions import login_user, revoke_session, validate_session_token
+from backend.auth_sessions import login_user, revoke_session_checked, validate_session_token
 from backend.diagnostics import runtime_diagnostics
 from backend.logging import get_logger
 from backend.models import RequestSession
+from backend.persistence import PersistenceError
 from backend.runtime import orchestration_runtime
+from backend.workers import ActiveJobsError, IdempotencyConflict, QueueCapacityError, get_worker_queue, run_one_job
 from backend.services import (
     AgentCoordinationTrace,
     AgentExecution,
@@ -93,7 +96,10 @@ def require_admin(session: RequestSession = Depends(get_request_session)) -> Req
 
 
 class ExecuteRequest(BaseModel):
-    question: str = Field(..., min_length=1)
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    question: str = Field(..., min_length=1, max_length=4000)
+    connector_id: str = Field("sqlite", min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.:-]+$")
+    idempotency_key: str | None = Field(None, min_length=1, max_length=128)
 
 
 class TokenUsageResponse(BaseModel):
@@ -103,7 +109,7 @@ class TokenUsageResponse(BaseModel):
 
 
 class WorkflowTelemetryResponse(BaseModel):
-    usage_source: Literal["synthetic"] = "synthetic"
+    usage_source: Literal["provider", "unavailable", "synthetic"] = "unavailable"
     started_at: str | None
     completed_at: str | None
     latency_ms: int | None
@@ -151,7 +157,7 @@ class WorkflowStreamUpdateResponse(BaseModel):
 
 
 class ExecuteResponse(BaseModel):
-    execution_mode: Literal["simulation"] = "simulation"
+    execution_mode: Literal["analytics", "simulation"] = "analytics"
     workflow_id: str
     question: str
     status: WorkflowStatus
@@ -164,7 +170,10 @@ class ExecuteResponse(BaseModel):
 
 
 class WorkflowStatusResponse(BaseModel):
-    execution_mode: Literal["simulation"] = "simulation"
+    execution_mode: Literal["analytics", "simulation"] = "analytics"
+    result_available: bool = False
+    attempts: int = 0
+    connector_id: str | None = None
     workflow_id: str
     question: str
     status: WorkflowStatus
@@ -254,10 +263,10 @@ def readiness_alias() -> dict[str, str]:
     return orchestration_service.readiness()
 
 
-@router.get("/diagnostics", dependencies=[Depends(require_admin)])
-def diagnostics() -> dict[str, object]:
+@router.get("/diagnostics")
+def diagnostics(session: RequestSession = Depends(require_admin)) -> dict[str, object]:
     ready = orchestration_service.readiness()
-    return runtime_diagnostics(ready)
+    return runtime_diagnostics(ready, organization_id=session.organization_id, workspace_id=session.workspace_id)
 
 
 @router.get("/operations/summary", response_model=OperationsSummaryResponse, dependencies=[Depends(get_request_session)])
@@ -281,7 +290,10 @@ def login_endpoint(payload: LoginRequest) -> dict[str, object]:
 
 @router.post("/auth/logout")
 def logout_endpoint(payload: LogoutRequest) -> dict[str, object]:
-    return {"revoked": revoke_session(payload.session_token)}
+    try:
+        return {"revoked": revoke_session_checked(payload.session_token)}
+    except PersistenceError as exc:
+        raise HTTPException(status_code=503, detail="Sign out could not be confirmed; try again when storage is available") from exc
 
 
 @router.get("/auth/session")
@@ -337,62 +349,123 @@ def audit_timeline(workflow_id: str, session: RequestSession = Depends(get_reque
     )
 
 
-@router.get("/connectors", dependencies=[Depends(require_admin)])
-def list_connectors() -> dict[str, object]:
-    return backend_service.connectors()
+@router.get("/connectors")
+def list_connectors(session: RequestSession = Depends(require_admin)) -> dict[str, object]:
+    return {"connectors": backend_service.connector_registry.list_for_workspace(
+        organization_id=session.organization_id, workspace_id=session.workspace_id,
+    )}
 
 
-@router.get("/connectors/{connector_id}/health", dependencies=[Depends(require_admin)])
-def connector_health(connector_id: str) -> dict[str, object]:
+def _authorized_connector(connector_id: str, session: RequestSession):
     try:
-        return backend_service.connector_health(connector_id)
+        return backend_service.connector_registry.get_for_workspace(
+            connector_id, organization_id=session.organization_id, workspace_id=session.workspace_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail="Connector access denied") from exc
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="Connector is unavailable") from exc
 
 
-@router.get("/connectors/{connector_id}/schema", dependencies=[Depends(require_admin)])
-def connector_schema(connector_id: str) -> dict[str, object]:
-    try:
-        return backend_service.connector_schema(connector_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+@router.get("/connectors/{connector_id}/health")
+def connector_health(connector_id: str, session: RequestSession = Depends(require_admin)) -> dict[str, object]:
+    return _authorized_connector(connector_id, session).health_check().as_dict()
 
 
-@router.post("/connectors/validate", dependencies=[Depends(require_admin)])
-def validate_connector(payload: ConnectorValidationRequest) -> dict[str, object]:
-    try:
-        return backend_service.validate_connector(payload.connector_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+@router.get("/connectors/{connector_id}/schema")
+def connector_schema(connector_id: str, session: RequestSession = Depends(require_admin)) -> dict[str, object]:
+    return _authorized_connector(connector_id, session).inspect_schema()
 
 
-@router.post("/connectors/{connector_id}/validate", dependencies=[Depends(require_admin)])
-def validate_connector_by_id(connector_id: str) -> dict[str, object]:
-    try:
-        return backend_service.validate_connector(connector_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+@router.post("/connectors/validate")
+def validate_connector(payload: ConnectorValidationRequest, session: RequestSession = Depends(require_admin)) -> dict[str, object]:
+    return _authorized_connector(payload.connector_id, session).validate_connection().as_dict()
 
 
-@router.post("/execute", response_model=ExecuteResponse, description="Simulate orchestration stages. This endpoint does not generate or execute SQL; token and cost values are synthetic.")
+@router.post("/connectors/{connector_id}/validate")
+def validate_connector_by_id(connector_id: str, session: RequestSession = Depends(require_admin)) -> dict[str, object]:
+    return _authorized_connector(connector_id, session).validate_connection().as_dict()
+
+
+@router.post("/execute", response_model=ExecuteResponse, status_code=202,
+             description="Queue a real, authorized read-only analytics workflow. Read its durable result from /workflow/{id}/result.")
 def execute(
-    payload: ExecuteRequest,
-    background_tasks: BackgroundTasks,
+    payload: ExecuteRequest, background_tasks: BackgroundTasks,
     session: RequestSession = Depends(get_request_session),
 ) -> ExecuteResponse:
+    if not {"workspace:admin", "workspace:analyst"}.intersection(session.roles):
+        raise HTTPException(status_code=403, detail="Analysis execution requires an analyst or administrator role")
+    try:
+        backend_service.connector_registry.get_for_workspace(
+            payload.connector_id, organization_id=session.organization_id, workspace_id=session.workspace_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail="Connector access denied") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Connector is unavailable") from exc
     try:
         orchestration_service.register_session(session)
-        execution = orchestration_runtime.submit(
-            payload.question,
-            background_tasks,
-            organization_id=session.organization_id,
-            workspace_id=session.workspace_id,
-            user_id=session.user_id,
-        )
+        queue = get_worker_queue()
+        with queue.workspace_activity(session.organization_id, session.workspace_id):
+            job_id = queue.enqueue("analytics.query", {
+                "question": payload.question, "connector_id": payload.connector_id,
+                "organization_id": session.organization_id, "workspace_id": session.workspace_id,
+                "user_id": session.user_id,
+            }, idempotency_key=payload.idempotency_key)
+            job = queue.get(job_id)
+            execution = orchestration_service.create_workflow(
+                payload.question, organization_id=session.organization_id, workspace_id=session.workspace_id,
+                user_id=session.user_id, workflow_id=job.workflow_id,
+            )
+        # Production runs a separate durable worker. Development drains this job
+        # after the response, while restart recovery uses the same worker command.
+        mode = os.getenv("ANALYTICS_WORKER_MODE", "external" if os.getenv("APP_ENV") == "production" else "inline")
+        if mode == "inline" and job.status in {"queued", "retrying"}:
+            background_tasks.add_task(run_one_job, job_id)
+    except (IdempotencyConflict, ActiveJobsError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except QueueCapacityError as exc:
+        raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": "10"}) from exc
+    except Exception as exc:
+        logger.warning("analytics_submission_failed workspace_id=%s error_type=%s", session.workspace_id, type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Analytics storage is temporarily unavailable") from exc
+    return ExecuteResponse(
+        execution_mode="analytics", workflow_id=execution.workflow_id, question=execution.question,
+        status=job.status, timestamp=execution.created_at,
+        telemetry=_telemetry_response(execution.telemetry, usage_source=_usage_source(job)),
+        current_stage=execution.current_stage, stage_progression=_stage_progression_response(execution.stage_progression),
+        agent_executions=_agent_executions_response(execution.agent_executions), agent_traces=[],
+    )
+
+
+def _usage_source(job) -> str:
+    if job is None:
+        return "synthetic"
+    return "provider" if (job.result or {}).get("telemetry", {}).get("usage_available") else "unavailable"
+
+
+@router.post("/execute/simulation", response_model=ExecuteResponse,
+             description="Explicit demonstration of lifecycle events. No SQL or model requests run; usage is synthetic.")
+def execute_simulation(
+    payload: ExecuteRequest,
+    background_tasks: BackgroundTasks,
+    session: RequestSession = Depends(require_admin),
+) -> ExecuteResponse:
+    try:
+        with get_worker_queue().workspace_activity(session.organization_id, session.workspace_id):
+            orchestration_service.register_session(session)
+            execution = orchestration_runtime.submit(
+                payload.question,
+                background_tasks,
+                organization_id=session.organization_id,
+                workspace_id=session.workspace_id,
+                user_id=session.user_id,
+            )
     except Exception as exc:
         logger.exception("execute_request_failed workspace_id=%s", session.workspace_id)
         raise HTTPException(status_code=500, detail="Workflow execution could not be started") from exc
     return ExecuteResponse(
+        execution_mode="simulation",
         workflow_id=execution.workflow_id,
         question=execution.question,
         status=execution.status,
@@ -408,18 +481,33 @@ def execute(
 @router.get("/workflow/{workflow_id}", response_model=WorkflowStatusResponse)
 def get_workflow(workflow_id: str, session: RequestSession = Depends(get_request_session)) -> WorkflowStatusResponse:
     workflow = _authorized_workflow(session, workflow_id)
+    job = get_worker_queue().for_workflow(workflow_id)
 
     return WorkflowStatusResponse(
+        execution_mode="analytics" if job else "simulation",
+        result_available=bool(job and job.result),
+        attempts=job.attempts if job else 0,
+        connector_id=job.payload["connector_id"] if job else None,
         workflow_id=workflow.workflow_id,
         question=workflow.question,
-        status=workflow.status,
+        status=job.status if job else workflow.status,
         created_at=workflow.created_at,
-        telemetry=_telemetry_response(workflow.telemetry),
+        telemetry=_telemetry_response(workflow.telemetry, usage_source=_usage_source(job)),
         current_stage=workflow.current_stage,
         stage_progression=_stage_progression_response(workflow.stage_progression),
         agent_executions=_agent_executions_response(workflow.agent_executions),
         agent_traces=_agent_traces_response(orchestration_service.get_agent_traces(workflow_id) or ()),
     )
+
+
+@router.get("/workflow/{workflow_id}/result")
+def get_workflow_result(workflow_id: str, session: RequestSession = Depends(get_request_session)) -> dict[str, object]:
+    _authorized_workflow(session, workflow_id)
+    job = get_worker_queue().for_workflow(workflow_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="This workflow has no analytics result")
+    return {"workflow_id": workflow_id, "status": job.status, "attempts": job.attempts,
+            "connector_id": job.payload["connector_id"], "result": job.result, "error": job.error}
 
 
 @router.get("/workflow/{workflow_id}/events", response_model=WorkflowEventsResponse)
@@ -438,7 +526,7 @@ def get_workflow_events(workflow_id: str, session: RequestSession = Depends(get_
 @router.get("/workflow/{workflow_id}/telemetry", response_model=WorkflowTelemetryResponse)
 def get_workflow_telemetry(workflow_id: str, session: RequestSession = Depends(get_request_session)) -> WorkflowTelemetryResponse:
     workflow = _authorized_workflow(session, workflow_id)
-    return _telemetry_response(workflow.telemetry)
+    return _telemetry_response(workflow.telemetry, usage_source=_usage_source(get_worker_queue().for_workflow(workflow_id)))
 
 
 @router.get("/workflow/{workflow_id}/replay", response_model=WorkflowReplayResponse)
@@ -520,14 +608,14 @@ def latest_investigation() -> dict[str, object]:
 @router.get("/workspace/{workspace_id}/inspection")
 def inspect_workspace(workspace_id: str, session: RequestSession = Depends(get_request_session)) -> dict[str, object]:
     _ensure_workspace_access(session, workspace_id)
-    memory = load_workspace_memory_by_id(workspace_id)
+    memory = load_workspace_memory_by_id(workspace_id, team_id=session.organization.name)
     return workspace_summary(memory)
 
 
 @router.get("/workspace/{workspace_id}")
 def get_workspace_memory(workspace_id: str, session: RequestSession = Depends(get_request_session)) -> dict[str, object]:
     _ensure_workspace_access(session, workspace_id)
-    return load_workspace_memory_by_id(workspace_id)
+    return load_workspace_memory_by_id(workspace_id, team_id=session.organization.name)
 
 
 @router.post("/workspace/{workspace_id}/sql-history")
@@ -596,7 +684,7 @@ def save_workspace_report(
 @router.get("/workspace/{workspace_id}/transcripts")
 def export_workspace_transcripts(workspace_id: str, session_id: str = "", session: RequestSession = Depends(get_request_session)) -> dict[str, object]:
     _ensure_workspace_access(session, workspace_id)
-    memory = load_workspace_memory_by_id(workspace_id)
+    memory = load_workspace_memory_by_id(workspace_id, team_id=session.organization.name)
     return {
         "workspace_id": memory.get("workspace_id", workspace_id),
         "session_id": session_id or None,
@@ -607,7 +695,7 @@ def export_workspace_transcripts(workspace_id: str, session_id: str = "", sessio
 @router.get("/workspace/{workspace_id}/sql-history")
 def export_workspace_sql_history(workspace_id: str, limit: int = 25, session: RequestSession = Depends(get_request_session)) -> dict[str, object]:
     _ensure_workspace_access(session, workspace_id)
-    memory = load_workspace_memory_by_id(workspace_id)
+    memory = load_workspace_memory_by_id(workspace_id, team_id=session.organization.name)
     return {
         "workspace_id": memory.get("workspace_id", workspace_id),
         "items": saved_sql_history(memory, limit=max(1, min(limit, 100))),
@@ -653,8 +741,9 @@ async def websocket_workflow_updates(websocket: WebSocket, workflow_id: str) -> 
         websocket_manager.disconnect(websocket, channel)
 
 
-def _telemetry_response(telemetry: WorkflowTelemetry) -> WorkflowTelemetryResponse:
+def _telemetry_response(telemetry: WorkflowTelemetry, *, usage_source: str = "synthetic") -> WorkflowTelemetryResponse:
     return WorkflowTelemetryResponse(
+        usage_source=usage_source,
         started_at=telemetry.started_at,
         completed_at=telemetry.completed_at,
         latency_ms=telemetry.latency_ms,

@@ -12,6 +12,14 @@ import plotly.graph_objects as go
 import streamlit as st
 
 
+SALES_CALCULATION_NOTES = (
+    "All accepted rows are included. Negative amounts reduce the total; confirm how your export records refunds.",
+    "Exact duplicate rows are retained. Remove unintended duplicates in your source file before uploading again.",
+    "Amounts are used as supplied. Tax, discounts, and shipping are not added or removed.",
+    "Each row is rounded to two decimal places before summing. Currency conversion is not performed.",
+)
+
+
 def _html(value: object) -> str:
     return escape("" if value is None else str(value), quote=True)
 
@@ -109,6 +117,8 @@ def customer_chart(df: pd.DataFrame, currency: str = "") -> go.Figure | None:
             marker_line_width=0,
             hovertemplate=f"%{{x}}<br>{label}: %{{y:,.2f}}{_html(suffix)}<extra></extra>",
         ))
+        # Numeric-looking product codes are labels, not a continuous measure.
+        figure.update_xaxes(type="category")
     figure.update_layout(
         height=310, margin={"l": 12, "r": 12, "t": 24, "b": 12},
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
@@ -163,6 +173,8 @@ def render_customer_answer(
         if source_name:
             rows = f" · {source_rows:,} source rows" if source_rows is not None else ""
             st.caption(f"Source: {source_name}{rows}.")
+        for note in SALES_CALCULATION_NOTES:
+            st.caption(note)
         st.caption(
             "AI selected relevant findings and suggested checks. The displayed figures were calculated from the accepted sales data."
             if ai_used else

@@ -1,5 +1,7 @@
 # Small-business sales milestone
 
+This document records the original sales milestone and its CSV contract. Current API, isolation, worker, recovery, and verification status is maintained in [Release readiness](release-readiness.md); the historical validation notes below are not a current release report.
+
 ## What this milestone delivers
 
 The first business use case is a sales review for a small retailer: load transaction data, calculate product and monthly totals, inspect a chart, and export an explainable report. It runs locally without sending the uploaded CSV to a model.
@@ -94,12 +96,13 @@ The browser suite has assertions for raw CSV upload and the exact downloaded res
 
 No paid model calls, real PostgreSQL integration tests, Docker builds, load tests, or live deployment changes were performed for this milestone. Validating the 20 reference queries establishes a working evaluation dataset; it is not a model accuracy score.
 
-## Remaining work before a customer pilot
+## Remaining customer acceptance
 
-1. Pick one pilot business and define its export format and one useful decision, such as which products contributed most to this month's sales. Reconcile totals with the business's existing report before using the output.
-2. Validate the upload preview and column mappings against a pilot business's real export. Agree how its returns, tax, discounts, missing dates, and duplicates should be interpreted. Add period comparison only after reporting-window completeness is defined.
-3. Run browser upload/download tests, package the demo, and verify the deployment from a clean environment. Exercise PostgreSQL with a real service if it will be used.
-4. Connect the FastAPI execution endpoint to the actual SQL/analysis pipeline if an API-backed product is needed. Add failure handling and observed execution telemetry; its current lifecycle simulation is not customer analytics.
-5. Separate every customer's database credentials, uploaded files, vector/retrieval history, and reports. The bundled Chinook connector and historical retrieval paths are still shared demonstration infrastructure.
-6. Run the repaired golden evaluation against the selected model with a budget and review wrong answers. Add durable jobs and monitoring only when the product needs them; Redis and pgvector scaffolding alone do not provide those features.
-7. Record pilot evidence: task time before and after, accuracy against the trusted report, owner feedback, and permission to share the case study. Use those measured outcomes in a portfolio or application; describe this sample as synthetic until then.
+The repository now includes real API execution, durable workers, scoped connectors and memory, data deletion, retention, and recovery tools. Their implementation and automated gates are described in [Release readiness](release-readiness.md).
+
+Before a real business relies on the results:
+
+1. Reconcile one representative export against its trusted sales report, including refunds, tax, shipping, discounts, duplicate lines, currency, and reporting-period completeness.
+2. Complete the hosted customer upload-to-download journey with a non-admin account and verify restart recovery.
+3. Verify the optional AI review and SQL workflow with the actual configured provider and bounded evaluation budget.
+4. Record observed task time, accuracy, owner feedback, and permission to publish a case study. Synthetic demo results remain synthetic.

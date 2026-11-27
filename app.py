@@ -17,6 +17,7 @@ from auth import render_auth_controls, require_login
 from csv_analytics import CSVAnalysisError, DEMO_PATH, analyze_sales, read_sales_csv
 from autonomous_insights import analyze_result_set, empty_insight_state, insight_prompt_block
 from backend.operations import agent_utilization
+from backend.persistence import PersistenceError
 from backend.services import execute_query_workflow
 from backend.telemetry import validate_telemetry_payload
 from backend.workspace_inspection import workspace_summary
@@ -555,6 +556,28 @@ def clear_analysis_result():
         st.session_state[key] = value
 
 
+def remove_active_sales_data():
+    """Remove the current upload and derived answers without erasing saved history."""
+    clear_import_review()
+    clear_analysis_result()
+    st.session_state.pop("uploaded_df", None)
+    st.session_state.upload_generation = st.session_state.get("upload_generation", 0) + 1
+    st.session_state.uploaded_name = None
+    st.session_state.uploaded_fingerprint = None
+    st.session_state.latest_question = ""
+    st.session_state.latest_mode = "csv"
+    st.session_state.command_input = ""
+    st.session_state.command_text = ""
+    st.session_state.messages = []
+    st.session_state.analytics_memory = empty_analytics_memory()
+    st.session_state.semantic_context = {}
+    st.session_state.active_intent = ""
+    st.session_state.pending_monitoring_run = False
+    st.session_state.customer_initial_report_pending = False
+    st.session_state.csv_upload_error = ""
+    st.session_state.active_file_removed = True
+
+
 def begin_sales_upload(filename=None, fingerprint=None):
     """Pause analysis without changing the uploader during an in-flight transfer."""
     clear_import_review()
@@ -590,7 +613,11 @@ def stage_sales_upload(content, filename, fingerprint):
 
 def cancel_sales_upload():
     """Run as a widget callback, before navigation controls are reconstructed."""
-    clear_session()
+    if st.session_state.get("interface_mode") == "Customer dashboard":
+        remove_active_sales_data()
+        st.session_state.pop("active_file_removed", None)
+    else:
+        clear_session()
     st.session_state.top_navigation = "Overview"
     st.session_state.workspace_route = "Overview"
 
@@ -607,13 +634,18 @@ def render_pending_sales_upload():
         st.session_state.csv_import_fingerprint,
     )
     if st.session_state.get("csv_import_cancel_requested"):
-        clear_session()
+        if st.session_state.get("interface_mode") == "Customer dashboard":
+            remove_active_sales_data()
+            st.session_state.pop("active_file_removed", None)
+        else:
+            clear_session()
         st.rerun()
     if review is not None:
         st.session_state.uploaded_df = review.frame
         st.session_state.uploaded_name = st.session_state.csv_import_name
         st.session_state.uploaded_fingerprint = st.session_state.csv_import_fingerprint
         st.session_state.csv_import_available_questions = review.available_questions
+        st.session_state.csv_import_warnings = list(review.warnings)
         st.session_state.csv_import_pending = False
         st.session_state.pop("csv_import_raw", None)
         st.session_state.csv_import_applied_notice = True
@@ -632,7 +664,11 @@ def configure_workspace_session(user_id, team_id, role, workspace_scope="Persona
     st.session_state.user_identity = identity
     st.session_state.active_workspace_id = identity["workspace_id"]
     if not st.session_state.get("workspace_loaded") or previous_workspace != identity["workspace_id"]:
-        memory = load_workspace_memory(identity)
+        try:
+            memory = load_workspace_memory(identity)
+        except PersistenceError:
+            st.error("Saved workspace data is temporarily unavailable. Please try again when storage is restored.")
+            st.stop()
         session = start_workspace_session(memory)
         st.session_state.workspace_memory = memory
         st.session_state.workspace_session_id = session["session_id"]
@@ -647,7 +683,12 @@ def configure_workspace_session(user_id, team_id, role, workspace_scope="Persona
         st.session_state.workspace_memory = memory
         if st.session_state.semantic_memory and not st.session_state.get("semantic_context"):
             st.session_state.semantic_context = next(reversed(st.session_state.semantic_memory.values()))
-        st.session_state.workspace_memory = save_workspace_memory(identity, memory)
+        try:
+            st.session_state.workspace_memory = save_workspace_memory(identity, memory)
+        except PersistenceError:
+            st.session_state.workspace_loaded = False
+            st.error("Your workspace could not be saved. Please try again when storage is restored.")
+            st.stop()
         st.session_state.workspace_memory_last_saved_signature = workspace_memory_fingerprint(st.session_state.workspace_memory)
         st.session_state.workspace_memory_last_saved_id = identity.get("workspace_id")
         st.session_state.workspace_persistence_timings = st.session_state.get("workspace_persistence_timings", [])[-19:] + [
@@ -671,7 +712,11 @@ def persist_workspace_memory():
     ):
         return memory
     started_at = time.perf_counter()
-    st.session_state.workspace_memory = save_workspace_memory(identity, memory)
+    try:
+        st.session_state.workspace_memory = save_workspace_memory(identity, memory)
+    except PersistenceError:
+        st.error("Your changes could not be saved. Please try again when storage is restored.")
+        st.stop()
     st.session_state.workspace_memory_last_saved_signature = workspace_memory_fingerprint(st.session_state.workspace_memory)
     st.session_state.workspace_memory_last_saved_id = identity.get("workspace_id")
     timings = st.session_state.get("workspace_persistence_timings", [])
@@ -880,10 +925,20 @@ def store_semantic_context(key, context):
     st.session_state.semantic_memory = memory
 
 
+def example_sql_scope():
+    """Scope example-query memory to the identity verified on this Streamlit run."""
+    identity = st.session_state.user_identity
+    return {
+        "organization_id": f"organization:{identity['team_id']}",
+        "workspace_id": identity["workspace_id"],
+        "connector_id": "sqlite",
+    }
+
+
 def ensure_schema_semantics():
     memory = st.session_state.get("semantic_memory", {})
     if "sql_schema" not in memory:
-        store_semantic_context("sql_schema", profile_schema(get_schema(), name="Chinook SQL schema"))
+        store_semantic_context("sql_schema", profile_schema(get_schema(**example_sql_scope()), name="Chinook SQL schema"))
     return st.session_state.semantic_memory["sql_schema"]
 
 
@@ -1438,7 +1493,7 @@ def run_query(question, live_placeholder=None):
                 "source_rows": analysis.source_rows,
                 "total_revenue": analysis.total_revenue,
                 "currency": analysis.currency,
-                "warnings": list(analysis.warnings),
+                "warnings": list(dict.fromkeys([*st.session_state.get("csv_import_warnings", []), *analysis.warnings])),
             }
             profile_active_dataframe(df, f"Uploaded CSV: {st.session_state.get('uploaded_name') or 'dataset'}")
             calculation_ms = int((time.perf_counter() - calculation_started) * 1000)
@@ -1470,6 +1525,7 @@ def run_query(question, live_placeholder=None):
                 semantic_context=workflow_context,
                 conversation_context=st.session_state.get("analytics_memory"),
                 workspace_context=st.session_state.get("workspace_memory"),
+                **example_sql_scope(),
             )
             st.session_state.active_intent = workflow_result.get("effective_question") or st.session_state.active_intent
             st.session_state.workflow_trace = workflow_result.get("trace", [])
@@ -1596,7 +1652,7 @@ def render_schema(schema_visible):
         else:
             ensure_schema_semantics()
             with st.expander("Database Schema", expanded=False):
-                st.code(get_schema())
+                st.code(get_schema(**example_sql_scope()))
 
 
 def render_analytics_workspace(client, services):
@@ -1893,6 +1949,39 @@ def render_customer_workspace():
     render_customer_downloads()
 
 
+def render_customer_data_management():
+    identity = st.session_state.get("user_identity") or {}
+    shared = identity.get("workspace_scope") == "team"
+    with st.sidebar.expander("Data & privacy", expanded=False):
+        st.caption("Uploaded CSV files stay in the active session. Logging out removes the active file and results.")
+        st.caption("Saved questions, report summaries, and workspace history can remain after logout.")
+        if shared and identity.get("role") != "admin":
+            st.info("Ask your team administrator to delete saved data from this shared workspace.")
+            return
+        scope = "this shared team's" if shared else "your personal"
+        st.caption(
+            f"Delete saved data removes {scope} workspace history, reports, workflow records, and memory. "
+            "It also clears the active file and results. This cannot be undone here. "
+            "Your account is kept. Previously downloaded files are not changed; backups follow your operator's retention policy."
+        )
+        confirmed = st.checkbox(
+            "I understand that saved workspace data will be deleted",
+            key=f"confirm_workspace_deletion_{identity.get('workspace_id', '')}_{st.session_state.get('deletion_generation', 0)}",
+        )
+        if st.button("Delete saved workspace data", disabled=not confirmed, width="stretch"):
+            from backend.data_lifecycle import delete_workspace_data
+
+            try:
+                delete_workspace_data(identity)
+            except PersistenceError:
+                st.error("Workspace deletion could not finish. Please ask your administrator to retry; do not assume the data was deleted.")
+                st.stop()
+            clear_session()
+            st.session_state.deletion_generation = st.session_state.get("deletion_generation", 0) + 1
+            st.session_state.workspace_data_deleted = True
+            st.rerun()
+
+
 def render_customer_ai_assistance(analysis, frame):
     configured = bool(st.session_state.openai_runtime.get("api_key_configured"))
     saved = st.session_state.get("customer_ai_explanation") or {}
@@ -1982,11 +2071,16 @@ configure_workspace_session(
 )
 render_auth_controls(customer_mode=customer_mode)
 if customer_mode:
+    render_customer_data_management()
     render_customer_hero(has_data="uploaded_df" in st.session_state)
+    if st.session_state.pop("active_file_removed", False):
+        st.success("Active file and results removed. Saved workspace history is unchanged.")
+    if st.session_state.pop("workspace_data_deleted", False):
+        st.success("Saved workspace data and the active file were deleted. A new empty workspace is ready.")
     customer_progress = st.empty()
     with customer_progress.container():
         render_step_progress(2 if "uploaded_df" in st.session_state else 1)
-    sidebar_state.update(render_customer_data_controls(sidebar_state))
+    sidebar_state.update(render_customer_data_controls(sidebar_state, on_remove=remove_active_sales_data))
     st.session_state.workspace_route = "Overview"
 else:
     render_hero()
@@ -2003,11 +2097,18 @@ if sidebar_state["run_monitoring"]:
     st.session_state.pending_monitoring_run = True
 
 if sidebar_state["clear_chat"]:
-    clear_session()
+    if customer_mode:
+        remove_active_sales_data()
+    else:
+        clear_session()
     st.rerun()
 
 if sidebar_state["load_demo"]:
-    clear_session()
+    if customer_mode:
+        remove_active_sales_data()
+        st.session_state.pop("active_file_removed", None)
+    else:
+        clear_session()
     st.session_state.uploaded_df = read_sales_csv(DEMO_PATH.read_bytes())
     st.session_state.uploaded_name = "Synthetic retail sales (USD)"
     st.session_state.uploaded_fingerprint = "retail-demo"

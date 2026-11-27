@@ -2,11 +2,30 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from os import getenv
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
+
+from dotenv import load_dotenv
+
+
+# Load local configuration before constructing the process settings snapshot.
+# Explicit host/container environment variables retain precedence.
+load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
 
 
 DEFAULT_PLATFORM_DATABASE_URL = "sqlite:///data/platform_persistence.db"
 DEFAULT_WORKFLOW_DATABASE_URL = "sqlite:///data/workflow_runtime.db"
+
+
+def database_backend_for_url(database_url: str) -> str:
+    if database_url.startswith("sqlite:///") and database_url.removeprefix("sqlite:///").strip():
+        if database_url.removeprefix("sqlite:///") == ":memory:":
+            raise ValueError("Durable storage requires a SQLite file, not an in-memory database.")
+        return "sqlite"
+    if database_url.startswith(("postgresql://", "postgres://")) and urlsplit(database_url).path.strip("/"):
+        return "postgresql"
+    raise ValueError("Storage requires an explicit sqlite:///file or postgresql://host/database URL.")
 
 
 @dataclass(frozen=True)
@@ -25,6 +44,10 @@ class AppSettings:
     orchestration_queue: str = "orchestration.workflows"
     websocket_channel_prefix: str = "workflow"
 
+    def __post_init__(self) -> None:
+        database_backend_for_url(self.database_url)
+        database_backend_for_url(self.workflow_database_url)
+
     @property
     def sqlite_workflow_path(self) -> str:
         prefix = "sqlite:///"
@@ -34,15 +57,11 @@ class AppSettings:
 
     @property
     def database_backend(self) -> str:
-        if self.database_url.startswith("postgresql://") or self.database_url.startswith("postgres://"):
-            return "postgresql"
-        return "sqlite"
+        return database_backend_for_url(self.database_url)
 
     @property
     def workflow_database_backend(self) -> str:
-        if self.workflow_database_url.startswith("postgresql://") or self.workflow_database_url.startswith("postgres://"):
-            return "postgresql"
-        return "sqlite"
+        return database_backend_for_url(self.workflow_database_url)
 
 
 def get_settings() -> AppSettings:
@@ -54,7 +73,7 @@ def get_settings() -> AppSettings:
         workflow_database_source = "DATABASE_URL" if getenv("DATABASE_URL") else "default"
 
     return AppSettings(
-        environment=getenv("APP_ENV", "development"),
+        environment=getenv("APP_ENV", "development").strip().lower(),
         log_level=getenv("LOG_LEVEL", "INFO"),
         backend_host=getenv("BACKEND_HOST", "0.0.0.0"),
         backend_port=int(getenv("BACKEND_PORT", "8000")),
@@ -98,8 +117,8 @@ def validate_settings(config: AppSettings | None = None) -> dict[str, Any]:
         )
     ):
         warnings.append("Platform and workflow persistence use different database backends.")
-    if config.environment == "production" and not config.redis_url:
-        warnings.append("Production orchestration should configure REDIS_URL or another durable worker backend.")
+    if config.environment == "production" and getenv("ANALYTICS_WORKER_MODE", "external") != "external":
+        errors.append("Production analytics requires ANALYTICS_WORKER_MODE=external and a supervised worker process.")
     return {
         "environment": config.environment,
         "valid": not warnings and not errors,
@@ -120,8 +139,9 @@ settings = get_settings()
 def _redact_database_url(database_url: str) -> str:
     if "@" not in database_url or "://" not in database_url:
         return database_url
-    scheme, rest = database_url.split("://", 1)
-    return f"{scheme}://***@{rest.split('@', 1)[1]}"
+    parsed = urlsplit(database_url)
+    netloc = parsed.netloc.rsplit("@", 1)[-1]
+    return urlunsplit((parsed.scheme, "***@" + netloc, parsed.path, "", ""))
 
 
 __all__ = [

@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError, OpenAI
 
 from backend.retry import RetryPolicy, retry_decision, retry_policy
+from backend.redaction import redact, redact_text
 from graph.cost_tracker import estimate_cost
 
 try:
@@ -47,7 +48,7 @@ def get_openai_api_key() -> str | None:
 
 def _configured_proxy_env() -> dict[str, str]:
     proxy_keys = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
-    return {key: value for key in proxy_keys if (value := os.getenv(key))}
+    return {key: "configured" for key in proxy_keys if os.getenv(key)}
 
 
 def validate_openai_runtime() -> dict[str, Any]:
@@ -97,7 +98,7 @@ def _exception_chain(exc: BaseException) -> list[dict[str, str]]:
     seen: set[int] = set()
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        chain.append({"type": type(current).__name__, "message": str(current), "repr": repr(current)})
+        chain.append({"type": type(current).__name__, "message": redact_text(str(current)), "repr": redact_text(repr(current))})
         current = current.__cause__ or current.__context__
     return chain
 
@@ -129,7 +130,7 @@ def _openai_exception_payload(
         "max_attempts": attempts,
         "retry": retry or {},
         "error_type": type(exc).__name__,
-        "error_message": str(exc),
+        "error_message": redact_text(str(exc)),
         "exception_chain": _exception_chain(exc),
         "runtime": validate_openai_runtime(),
     }
@@ -145,7 +146,7 @@ def _openai_exception_payload(
                 "body": getattr(exc, "body", None),
             }
         )
-    return payload
+    return redact(payload)
 
 
 def _log_openai_exception(
@@ -165,7 +166,7 @@ def _log_openai_exception(
         payload["error_type"],
         payload["error_message"],
         payload,
-        exc_info=True,
+        exc_info=False,
     )
     return payload
 

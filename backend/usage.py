@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from hashlib import sha256
+import json
 from uuid import uuid4
 
 from backend.models import DEFAULT_ORGANIZATION_ID, DEFAULT_USER_ID, DEFAULT_WORKSPACE_ID, UsageEventType, UsageRecord
@@ -22,9 +24,14 @@ class UsageService:
         quantity: float = 1.0,
         estimated_cost_usd: float = 0.0,
         metadata: dict[str, object] | None = None,
+        idempotency_key: str | None = None,
     ) -> UsageRecord:
+        usage_id = f"usage:{uuid4()}"
+        if idempotency_key is not None:
+            identity = [organization_id, workspace_id, user_id, event_type, idempotency_key]
+            usage_id = "usage:" + sha256(json.dumps(identity).encode()).hexdigest()
         usage = UsageRecord(
-            usage_id=f"usage:{uuid4()}",
+            usage_id=usage_id,
             organization_id=organization_id,
             workspace_id=workspace_id,
             user_id=user_id,

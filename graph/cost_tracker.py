@@ -1,9 +1,8 @@
 """
 Cost and usage tracker.
 
-Logs every query's model, token counts, and estimated cost to a local SQLite
-database (data/cost_log.db). The Streamlit admin tab reads this to render
-the cost dashboard.
+Development-only aggregate usage log. Customer question text is never written
+or returned. Production usage is recorded by the scoped workflow service.
 """
 
 from __future__ import annotations
@@ -49,11 +48,13 @@ def log_query_cost(
     tokens: int,
     latency_ms: int = 0,
 ) -> None:
+    if os.getenv("APP_ENV", "development").lower() == "production":
+        return
     conn = _get_conn()
     conn.execute(
         "INSERT INTO query_log (ts, question, model, input_tok, output_tok, cost_usd, latency_ms) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (datetime.now(UTC).isoformat(), question, model, tokens, 0, cost_usd, latency_ms),
+        (datetime.now(UTC).isoformat(), None, model, tokens, 0, cost_usd, latency_ms),
     )
     conn.commit()
     conn.close()
@@ -65,7 +66,9 @@ def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     return (input_tokens * rates["input"] + output_tokens * rates["output"]) / 1_000_000
 
 
-def get_total_cost() -> float:
+def get_total_cost() -> float | None:
+    if os.getenv("APP_ENV", "development").lower() == "production":
+        return None  # No global total is exposed as a customer's own usage.
     conn = _get_conn()
     row = conn.execute("SELECT COALESCE(SUM(cost_usd), 0) FROM query_log").fetchone()
     conn.close()
@@ -73,9 +76,11 @@ def get_total_cost() -> float:
 
 
 def get_recent_queries(limit: int = 20) -> list[dict]:
+    if os.getenv("APP_ENV", "development").lower() == "production":
+        return []
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT ts, question, model, input_tok, cost_usd, latency_ms "
+        "SELECT ts, NULL, model, input_tok, cost_usd, latency_ms "
         "FROM query_log ORDER BY id DESC LIMIT ?",
         (limit,),
     ).fetchall()

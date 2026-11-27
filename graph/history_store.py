@@ -1,94 +1,75 @@
+"""Scoped SQL examples; legacy unscoped Chroma data is intentionally never read.
+
+Questions stay in the configured database and use local lexical embeddings.
+Every call must name the authenticated organization, workspace and connector.
 """
-Persistent query history store using ChromaDB.
-
-Saves every successful NL → SQL pair and retrieves semantically similar
-past queries to use as few-shot examples in the SQL Generator.
-
-ChromaDB runs locally (./data/history_store/) so no external service needed.
-"""
-
 from __future__ import annotations
 
-import hashlib
-import os
-from datetime import datetime
+import logging
 from typing import Any
 
-try:
-    import chromadb
-    from chromadb.utils import embedding_functions
-
-    CHROMADB_AVAILABLE = True
-except ImportError:
-    chromadb = None
-    embedding_functions = None
-    CHROMADB_AVAILABLE = False
-
-_COLLECTION_NAME = "query_history"
-_PERSIST_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "history_store")
+from backend.memory import MemoryDocument, build_vector_memory_store
 
 
-def _get_collection() -> chromadb.Collection:
-    if not CHROMADB_AVAILABLE:
-        raise RuntimeError("ChromaDB is not installed.")
-
-    client = chromadb.PersistentClient(path=_PERSIST_PATH)
-    ef = embedding_functions.OpenAIEmbeddingFunction(
-        api_key=os.environ.get("OPENAI_API_KEY", ""),
-        model_name="text-embedding-3-small",
-    )
-    return client.get_or_create_collection(_COLLECTION_NAME, embedding_function=ef)
+logger = logging.getLogger(__name__)
 
 
-def save_query_to_history(question: str, sql: str, success: bool = True) -> None:
-    """Persists a NL + SQL pair to the vector store."""
-    if not success:
-        return
+def _has_scope(organization_id, workspace_id, connector_id) -> bool:
+    return all(isinstance(value, str) and value.strip() for value in (organization_id, workspace_id, connector_id))
+
+
+def save_query_to_history(
+    question: str, sql: str, success: bool = True, *, organization_id: str | None = None,
+    workspace_id: str | None = None, connector_id: str | None = None,
+) -> bool:
+    """Persist a successful example only when complete scope is provided."""
+    if not success or not _has_scope(organization_id, workspace_id, connector_id):
+        return False
     try:
-        collection = _get_collection()
-        doc_id = hashlib.md5(question.encode()).hexdigest()
-        metadata = {
-            "sql": sql,
-            "timestamp": datetime.utcnow().isoformat(),
-            "success": str(success),
-        }
-        collection.upsert(
-            ids=[doc_id],
-            documents=[question],
-            metadatas=[metadata],
+        build_vector_memory_store().upsert(MemoryDocument(
+            namespace="sql_query", text=question, organization_id=organization_id,
+            workspace_id=workspace_id, connector_id=connector_id, metadata={"sql": sql},
+        ))
+        return True
+    except Exception as exc:
+        # Do not log SQL, customer text, connection strings, or credentials.
+        logger.warning("Scoped query history write unavailable (%s).", type(exc).__name__)
+        return False
+
+
+def retrieve_similar_queries(
+    question: str, top_k: int = 3, *, organization_id: str | None = None,
+    workspace_id: str | None = None, connector_id: str | None = None,
+) -> list[dict[str, Any]]:
+    if not _has_scope(organization_id, workspace_id, connector_id):
+        return []
+    try:
+        records = build_vector_memory_store().search(
+            question, top_k=top_k, namespace="sql_query", organization_id=organization_id,
+            workspace_id=workspace_id, connector_id=connector_id,
         )
-    except Exception:
-        return
-
-
-def retrieve_similar_queries(question: str, top_k: int = 3) -> list[dict[str, Any]]:
-    """Returns top_k most similar past (question, sql) pairs."""
-    try:
-        collection = _get_collection()
-        results = collection.query(query_texts=[question], n_results=top_k)
-    except Exception:
+        return [{"question": item.text, "sql": item.metadata.get("sql", "")} for item in records]
+    except Exception as exc:
+        logger.warning("Scoped query history retrieval unavailable (%s).", type(exc).__name__)
         return []
 
-    items = []
-    for doc, meta in zip(
-        results.get("documents", [[]])[0],
-        results.get("metadatas", [[]])[0],
-    ):
-        items.append({"question": doc, "sql": meta.get("sql", "")})
-    return items
 
-
-def get_history_count() -> int:
-    """Returns total number of stored queries."""
-    try:
-        return _get_collection().count()
-    except Exception:
+def get_history_count(
+    *, organization_id: str | None = None, workspace_id: str | None = None, connector_id: str | None = None,
+) -> int:
+    if not _has_scope(organization_id, workspace_id, connector_id):
         return 0
+    return build_vector_memory_store().count(
+        organization_id=organization_id, workspace_id=workspace_id, namespace="sql_query", connector_id=connector_id,
+    )
 
 
-def clear_history() -> None:
-    """Wipes the history store (useful for testing)."""
-    if not CHROMADB_AVAILABLE:
-        return
-    client = chromadb.PersistentClient(path=_PERSIST_PATH)
-    client.delete_collection(_COLLECTION_NAME)
+def delete_scope(*, organization_id: str, workspace_id: str) -> int:
+    """Delete all SQL examples in one workspace; persistence failures propagate."""
+    return build_vector_memory_store().delete_workspace(
+        organization_id=organization_id, workspace_id=workspace_id, namespace="sql_query",
+    )
+
+
+def clear_history(*, organization_id: str, workspace_id: str) -> int:
+    return delete_scope(organization_id=organization_id, workspace_id=workspace_id)

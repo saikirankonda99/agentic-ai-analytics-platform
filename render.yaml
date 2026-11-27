@@ -1,0 +1,164 @@
+# yaml-language-server: $schema=https://render.com/schema/render.yaml.json
+# New release candidate only. Review the paid plan before applying this Blueprint.
+# Create with existingResources=create_new and autoSync=false; do not adopt the
+# existing free service or discard its local SQLite data during this rollout.
+previews:
+  generation: "off"
+
+projects:
+  - name: analytics-release
+    environments:
+      - name: pilot
+        envVarGroups:
+          - name: analytics-release-settings
+            envVars:
+              - key: APP_ENV
+                value: production
+              - key: STARTUP_VALIDATION_STRICT
+                value: "true"
+              - key: ANALYTICS_WORKER_MODE
+                value: external
+              - key: POSTGRES_URL
+                value: ""
+              - key: VECTOR_DATABASE_URL
+                value: ""
+              - key: ANALYTICS_CONNECTORS_JSON
+                value: "[]"
+              - key: HISTORY_RETENTION_DAYS
+                value: "30"
+              - key: SAVED_REPORT_RETENTION_DAYS
+                value: "90"
+              - key: WORKER_LEASE_SECONDS
+                value: "120"
+              - key: MAX_PENDING_JOBS_PER_WORKSPACE
+                value: "10"
+
+        databases:
+          - name: analytics-release-db
+            databaseName: analytics
+            user: analytics
+            region: oregon
+            plan: 0.1c-256mb
+            postgresMajorVersion: "16"
+            diskSizeGB: 1
+            storageAutoscalingEnabled: false
+            ipAllowList: []
+
+        services:
+          - type: web
+            name: analytics-release-api
+            runtime: docker
+            region: oregon
+            plan: 0.5c-512mb
+            numInstances: 1
+            repo: https://github.com/saikirankonda99/agentic-ai-analytics-platform
+            dockerfilePath: ./Dockerfile.backend
+            dockerContext: .
+            autoDeployTrigger: "off"
+            healthCheckPath: /ready
+            envVars:
+              - fromGroup: analytics-release-settings
+              - key: DATABASE_URL
+                fromDatabase:
+                  name: analytics-release-db
+                  property: connectionString
+              - key: WORKFLOW_DATABASE_URL
+                fromDatabase:
+                  name: analytics-release-db
+                  property: connectionString
+              - key: AUTH_USERS
+                sync: false
+              - key: OPENAI_API_KEY
+                sync: false
+
+          - type: web
+            name: analytics-release-dashboard
+            runtime: docker
+            region: oregon
+            plan: 0.5c-512mb
+            numInstances: 1
+            repo: https://github.com/saikirankonda99/agentic-ai-analytics-platform
+            dockerfilePath: ./Dockerfile.frontend
+            dockerContext: .
+            autoDeployTrigger: "off"
+            healthCheckPath: /_stcore/health
+            envVars:
+              - fromGroup: analytics-release-settings
+              - key: DATABASE_URL
+                fromDatabase:
+                  name: analytics-release-db
+                  property: connectionString
+              - key: WORKFLOW_DATABASE_URL
+                fromDatabase:
+                  name: analytics-release-db
+                  property: connectionString
+              - key: AUTH_USERS
+                fromService:
+                  type: web
+                  name: analytics-release-api
+                  envVarKey: AUTH_USERS
+              - key: OPENAI_API_KEY
+                fromService:
+                  type: web
+                  name: analytics-release-api
+                  envVarKey: OPENAI_API_KEY
+
+          - type: worker
+            name: analytics-release-worker
+            runtime: docker
+            region: oregon
+            plan: 0.5c-512mb
+            numInstances: 1
+            repo: https://github.com/saikirankonda99/agentic-ai-analytics-platform
+            dockerfilePath: ./Dockerfile.backend
+            dockerContext: .
+            dockerCommand: sh -c 'python -m backend.startup && exec python -m backend.workers'
+            autoDeployTrigger: "off"
+            maxShutdownDelaySeconds: 300
+            envVars:
+              - fromGroup: analytics-release-settings
+              - key: DATABASE_URL
+                fromDatabase:
+                  name: analytics-release-db
+                  property: connectionString
+              - key: WORKFLOW_DATABASE_URL
+                fromDatabase:
+                  name: analytics-release-db
+                  property: connectionString
+              - key: AUTH_USERS
+                fromService:
+                  type: web
+                  name: analytics-release-api
+                  envVarKey: AUTH_USERS
+              - key: OPENAI_API_KEY
+                fromService:
+                  type: web
+                  name: analytics-release-api
+                  envVarKey: OPENAI_API_KEY
+
+          - type: cron
+            name: analytics-release-maintenance
+            runtime: docker
+            region: oregon
+            plan: 0.5c-512mb
+            repo: https://github.com/saikirankonda99/agentic-ai-analytics-platform
+            dockerfilePath: ./Dockerfile.backend
+            dockerContext: .
+            dockerCommand: sh -c 'python -m backend.startup && exec python -m backend.maintenance --once'
+            schedule: "17 * * * *"
+            autoDeployTrigger: "off"
+            envVars:
+              - fromGroup: analytics-release-settings
+              - key: DATABASE_URL
+                fromDatabase:
+                  name: analytics-release-db
+                  property: connectionString
+              - key: WORKFLOW_DATABASE_URL
+                fromDatabase:
+                  name: analytics-release-db
+                  property: connectionString
+              - key: AUTH_USERS
+                fromService:
+                  type: web
+                  name: analytics-release-api
+                  envVarKey: AUTH_USERS

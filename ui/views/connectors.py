@@ -12,13 +12,21 @@ from ui.views.common import ViewServices
 
 
 def render_api_workspace(services: ViewServices, render_telemetry_exports) -> None:
-    st.caption("POST /execute demonstrates the workflow lifecycle with simulated stages and synthetic usage. The Overview runs actual CSV calculations or the local SQL workflow.")
+    st.caption(
+        "POST /execute queues an analytics request for the worker. Follow its workflow ID for status and results. "
+        "POST /execute/simulation is a separate administrator demo with synthetic stages and usage."
+    )
     telemetry = validate_telemetry_payload(st.session_state.live_telemetry or st.session_state.workflow_telemetry)
     trace = st.session_state.live_trace or st.session_state.workflow_trace
     runtime = st.session_state.get("openai_runtime", {})
     memory = st.session_state.get("workspace_memory", {})
     workspace_report = workspace_summary(memory)
-    connector_diagnostics = get_connector_registry().diagnostics(validate=True)
+    identity = st.session_state.user_identity
+    connector_diagnostics = get_connector_registry().diagnostics_for_workspace(
+        organization_id=f"organization:{identity['team_id']}",
+        workspace_id=identity["workspace_id"],
+        validate=True,
+    )
     left, right = st.columns([1, 1], gap="medium")
     with left:
         st.markdown(
@@ -36,7 +44,7 @@ def render_api_workspace(services: ViewServices, render_telemetry_exports) -> No
             unsafe_allow_html=True,
         )
         st.code(
-            "GET /health\nGET /ready\nGET /diagnostics\nPOST /execute\nGET /workflow/{workflow_id}\nGET /workflow/{workflow_id}/events\nGET /workflow/{workflow_id}/stream\nGET /connectors\nGET /connectors/{connector_id}/health\nGET /connectors/{connector_id}/schema\nPOST /connectors/validate\nGET /workspace/{workspace_id}/inspection\nGET /workspace/{workspace_id}/transcripts\nGET /workspace/{workspace_id}/sql-history",
+            "GET /health\nGET /ready\nGET /diagnostics\nPOST /execute\nPOST /execute/simulation\nGET /workflow/{workflow_id}\nGET /workflow/{workflow_id}/result\nGET /workflow/{workflow_id}/events\nGET /workflow/{workflow_id}/stream\nGET /connectors\nGET /connectors/{connector_id}/health\nGET /connectors/{connector_id}/schema\nPOST /connectors/validate\nGET /workspace/{workspace_id}/inspection\nGET /workspace/{workspace_id}/transcripts\nGET /workspace/{workspace_id}/sql-history",
             language="http",
         )
         connector_rows = []
