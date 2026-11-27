@@ -273,6 +273,8 @@ def test_csv_review_rejects_hidden_bad_row_and_clears_old_results(logged_in_page
     review_csv_upload(page, replacement_csv)
     sidebar = page.get_by_test_id("stSidebarUserContent")
     sidebar.get_by_text("Shared team", exact=True).click()
+    # The radio changes before the server finishes replacing the workspace uploader.
+    expect(by_test_id(page, "enterprise-workspace")).to_contain_text("Workspace scope is team;", timeout=20_000)
     expect(by_test_id(page, "csv-import-review")).to_have_count(0)
     expect(page.get_by_text(re.compile(r"Active data: Chinook example database"))).to_be_visible()
     expect(page.locator("input[type=file]")).to_have_value("")
@@ -280,6 +282,7 @@ def test_csv_review_rejects_hidden_bad_row_and_clears_old_results(logged_in_page
     expect(page.get_by_role("button", name="Executive Summary", exact=True)).to_have_count(0)
 
     sidebar.get_by_text("Personal", exact=True).click()
+    expect(by_test_id(page, "enterprise-workspace")).to_contain_text("Workspace scope is personal;", timeout=20_000)
     review_csv_upload(page, replacement_csv)
     session_details = sidebar.get_by_test_id("stExpander").filter(has=page.get_by_text("Session", exact=True))
     session_details.locator("summary").click()
