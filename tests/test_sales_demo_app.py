@@ -20,7 +20,10 @@ def test_sales_demo_results_failure_workspace_switch_and_logout(isolated_auth_co
     _click(app, "Login")
     assert not any(field.label in {"User", "Team", "Role"} for field in app.text_input)
 
+    app.radio(key="top_navigation").set_value("Copilot").run()
+    assert not app.exception
     _click(app, "Load retail demo")
+    assert app.session_state["top_navigation"] == "Overview"
     _click(app, "Revenue by Product")
     result = app.session_state["latest_df"]
     assert dict(zip(result["product"], result["revenue"])) == {"Coffee Beans": 180.0, "Tea": 100.0, "Mug": 72.0}

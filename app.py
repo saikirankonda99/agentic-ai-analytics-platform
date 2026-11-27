@@ -69,14 +69,10 @@ from ui.views.telemetry import render_agents_workspace, render_monitoring_worksp
 from ui.views.workspace import render_workspace_history
 from ui.dashboard import (
     build_plotly_figure,
-    build_default_operations_figure,
     escape_html,
-    render_activity_feed,
-    render_agent_row,
     render_command_bar,
     render_executive_summary,
     render_footer,
-    render_glass_widgets,
     render_hero,
     render_kpi_cards,
     next_plotly_key,
@@ -1509,187 +1505,82 @@ def render_schema(schema_visible):
 
 
 def render_analytics_workspace(client, services):
+    if st.session_state.latest_df is None and not st.session_state.get("semantic_context"):
+        ensure_schema_semantics()
+
+    question = render_command_bar()
+    result_area = st.container()
+    execution_details = st.expander("Execution details", expanded=False)
+    with execution_details:
+        live_panel_placeholder = st.empty()
+
+    with result_area:
+        if st.session_state.get("pending_monitoring_run") or monitoring_due(st.session_state.get("monitoring_config", {})):
+            st.session_state.pending_monitoring_run = False
+            run_monitoring_workflow(live_placeholder=live_panel_placeholder)
+        elif question:
+            run_query(question, live_placeholder=live_panel_placeholder)
+        elif st.session_state.live_logs and st.session_state.latest_question:
+            with live_panel_placeholder.container():
+                render_live_execution_panel(
+                    st.session_state.latest_question,
+                    st.session_state.live_trace or st.session_state.workflow_trace,
+                    st.session_state.live_logs,
+                    st.session_state.live_telemetry or st.session_state.workflow_telemetry,
+                    chart_key=next_plotly_key("workflow_chart_summary"),
+                )
+
+        _render_analytics_results(services)
+
+    with execution_details:
+        _render_overview_diagnostics()
+    render_onboarding_workspace_panel(services)
+    render_quick_actions_panel()
+
+
+def _render_overview_diagnostics():
+    telemetry = st.session_state.live_telemetry or st.session_state.workflow_telemetry
+    trace = st.session_state.live_trace or st.session_state.workflow_trace
+    st.markdown(render_orchestration_status_badges(trace, telemetry, st.session_state.get("is_executing", False)), unsafe_allow_html=True)
+    left, right = st.columns([1.1, 0.9], gap="medium")
+    with left:
+        st.markdown(render_workflow_timeline_cards(trace), unsafe_allow_html=True)
+        st.markdown(render_semantic_profile_card(st.session_state.get("semantic_context")), unsafe_allow_html=True)
+        st.markdown(render_workspace_card(st.session_state.get("user_identity"), st.session_state.get("workspace_memory")), unsafe_allow_html=True)
+        st.markdown(render_analytics_memory_card(st.session_state.get("analytics_memory")), unsafe_allow_html=True)
+        st.markdown(render_saved_assets_card(st.session_state.get("workspace_memory")), unsafe_allow_html=True)
+    with right:
+        st.markdown(render_active_agent_monitoring(trace, telemetry, st.session_state.get("is_executing", False)), unsafe_allow_html=True)
+        st.markdown(render_observability_card(telemetry, trace), unsafe_allow_html=True)
+        st.markdown(render_recovery_guidance_card(telemetry, st.session_state.get("latest_sql_validation", {}), st.session_state.get("latest_recovery", {})), unsafe_allow_html=True)
+        st.markdown(render_investigation_card(st.session_state.get("investigation_state")), unsafe_allow_html=True)
+        st.markdown(render_monitoring_card(st.session_state.get("monitoring_state"), st.session_state.get("monitoring_config")), unsafe_allow_html=True)
+        st.markdown(render_executive_briefing_card(st.session_state.get("executive_briefing")), unsafe_allow_html=True)
+
+
+def _render_analytics_results(services):
     df = st.session_state.latest_df
     telemetry = st.session_state.workflow_telemetry
     exec_time = st.session_state.latest_exec_time
-    history = st.session_state.history
-    active_mode = "CSV Sales" if "uploaded_df" in st.session_state else "Example database"
-    if df is None and not st.session_state.get("semantic_context"):
-        ensure_schema_semantics()
-
-    top_metrics = [
-        {
-            "label": "Active Rows",
-            "value": f"{len(df):,}" if df is not None else "0",
-            "caption": "Current dataset in focus",
-        },
-        {
-            "label": "Queries Run",
-            "value": len(history),
-            "caption": "Session workflow executions",
-        },
-        {
-            "label": "Execution Time",
-            "value": f"{exec_time:.2f}s" if exec_time is not None else "Standby",
-            "caption": "Latest end-to-end latency",
-        },
-        {
-            "label": "Estimated Cost",
-            "value": f'${telemetry.get("cost_usd", 0.0):.4f}',
-            "caption": telemetry.get("model") or "Awaiting model run",
-        },
-    ]
-    render_kpi_cards(top_metrics)
-    render_onboarding_workspace_panel(services)
-
-    widget_data = [
-        {
-            "label": "Active Mode",
-            "value": active_mode,
-            "caption": "Switches automatically between workflow-backed SQL and uploaded CSV analysis.",
-            "badge": "Online" if df is not None else "Idle",
-        },
-        {
-            "label": "Copilot State",
-            "value": st.session_state.latest_question or "Awaiting prompt",
-            "caption": "Latest question currently shaping the analytics canvas.",
-            "badge": "Ready",
-        },
-        {
-            "label": "Telemetry",
-            "value": f'{telemetry.get("total_tokens", 0):,} tokens' if telemetry else "No usage yet",
-            "caption": "Prompt, completion, and latency visibility for enterprise governance.",
-            "badge": telemetry.get("model") or "Standby",
-        },
-    ]
-    render_glass_widgets(widget_data)
-    render_quick_actions_panel()
-    active_trace = st.session_state.live_trace or st.session_state.workflow_trace
-    active_telemetry = st.session_state.live_telemetry or telemetry
-    st.markdown(
-        render_orchestration_status_badges(
-            active_trace,
-            active_telemetry,
-            is_executing=st.session_state.get("is_executing", False),
-        ),
-        unsafe_allow_html=True,
-    )
-    workflow_left, workflow_right = st.columns([1.1, 0.9], gap="medium")
-    with workflow_left:
-        st.markdown(render_workflow_timeline_cards(active_trace), unsafe_allow_html=True)
-    with workflow_right:
-        st.markdown(
-            render_active_agent_monitoring(
-                active_trace,
-                active_telemetry,
-                is_executing=st.session_state.get("is_executing", False),
-            ),
-            unsafe_allow_html=True,
-        )
-    question = render_command_bar()
-    live_panel_placeholder = st.empty()
-    if st.session_state.get("pending_monitoring_run") or monitoring_due(st.session_state.get("monitoring_config", {})):
-        st.session_state.pending_monitoring_run = False
-        run_monitoring_workflow(live_placeholder=live_panel_placeholder)
-        telemetry = st.session_state.workflow_telemetry
-        exec_time = st.session_state.latest_exec_time
-    elif question:
-        run_query(question, live_placeholder=live_panel_placeholder)
-        df = st.session_state.latest_df
-        telemetry = st.session_state.workflow_telemetry
-        exec_time = st.session_state.latest_exec_time
-    elif st.session_state.live_logs and st.session_state.latest_question:
-        with live_panel_placeholder.container():
-            render_live_execution_panel(
-                st.session_state.latest_question,
-                st.session_state.live_trace or st.session_state.workflow_trace,
-                st.session_state.live_logs,
-                st.session_state.live_telemetry or st.session_state.workflow_telemetry,
-                chart_key=next_plotly_key("workflow_chart_summary"),
-            )
-
-    # A failed/new query must never display the previous answer beside its question.
-    df = st.session_state.latest_df
+    csv_mode = "uploaded_df" in st.session_state
+    source_rows = len(st.session_state.uploaded_df) if csv_mode else (len(df) if df is not None else 0)
+    render_kpi_cards([
+        {"label": "Source Rows" if csv_mode else "Result Rows", "value": f"{source_rows:,}",
+         "caption": "Sales rows loaded" if csv_mode else "Rows in the latest answer"},
+        {"label": "Queries Run", "value": len(st.session_state.history), "caption": "Completed workspace analyses"},
+        {"label": "Execution Time", "value": f"{exec_time:.2f}s" if exec_time is not None else "Ready",
+         "caption": "Latest analysis" if exec_time is not None else "Choose a question above"},
+        {"label": "Estimated Cost", "value": f'${telemetry.get("cost_usd", 0.0):.4f}',
+         "caption": "Local CSV calculation" if csv_mode else (telemetry.get("model") or "No model run")},
+    ])
     for warning in (st.session_state.get("latest_csv_analysis") or {}).get("warnings", []):
         st.warning(warning)
 
     if df is None:
-        status_left, status_right = st.columns([1.45, 0.92], gap="medium")
-        with status_left:
-            system_metrics = [
-                {"label": "Analysis", "value": "Ready", "caption": "Choose a sample or upload sales data"},
-                {"label": "Completed Runs", "value": len(history), "caption": "Saved workspace history"},
-                {"label": "Latency", "value": "Not measured", "caption": "Available after an analysis"},
-                {"label": "AI usage", "value": "No model run", "caption": "CSV sales calculations run locally"},
-            ]
-            render_kpi_cards(system_metrics)
-            st.markdown(
-                """
-                <div class="workspace-shell compact-shell">
-                    <div class="section-title">Example chart</div>
-                    <div class="section-subtitle">Illustrative sample only. Upload your sales data or load the retail demo to see calculated results.</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            st.plotly_chart(
-                build_default_operations_figure(),
-                width="stretch",
-                key=next_plotly_key("default_ops_chart"),
-            )
-            st.markdown(render_agent_row(build_default_agent_states()), unsafe_allow_html=True)
-        with status_right:
-            st.markdown(
-                render_response_card(
-                    "Analytics Ready",
-                    "Start with a small, verifiable sales question.",
-                    '<div class="workspace-body-copy">Load the retail demo for sales totals, product rankings, and monthly revenue. Database questions use the configured AI model.</div>',
-                    tone="summary-module",
-                ),
-                unsafe_allow_html=True,
-            )
-            st.markdown(render_activity_feed(build_default_activity_feed()), unsafe_allow_html=True)
-            st.markdown(
-                render_recommendation_card(
-                    [
-                        "Start with a revenue, customer, or top-track query to immediately populate the executive workspace.",
-                        "Upload a CSV to inspect ad hoc datasets while keeping observability and orchestration modules available.",
-                        "Use the workflow rail above to sanity-check which agent stages should remain warm for your next run.",
-                    ]
-                ),
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                render_observability_card(
-                    {
-                        "model": "No model run",
-                        "total_tokens": 0,
-                        "latency_ms": 0,
-                        "cost_usd": 0.0,
-                    },
-                    [],
-                ),
-                unsafe_allow_html=True,
-            )
-            st.markdown(render_semantic_profile_card(st.session_state.get("semantic_context")), unsafe_allow_html=True)
-            st.markdown(
-                render_workspace_card(
-                    st.session_state.get("user_identity"),
-                    st.session_state.get("workspace_memory"),
-                ),
-                unsafe_allow_html=True,
-            )
-            st.markdown(render_analytics_memory_card(st.session_state.get("analytics_memory")), unsafe_allow_html=True)
-            st.markdown(render_autonomous_insight_card(st.session_state.get("autonomous_insights")), unsafe_allow_html=True)
-            st.markdown(render_investigation_card(st.session_state.get("investigation_state")), unsafe_allow_html=True)
-            st.markdown(
-                render_monitoring_card(
-                    st.session_state.get("monitoring_state"),
-                    st.session_state.get("monitoring_config"),
-                ),
-                unsafe_allow_html=True,
-            )
-            st.markdown(render_executive_briefing_card(st.session_state.get("executive_briefing")), unsafe_allow_html=True)
+        if csv_mode:
+            st.info("Your sales data is loaded. Choose Total Revenue, Revenue by Product, or Monthly Revenue above.")
+        else:
+            st.info("Load the retail demo from the sidebar to try sales calculations, or ask a question about the example database.")
         return
     main_left, main_right = st.columns([1.42, 0.92], gap="medium")
     with main_left:
@@ -1697,16 +1588,6 @@ def render_analytics_workspace(client, services):
             render_executive_summary(st.session_state.latest_question, df, exec_time, telemetry),
             unsafe_allow_html=True,
         )
-        st.markdown(render_semantic_profile_card(st.session_state.get("semantic_context")), unsafe_allow_html=True)
-        st.markdown(
-            render_workspace_card(
-                st.session_state.get("user_identity"),
-                st.session_state.get("workspace_memory"),
-            ),
-            unsafe_allow_html=True,
-        )
-        st.markdown(render_analytics_memory_card(st.session_state.get("analytics_memory")), unsafe_allow_html=True)
-
         chart_rendered = False
         if is_scalar_result(df):
             scalar_col = df.columns[0]
@@ -1813,29 +1694,6 @@ def render_analytics_workspace(client, services):
             render_result_explorer(df, services, base_filename="analytics-result")
 
     with main_right:
-        recommendations = build_ai_recommendations(df, telemetry, st.session_state.workflow_trace)
-        st.markdown(render_recommendation_card(recommendations), unsafe_allow_html=True)
-        st.markdown(render_autonomous_insight_card(st.session_state.get("autonomous_insights")), unsafe_allow_html=True)
-        st.markdown(render_investigation_card(st.session_state.get("investigation_state")), unsafe_allow_html=True)
-        st.markdown(
-            render_monitoring_card(
-                st.session_state.get("monitoring_state"),
-                st.session_state.get("monitoring_config"),
-            ),
-            unsafe_allow_html=True,
-        )
-        st.markdown(render_executive_briefing_card(st.session_state.get("executive_briefing")), unsafe_allow_html=True)
-        st.markdown(render_observability_card(telemetry, st.session_state.workflow_trace), unsafe_allow_html=True)
-        st.markdown(
-            render_recovery_guidance_card(
-                telemetry,
-                st.session_state.get("latest_sql_validation", {}),
-                st.session_state.get("latest_recovery", {}),
-            ),
-            unsafe_allow_html=True,
-        )
-        st.markdown(render_saved_assets_card(st.session_state.get("workspace_memory")), unsafe_allow_html=True)
-
         if not df.empty:
             explanation = st.session_state.get("latest_insight", "")
             if explanation:
@@ -1858,6 +1716,10 @@ def render_analytics_workspace(client, services):
                     ),
                     unsafe_allow_html=True,
                 )
+
+        st.markdown(render_autonomous_insight_card(st.session_state.get("autonomous_insights")), unsafe_allow_html=True)
+        recommendations = build_ai_recommendations(df, telemetry, st.session_state.workflow_trace)
+        st.markdown(render_recommendation_card(recommendations), unsafe_allow_html=True)
 
     show_sql = bool(st.session_state.latest_sql)
     show_secondary_preview = not df.empty and (is_scalar_result(df) or can_render_chart(df))

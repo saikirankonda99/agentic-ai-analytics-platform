@@ -260,20 +260,12 @@ def metric_grid_html(items: list[tuple[str, object]]) -> str:
 def render_hero() -> None:
     markdown_html(
         """
-        <div class="enterprise-hero">
+        <div class="enterprise-hero" data-testid="app-header">
             <div>
-                <div class="hero-eyebrow">Enterprise AI Analytics Workspace</div>
-                <h1 class="hero-title">Agentic analytics command center</h1>
+                <h1 class="hero-title">Agentic AI Analytics</h1>
                 <p class="hero-copy">
-                    Ask in natural language, inspect governed SQL, monitor orchestration, and publish executive-ready
-                    insights from one production workspace.
+                    Explore your sales, review the numbers, and export clear answers.
                 </p>
-            </div>
-            <div class="hero-badges">
-                <span class="hero-badge">Multi-agent</span>
-                <span class="hero-badge">Telemetry-ready</span>
-                <span class="hero-badge">RBAC-aware</span>
-                <span class="hero-badge">Workflow-native</span>
             </div>
         </div>
         """
@@ -285,16 +277,6 @@ def render_top_navigation(active_nav: str = "Overview") -> str:
     if active_nav not in nav_options:
         active_nav = "Overview"
 
-    markdown_html(
-        """
-        <div class="top-nav-shell">
-            <div>
-                <div class="top-nav-title">Analytics Operations Workspace</div>
-                <div class="top-nav-subtitle">Unified workspace for query execution, orchestration, monitoring, and audit trails.</div>
-            </div>
-        </div>
-        """
-    )
     return st.radio(
         "Primary navigation",
         nav_options,
@@ -303,6 +285,11 @@ def render_top_navigation(active_nav: str = "Overview") -> str:
         label_visibility="collapsed",
         key="top_navigation",
     )
+
+
+def _open_overview() -> None:
+    st.session_state.top_navigation = "Overview"
+    st.session_state.workspace_route = "Overview"
 
 
 def render_sidebar() -> dict:
@@ -346,9 +333,9 @@ def render_sidebar() -> dict:
                 "Upload CSV", type=["csv"], label_visibility="collapsed",
                 key=f"sales_upload_{workspace_team}_{workspace_user}_{workspace_scope}_{st.session_state.get('upload_generation', 0)}",
             )
-            load_demo = st.button("Load retail demo", width="stretch")
+            load_demo = st.button("Load retail demo", width="stretch", on_click=_open_overview)
             st.download_button("Download sample sales CSV", DEMO_PATH.read_bytes(), "retail-sales.csv", "text/csv", width="stretch")
-            use_database = st.button("Use example database", width="stretch")
+            use_database = st.button("Use example database", width="stretch", on_click=_open_overview)
             st.caption("The retail demo contains synthetic sales. CSV calculations require no API key.")
 
         with st.expander("Scheduled Monitoring", expanded=False):

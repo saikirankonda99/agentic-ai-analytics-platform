@@ -38,6 +38,66 @@ def test_login_onboarding_and_guided_query_seed(logged_in_page) -> None:
     expect(page.get_by_placeholder("Ask a revenue, customer, or product question...")).to_be_visible()
 
 
+def test_retail_demo_scroll_and_command_controls_work_at_common_viewports(page, running_services) -> None:
+    desktop = {"width": 1366, "height": 768}
+    narrow = {"width": 960, "height": 720}
+    page.set_viewport_size(desktop)
+    login(page, running_services)
+    copilot_tab = page.get_by_label("Primary navigation").get_by_text("Copilot", exact=True)
+    expect(copilot_tab).to_be_in_viewport(ratio=1)
+    copilot_tab.click()
+    expect(page.get_by_text("AI Copilot Conversation", exact=True)).to_be_visible()
+    page.get_by_role("button", name="Load retail demo", exact=True).click()
+
+    main = page.get_by_test_id("stMain")
+    command = page.get_by_placeholder("Ask a revenue, customer, or product question...")
+    total_revenue = page.get_by_role("button", name="Total Revenue", exact=True)
+    expect(total_revenue).to_be_visible(timeout=20_000)
+
+    # Visibility alone permits off-screen elements. Check the initial viewport
+    # before any locator action can automatically scroll the controls into view.
+    expect(command).to_be_in_viewport(ratio=1)
+    expect(total_revenue).to_be_in_viewport(ratio=1)
+    page.screenshot(path=running_services.output_dir / "screenshots" / "retail-demo-desktop.png")
+
+    viewports = (desktop, narrow, {"width": 769, "height": 720}, {"width": 767, "height": 720})
+    for index, viewport in enumerate(viewports):
+        if index:
+            page.set_viewport_size(viewport)
+        bounds = main.bounding_box()
+        assert bounds is not None
+        # Aim at the main panel's edge, away from the separately scrolling sidebar.
+        page.mouse.move(bounds["x"] + bounds["width"] - 24, viewport["height"] - 100)
+        previous_scroll = main.evaluate("element => element.scrollTop")
+        page.mouse.wheel(0, 600)
+        page.wait_for_function(
+            """previous => {
+                const main = document.querySelector('[data-testid="stMain"]');
+                return main && main.scrollTop > previous + 1;
+            }""",
+            arg=previous_scroll,
+        )
+        page.mouse.wheel(0, -10_000)
+        page.wait_for_function(
+            """() => {
+                const main = document.querySelector('[data-testid="stMain"]');
+                return main && main.scrollTop <= 1;
+            }"""
+        )
+
+        # Smaller windows may need a short wheel movement to expose the button.
+        # Keep this a wheel action: scrollIntoView would conceal a broken scroller.
+        controls_bottom = total_revenue.evaluate("element => element.getBoundingClientRect().bottom")
+        if controls_bottom > viewport["height"]:
+            page.mouse.wheel(0, controls_bottom - viewport["height"] + 24)
+        expect(command).to_be_in_viewport(ratio=1)
+        expect(total_revenue).to_be_in_viewport(ratio=1)
+        expect(command).to_be_editable()
+        expect(total_revenue).to_be_enabled()
+        if viewport == narrow:
+            page.screenshot(path=running_services.output_dir / "screenshots" / "retail-demo-narrow.png")
+
+
 def test_onboarding_dismissal_persists_after_refresh(logged_in_page, running_services) -> None:
     page = logged_in_page
 
@@ -57,8 +117,13 @@ def test_csv_analytics_workflow_exports_reports_and_saved_state(logged_in_page, 
 
     expect(page.get_by_text("Result Explorer")).to_be_visible(timeout=60_000)
     expect(page.get_by_text("Showing 3 of 3 rows.")).to_be_visible()
-    expect(page.get_by_text("Workflow completed successfully")).to_be_visible(timeout=30_000)
+    execution_details = page.get_by_test_id("stExpander").filter(
+        has=page.get_by_text("Execution details", exact=True)
+    )
+    execution_details.locator("summary").click()
+    expect(execution_details.get_by_text("Workflow completed successfully")).to_be_visible(timeout=30_000)
     expect(by_test_id(page, "observability")).to_be_visible()
+    execution_details.locator("summary").click()
 
     with page.expect_download() as csv_download:
         page.get_by_role("button", name="Download Full CSV").click()
@@ -155,9 +220,14 @@ def test_query_execution_sql_generation_and_bookmark_flow(logged_in_page) -> Non
     page = logged_in_page
 
     page.get_by_role("button", name="Revenue by Country").first.click()
+    execution_details = page.get_by_test_id("stExpander").filter(
+        has=page.get_by_text("Execution details", exact=True)
+    )
+    execution_details.locator("summary").click(timeout=90_000)
     page.get_by_text("SQL Generation").wait_for(timeout=90_000)
     page.get_by_text("Result Explorer").wait_for()
     page.get_by_text("Observability").wait_for()
+    execution_details.locator("summary").click()
 
     page.get_by_role("button", name="Bookmark Query").click()
     page.get_by_text("Query bookmarked.").wait_for()

@@ -61,25 +61,6 @@ def get_theme_css() -> str:
             radial-gradient(circle at top right, rgba(86, 204, 242, 0.08), transparent 22%),
             linear-gradient(180deg, #0a0f1c 0%, #08111f 45%, #09111b 100%) !important;
         color: var(--text) !important;
-        }
-
-    [data-testid="stAppViewContainer"],
-    [data-testid="stMain"],
-    [data-testid="stMain"] > div,
-    section[data-testid="stMain"],
-    section[data-testid="stMain"] > div,
-    [data-testid="stMainBlockContainer"],
-    [data-testid="stMainBlockContainer"] > div,
-    [data-testid="stVerticalBlockBorderWrapper"],
-    [data-testid="stVerticalBlockBorderWrapper"] > div,
-    [data-testid="stVerticalBlock"],
-    [data-testid="stVerticalBlock"] > div,
-    [data-testid="stHorizontalBlock"],
-    [data-testid="stHorizontalBlock"] > div,
-    [data-testid="column"],
-    [data-testid="column"] > div {
-        min-height: 0 !important;
-        height: auto !important;
     }
 
     [data-testid="stMainBlockContainer"],
@@ -103,18 +84,14 @@ def get_theme_css() -> str:
         color: var(--text) !important;
     }
 
-    .block-container {
-        padding-top: 0 !important;
-        padding-bottom: 0 !important;
+    .block-container,
+    [data-testid="stMainBlockContainer"] {
+        padding-top: 0.75rem !important;
+        padding-bottom: 2rem !important;
         padding-left: 1.25rem;
         padding-right: 1.25rem;
         max-width: 1380px;
         background: transparent !important;
-    }
-
-    [data-testid="stMainBlockContainer"] {
-        padding-top: 0 !important;
-        padding-bottom: 0 !important;
     }
 
     header[data-testid="stHeader"] {
@@ -211,14 +188,18 @@ def get_theme_css() -> str:
 
     .enterprise-hero {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
-        align-items: end;
-        gap: 1rem;
+        grid-template-columns: minmax(0, 1fr);
+        align-items: start;
+        gap: 0.35rem;
         border-radius: 8px;
-        padding: clamp(0.9rem, 1.8vw, 1.2rem) clamp(1rem, 2vw, 1.4rem);
+        padding: 0.75rem 1rem;
         background:
             linear-gradient(135deg, rgba(47, 128, 237, 0.16), rgba(14, 20, 35, 0.94) 44%),
             linear-gradient(180deg, rgba(18, 26, 43, 0.94), rgba(10, 15, 28, 0.96));
+    }
+
+    .enterprise-hero > div {
+        min-width: 0;
     }
 
     .top-nav-shell {
@@ -265,19 +246,22 @@ def get_theme_css() -> str:
         margin-bottom: 0.55rem;
     }
 
-    .hero-title {
-        font-size: clamp(1.45rem, 2.8vw, 2.25rem);
+    .enterprise-hero h1.hero-title {
+        font-size: clamp(1.25rem, 2vw, 1.7rem);
         font-weight: 700;
-        line-height: 1.05;
+        line-height: 1.2;
         margin: 0;
-        max-width: 14ch;
+        padding: 0;
+        max-width: none;
     }
 
-    .hero-copy {
+    .enterprise-hero p.hero-copy {
         color: var(--muted);
         font-size: 0.9rem;
-        margin: 0.55rem 0 0;
-        max-width: 72ch;
+        line-height: 1.45;
+        margin: 0.35rem 0 0;
+        padding: 0;
+        max-width: none;
     }
 
     .hero-badges {
@@ -1234,9 +1218,6 @@ def get_theme_css() -> str:
     }
 
     [data-testid="stForm"] {
-        position: sticky;
-        top: 0.65rem;
-        z-index: 24;
         padding: 0.58rem 0.65rem 0.14rem;
         margin-bottom: 0.35rem;
         border-radius: 20px;
@@ -1553,8 +1534,8 @@ def get_theme_css() -> str:
 
     @media (max-width: 992px) {
         .block-container {
-            padding-top: 0 !important;
-            padding-bottom: 0 !important;
+            padding-top: 0.5rem !important;
+            padding-bottom: 2rem !important;
             padding-left: 0.85rem;
             padding-right: 0.85rem;
         }
