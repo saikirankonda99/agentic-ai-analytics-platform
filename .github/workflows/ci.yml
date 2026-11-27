@@ -29,11 +29,12 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: "pip"
+          cache-dependency-path: requirements-lock.txt
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-lock.txt
 
       - name: Ruff
         run: python -m ruff check .
@@ -50,11 +51,12 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: "pip"
+          cache-dependency-path: requirements-lock.txt
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-lock.txt
 
       - name: Pytest
         run: python -m pytest
@@ -80,11 +82,12 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: "pip"
+          cache-dependency-path: requirements-lock.txt
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-lock.txt
 
       - name: Runtime startup validation
         run: python -m backend.startup
@@ -92,16 +95,22 @@ jobs:
       - name: FastAPI startup probe
         run: |
           python - <<'PY'
+          import os
           from fastapi.testclient import TestClient
           from backend.main import app
 
-          client = TestClient(app)
-          health = client.get("/health")
-          diagnostics = client.get("/diagnostics")
-          assert health.status_code == 200, health.text
-          assert health.json()["status"] == "ok"
-          assert diagnostics.status_code == 200, diagnostics.text
-          assert "startup" in diagnostics.json()
+          with TestClient(app) as client:
+              health = client.get("/health")
+              login = client.post("/auth/login", json={
+                  "username": "admin", "password": os.environ["AUTH_ADMIN_PASSWORD"]
+              })
+              assert login.status_code == 200, login.text
+              token = login.json()["session"]["session_token"]
+              diagnostics = client.get("/diagnostics", headers={"X-Session-Token": token})
+              assert health.status_code == 200, health.text
+              assert health.json()["status"] == "ok"
+              assert diagnostics.status_code == 200, diagnostics.text
+              assert "startup" in diagnostics.json()
           PY
 
       - name: Streamlit startup probe
@@ -149,19 +158,20 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: "pip"
+          cache-dependency-path: requirements-lock.txt
 
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          key: playwright-${{ runner.os }}-${{ hashFiles('requirements-lock.txt') }}
           restore-keys: |
             playwright-${{ runner.os }}-
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-lock.txt
           python -m playwright install --with-deps chromium
 
       - name: Run Playwright E2E

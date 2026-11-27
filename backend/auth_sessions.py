@@ -9,11 +9,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from backend.persistence import build_auth_session_repository
+from backend.persistence import PersistenceError, build_auth_session_repository
 from workspace import build_user_session
 
 
 SESSION_TTL_HOURS = max(1, int(os.getenv("AUTH_SESSION_TTL_HOURS", "12")))
+# Kept for diagnostics compatibility; session authentication never reads this legacy file.
 AUTH_SESSION_PATH = Path(os.getenv("AUTH_SESSION_PATH", "data/auth_sessions.json"))
 
 
@@ -53,9 +54,20 @@ class AuthSession:
 
 def configured_users() -> dict[str, AuthUser]:
     raw = os.getenv("AUTH_USERS", "").strip()
+    production = os.getenv("APP_ENV", "development").strip().lower() == "production"
     if raw:
         try:
             payload = json.loads(raw)
+            if not isinstance(payload, dict) or not payload:
+                return {}
+            if any(
+                not isinstance(config, dict)
+                or config.get("role", "analyst") not in {"admin", "analyst", "viewer"}
+                or not (config.get("password_hash") or config.get("password"))
+                or (production and not _valid_password_hash(config.get("password_hash")))
+                for config in payload.values()
+            ):
+                return {}
             return {
                 username: AuthUser(
                     username=username,
@@ -69,8 +81,10 @@ def configured_users() -> dict[str, AuthUser]:
                 for username, config in payload.items()
                 if isinstance(config, dict)
             }
-        except json.JSONDecodeError:
-            pass
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return {}
+    if production:
+        return {}
     return {
         "admin": AuthUser("admin", hash_password(os.getenv("AUTH_ADMIN_PASSWORD", "admin123")), "Admin Operator", role="admin"),
         "analyst": AuthUser(
@@ -103,26 +117,52 @@ def verify_password(password: str, password_hash: str) -> bool:
         return secrets.compare_digest(password_hash, password)
     if algorithm != "pbkdf2_sha256":
         return False
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), int(iterations))
+    try:
+        rounds = int(iterations)
+        if rounds < 1 or rounds > 1_000_000:
+            return False
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), rounds)
+    except (ValueError, OverflowError):
+        return False
     return secrets.compare_digest(digest.hex(), expected)
+
+
+def _valid_password_hash(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        algorithm, rounds, salt, digest = value.split("$", 3)
+        return (
+            algorithm == "pbkdf2_sha256"
+            and 120_000 <= int(rounds) <= 1_000_000
+            and len(salt) >= 16
+            and len(digest) == 64
+            and len(bytes.fromhex(digest)) == 32
+        )
+    except ValueError:
+        return False
 
 
 def validate_auth_config() -> dict[str, Any]:
     users = configured_users()
     session_path = AUTH_SESSION_PATH
     warnings = []
+    errors = []
     if not users:
-        warnings.append("No local auth users are configured.")
-    if os.getenv("APP_ENV") == "production" and not os.getenv("AUTH_USERS"):
-        warnings.append("Production deployments should configure AUTH_USERS with password_hash values.")
+        errors.append("No valid auth users are configured; production requires explicit AUTH_USERS with password hashes.")
+    if os.getenv("APP_ENV", "development").strip().lower() != "production" and not os.getenv("AUTH_USERS"):
+        warnings.append("Development demo accounts are enabled; configure AUTH_USERS before deployment.")
     return {
         "user_count": len(users),
         "session_ttl_hours": SESSION_TTL_HOURS,
         "session_path": str(session_path),
         "session_path_parent_exists": session_path.parent.exists(),
+        "session_storage": "database",
+        "file_fallback_enabled": False,
         "supports_password_hashes": True,
         "warnings": warnings,
-        "valid": not warnings,
+        "errors": errors,
+        "valid": not errors,
     }
 
 
@@ -139,10 +179,11 @@ def create_session(user: AuthUser) -> AuthSession:
         created_at=now.isoformat(),
         expires_at=(now + timedelta(hours=SESSION_TTL_HOURS)).isoformat(),
     )
-    sessions = _load_sessions()
-    sessions[session.session_token] = asdict(session)
+    try:
+        build_auth_session_repository().create_session(session.session_token, asdict(session))
+    except Exception as exc:
+        raise PersistenceError("Authentication session could not be persisted") from exc
     _save_user(user)
-    _save_sessions(_prune_expired(sessions))
     return session
 
 
@@ -154,45 +195,31 @@ def login_user(username: str, password: str) -> dict[str, Any] | None:
 
 
 def validate_session_token(session_token: str | None) -> dict[str, Any] | None:
+    """Read one token without rewriting a snapshot that could restore revoked sessions."""
     if not session_token:
         return None
-    sessions = _prune_expired(_load_sessions())
-    payload = sessions.get(session_token)
-    _save_sessions(sessions)
-    if not payload:
+    try:
+        payload = build_auth_session_repository().get_session(session_token)
+        if not payload or payload.get("session_token") != session_token:
+            return None
+        session = AuthSession(**payload)
+        expires_at = datetime.fromisoformat(session.expires_at)
+        if expires_at.tzinfo is None or expires_at <= datetime.now(timezone.utc):
+            return None
+        return session.as_identity()
+    except Exception:
+        # The configured database is authoritative; stale JSON files must never
+        # grant access when it is unavailable or contains malformed session data.
         return None
-    return AuthSession(**payload).as_identity()
 
 
 def revoke_session(session_token: str | None) -> bool:
     if not session_token:
         return False
-    sessions = _load_sessions()
-    existed = session_token in sessions
-    sessions.pop(session_token, None)
-    _save_sessions(sessions)
-    return existed
-
-
-def _load_sessions() -> dict[str, dict[str, Any]]:
     try:
-        sessions = build_auth_session_repository().list_sessions()
-        if sessions:
-            return sessions
+        return build_auth_session_repository().delete_session(session_token)
     except Exception:
-        pass
-    try:
-        return json.loads(AUTH_SESSION_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def _save_sessions(sessions: dict[str, dict[str, Any]]) -> None:
-    try:
-        build_auth_session_repository().save_sessions(sessions)
-    except Exception:
-        AUTH_SESSION_PATH.parent.mkdir(parents=True, exist_ok=True)
-        AUTH_SESSION_PATH.write_text(json.dumps(sessions, indent=2), encoding="utf-8")
+        return False
 
 
 def _save_user(user: AuthUser) -> None:
@@ -200,19 +227,6 @@ def _save_user(user: AuthUser) -> None:
         build_auth_session_repository().save_user(user.username, asdict(user))
     except Exception:
         return
-
-
-def _prune_expired(sessions: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    now = datetime.now(timezone.utc)
-    active = {}
-    for token, payload in sessions.items():
-        try:
-            expires_at = datetime.fromisoformat(str(payload.get("expires_at")))
-        except ValueError:
-            continue
-        if expires_at > now:
-            active[token] = payload
-    return active
 
 
 __all__ = [

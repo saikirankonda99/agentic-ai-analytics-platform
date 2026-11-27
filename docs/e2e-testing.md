@@ -7,7 +7,7 @@ The E2E suite validates critical Streamlit and FastAPI workflows through a real 
 Install Python dependencies and the Chromium browser:
 
 ```bash
-python -m pip install -r requirements.txt
+python -m pip install -r requirements-lock.txt
 python -m playwright install chromium
 ```
 
@@ -16,6 +16,12 @@ Run the E2E suite:
 ```bash
 RUN_E2E=1 python -m pytest tests/e2e
 ```
+
+If a compatible Chromium executable is already installed, set `E2E_BROWSER_EXECUTABLE` to its full path instead of downloading a browser. The default uses Playwright's bundled browser.
+
+The CSV regression uploads all 12 synthetic retail transactions and checks the exported country totals (USA 256.00, Canada 74.00, Germany 22.00), total revenue 352.00, and source row count. This exercises aggregation rather than a pre-aggregated table.
+
+For environments without a browser, `python -m pytest tests/test_sales_demo_app.py` exercises the actual Streamlit app through `AppTest`: login, demo selection, product/month totals, unsupported questions, workspace clearing, and logout. It does not replace browser upload/download or visual validation.
 
 On Windows PowerShell:
 

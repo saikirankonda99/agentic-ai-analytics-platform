@@ -4,6 +4,8 @@ from typing import Any
 
 import pandas as pd
 
+from semantic import infer_column_role
+
 
 SEVERITY_RANK = {"info": 0, "warning": 1, "critical": 2}
 
@@ -33,15 +35,19 @@ def _format_value(value: Any) -> str:
 
 
 def _numeric_columns(df: pd.DataFrame) -> list[str]:
-    return [str(column) for column in df.columns if pd.api.types.is_numeric_dtype(df[column])]
+    return [
+        str(column)
+        for column in df.columns
+        if pd.api.types.is_numeric_dtype(df[column])
+        and infer_column_role(str(column), series=df[column]) == "metric"
+    ]
 
 
 def _time_columns(df: pd.DataFrame) -> list[str]:
     candidates = []
     for column in df.columns:
         series = df[column]
-        name = str(column).lower()
-        if pd.api.types.is_datetime64_any_dtype(series) or any(token in name for token in ("date", "time", "year", "month")):
+        if infer_column_role(str(column), series=series) == "time":
             candidates.append(str(column))
     return candidates
 
@@ -50,7 +56,10 @@ def _categorical_columns(df: pd.DataFrame) -> list[str]:
     columns = []
     for column in df.columns:
         series = df[column]
-        if pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series) or series.nunique(dropna=True) <= 24:
+        role = infer_column_role(str(column), series=series)
+        if role in {"categorical", "dimension"} and (
+            not pd.api.types.is_numeric_dtype(series) or pd.api.types.is_bool_dtype(series)
+        ):
             columns.append(str(column))
     return columns
 

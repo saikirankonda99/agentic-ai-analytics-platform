@@ -12,6 +12,7 @@ from ui.views.common import ViewServices
 
 
 def render_api_workspace(services: ViewServices, render_telemetry_exports) -> None:
+    st.caption("POST /execute demonstrates the workflow lifecycle with simulated stages and synthetic usage. The Overview runs actual CSV calculations or the local SQL workflow.")
     telemetry = validate_telemetry_payload(st.session_state.live_telemetry or st.session_state.workflow_telemetry)
     trace = st.session_state.live_trace or st.session_state.workflow_trace
     runtime = st.session_state.get("openai_runtime", {})

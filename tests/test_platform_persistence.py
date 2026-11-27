@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import gc
+import sqlite3
 import time
 from pathlib import Path
 from uuid import uuid4
+
+import pytest
 
 from backend.persistence import (
     PersistenceSettings,
@@ -83,6 +86,25 @@ def test_auth_session_repository_persists_sessions_and_users() -> None:
         assert repository.list_sessions()["sess-test"]["workspace_id"] == "team.analyst"
     finally:
         _cleanup_db(db_path)
+
+
+def test_auth_session_token_operations_preserve_unrelated_sessions(tmp_path):
+    repository = build_auth_session_repository(_sqlite_url(tmp_path / "sessions.db"))
+    payload = {
+        "user_id": "analyst",
+        "workspace_id": "team.analyst",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "expires_at": "2026-01-02T00:00:00+00:00",
+    }
+    repository.create_session("first", {**payload, "session_token": "first"})
+    repository.create_session("second", {**payload, "session_token": "second"})
+    with pytest.raises(sqlite3.IntegrityError):
+        repository.create_session("first", {**payload, "user_id": "replacement"})
+    assert repository.get_session("first")["user_id"] == "analyst"
+    assert repository.delete_session("first") is True
+    assert repository.delete_session("first") is False
+    assert repository.get_session("first") is None
+    assert repository.get_session("second")["session_token"] == "second"
 
 
 def test_workspace_api_functions_use_durable_sqlite_repository(monkeypatch) -> None:

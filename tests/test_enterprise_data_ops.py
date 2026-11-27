@@ -2,11 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi.testclient import TestClient
-
 from backend.governance import default_dataset_registry, default_workspace_policy, governance_overview, validate_dataset_access
 from backend.incidents import incident_from_telemetry
-from backend.main import app
 from backend.scheduler import next_run_at, scheduler_overview
 
 
@@ -47,8 +44,8 @@ def test_incident_generation_scores_runtime_degradation() -> None:
     assert incident.escalation["requires_executive_visibility"] is True
 
 
-def test_enterprise_control_plane_endpoints() -> None:
-    client = TestClient(app)
+def test_enterprise_control_plane_endpoints(authenticated_api_client) -> None:
+    client = authenticated_api_client
     created = client.post("/execute", json={"question": "Show revenue anomalies"}).json()
     workflow_id = created["workflow_id"]
 

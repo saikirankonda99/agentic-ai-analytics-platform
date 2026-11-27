@@ -52,7 +52,8 @@ def run_startup_validation(*, strict: bool | None = None, validate_connectors: b
         },
     }
     logger.info("startup_validation_completed status=%s strict=%s summary=%s", status, strict, payload["summary"])
-    if strict and invalid:
+    production = os.getenv("APP_ENV", "development").strip().lower() == "production"
+    if (strict or production) and invalid:
         raise RuntimeError(f"Startup validation failed: {[check.name for check in invalid]}")
     return payload
 
@@ -106,11 +107,11 @@ def _connector_check(*, validate_connectors: bool) -> StartupCheck:
 
 def _auth_check() -> StartupCheck:
     diagnostics = validate_auth_config()
-    status = "ok" if diagnostics.get("valid") else "warning"
+    status = "error" if diagnostics.get("errors") else "warning" if diagnostics.get("warnings") else "ok"
     return StartupCheck(
         name="auth",
         status=status,
-        message="Authentication configuration validated." if status == "ok" else "Authentication configuration has warnings.",
+        message="Authentication configuration validated." if status == "ok" else "Authentication configuration requires attention.",
         metadata=diagnostics,
     )
 

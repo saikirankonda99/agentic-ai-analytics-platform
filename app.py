@@ -1,5 +1,6 @@
 import os
 import time
+import hashlib
 from datetime import datetime
 
 import pandas as pd
@@ -13,6 +14,7 @@ from analytics_memory import (
     update_analytics_memory,
 )
 from auth import render_auth_controls, require_login
+from csv_analytics import CSVAnalysisError, DEMO_PATH, analyze_sales, read_sales_csv
 from autonomous_insights import analyze_result_set, empty_insight_state, insight_prompt_block
 from backend.operations import agent_utilization
 from backend.services import execute_query_workflow
@@ -367,10 +369,7 @@ def build_ai_recommendations(df, telemetry, trace):
 
 def build_default_activity_feed():
     return [
-        {"title": "Copilot standby initialized", "subtitle": "Natural-language query intake is ready for the next request.", "time": "Now", "tone": "live"},
-        {"title": "Schema context cached", "subtitle": "Database structure is warm for low-latency retrieval.", "time": "2m", "tone": "stable"},
-        {"title": "Telemetry observers connected", "subtitle": "Token, latency, and cost tracking are listening for the next run.", "time": "5m", "tone": "stable"},
-        {"title": "Recommendation engine primed", "subtitle": "Default guidance prepared from recent workflow patterns.", "time": "9m", "tone": "live"},
+        {"title": "No activity yet", "subtitle": "Run an analysis to record results and measured execution details.", "time": "", "tone": "stable"},
     ]
 
 
@@ -396,7 +395,11 @@ def init_session_state():
         "latest_insight": "",
         "latest_mode": "database",
         "uploaded_name": None,
+        "uploaded_fingerprint": None,
+        "latest_csv_analysis": None,
+        "csv_upload_error": "",
         "command_text": "",
+        "command_input": "",
         "run_id": "default",
         "run_counter": 0,
         "live_render_seq": 0,
@@ -450,6 +453,7 @@ def init_session_state():
 
 
 def clear_session():
+    st.session_state.upload_generation = st.session_state.get("upload_generation", 0) + 1
     st.session_state.messages = []
     st.session_state.history = []
     st.session_state.workflow_trace = []
@@ -461,7 +465,11 @@ def clear_session():
     st.session_state.latest_insight = ""
     st.session_state.latest_mode = "database"
     st.session_state.uploaded_name = None
+    st.session_state.uploaded_fingerprint = None
+    st.session_state.latest_csv_analysis = None
+    st.session_state.csv_upload_error = ""
     st.session_state.command_text = ""
+    st.session_state.command_input = ""
     st.session_state.run_id = "default"
     st.session_state.run_counter = 0
     st.session_state.live_render_seq = 0
@@ -513,9 +521,26 @@ def current_timestamp():
     return datetime.now().isoformat(timespec="seconds")
 
 
+def clear_analysis_result():
+    """Keep the selected source, but discard outputs from the previous analysis."""
+    for key, value in {
+        "latest_df": None, "latest_sql": "", "latest_insight": "", "latest_exec_time": None,
+        "latest_csv_analysis": None, "workflow_trace": [], "workflow_telemetry": {},
+        "latest_execution_graph": {}, "latest_stage_confidence": {}, "latest_recovery": {},
+        "latest_policy_decision": {}, "latest_schema_intelligence": {}, "latest_sql_validation": {},
+        "latest_sql_explanation": {}, "latest_result_quality": {}, "live_trace": [], "live_logs": [],
+        "live_telemetry": {}, "live_assistant_streams": {}, "streaming_workflow": {},
+        "autonomous_insights": empty_insight_state(), "investigation_state": empty_investigation_state(),
+        "_render_export_cache": {},
+    }.items():
+        st.session_state[key] = value
+
+
 def configure_workspace_session(user_id, team_id, role, workspace_scope="Personal", display_name=None):
     identity = select_workspace_identity(build_user_session(user_id, team_id, role, display_name=display_name), workspace_scope)
     previous_workspace = st.session_state.get("active_workspace_id")
+    if previous_workspace and previous_workspace != identity["workspace_id"]:
+        clear_session()
     st.session_state.user_identity = identity
     st.session_state.active_workspace_id = identity["workspace_id"]
     if not st.session_state.get("workspace_loaded") or previous_workspace != identity["workspace_id"]:
@@ -540,6 +565,8 @@ def configure_workspace_session(user_id, team_id, role, workspace_scope="Persona
         st.session_state.workspace_persistence_timings = st.session_state.get("workspace_persistence_timings", [])[-19:] + [
             {"operation": "workspace_load_bootstrap", "elapsed_ms": 0, "timestamp": current_timestamp()}
         ]
+        if previous_workspace and previous_workspace != identity["workspace_id"]:
+            st.rerun()
 
 
 def select_workspace_identity(identity, scope):
@@ -639,6 +666,9 @@ def build_workspace_report_payload(scope="analytics"):
         "sql": st.session_state.get("latest_sql", ""),
         "insight": st.session_state.get("latest_insight", ""),
         "rows": len(df) if df is not None else 0,
+        "source_rows": (st.session_state.get("latest_csv_analysis") or {}).get("source_rows"),
+        "calculation": (st.session_state.get("latest_csv_analysis") or {}).get("summary", ""),
+        "data_warnings": (st.session_state.get("latest_csv_analysis") or {}).get("warnings", []),
         "columns": list(df.columns) if df is not None else [],
         "telemetry": telemetry,
         "trace": trace,
@@ -1264,11 +1294,16 @@ def run_query(question, live_placeholder=None):
     if not user_can(st.session_state.get("user_identity"), "query"):
         st.warning("Your current workspace role does not allow query execution.")
         return
-    followup = apply_chart_followup(question)
-    if st.session_state.get("latest_df") is not None and is_chart_only_followup(question, st.session_state.get("analytics_memory")):
+    if st.session_state.get("csv_upload_error"):
+        st.warning("Replace the invalid CSV, load the retail demo, or choose the example database before running an analysis.")
+        return
+    csv_mode = "uploaded_df" in st.session_state
+    followup = {"effective_question": question} if csv_mode else apply_chart_followup(question)
+    if not csv_mode and st.session_state.get("latest_df") is not None and is_chart_only_followup(question, st.session_state.get("analytics_memory")):
         complete_chart_only_followup(question, followup)
         return
 
+    clear_analysis_result()
     st.session_state.messages.append({"role": "user", "content": question})
     start = time.time()
     sql = ""
@@ -1280,6 +1315,9 @@ def run_query(question, live_placeholder=None):
     st.session_state.latest_question = question
     st.session_state.active_intent = followup.get("effective_question", question)
     st.session_state.latest_insight = ""
+    st.session_state.latest_df = None
+    st.session_state.latest_sql = ""
+    st.session_state.latest_csv_analysis = None
     st.session_state.autonomous_insights = empty_insight_state()
     st.session_state.investigation_state = empty_investigation_state()
     st.session_state.streaming_workflow = initial_streaming_workflow(question)
@@ -1301,12 +1339,29 @@ def run_query(question, live_placeholder=None):
 
     try:
         if "uploaded_df" in st.session_state:
-            df = st.session_state.uploaded_df
+            calculation_started = time.perf_counter()
+            analysis = analyze_sales(st.session_state.uploaded_df, question)
+            df = analysis.result
+            st.session_state.latest_csv_analysis = {
+                "summary": analysis.summary,
+                "source_rows": analysis.source_rows,
+                "total_revenue": analysis.total_revenue,
+                "currency": analysis.currency,
+                "warnings": list(analysis.warnings),
+            }
             profile_active_dataframe(df, f"Uploaded CSV: {st.session_state.get('uploaded_name') or 'dataset'}")
-            st.session_state.workflow_trace = []
-            st.session_state.workflow_telemetry = {}
+            calculation_ms = int((time.perf_counter() - calculation_started) * 1000)
+            st.session_state.workflow_trace = [{
+                "step": "sales calculation", "status": "success", "timestamp": current_timestamp(),
+                "detail": f"Calculated {len(df)} result row(s) from all {analysis.source_rows} sales rows.",
+            }]
+            st.session_state.workflow_telemetry = validate_telemetry_payload({
+                "model": "local-csv", "latency_ms": calculation_ms, "usage_available": False,
+                "steps": [{"step": "sales calculation", "model": "local-csv", "latency_ms": calculation_ms,
+                           "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost_usd": 0.0, "usage_available": False}],
+            })
             mode = "csv"
-            append_live_log("schema retrieval", "Uploaded CSV loaded into the analytics workspace.")
+            append_live_log("sales calculation", analysis.summary)
             if live_placeholder is not None:
                 render_live_workspace_snapshot(question, live_placeholder)
         else:
@@ -1373,7 +1428,21 @@ def run_query(question, live_placeholder=None):
         st.session_state.latest_question = question
         st.session_state.latest_exec_time = exec_time
         st.session_state.latest_mode = mode
-        stream_insight_narration(question, df, sql=sql, live_placeholder=live_placeholder)
+        if mode == "csv":
+            st.session_state.latest_insight = analysis.summary
+            st.session_state.autonomous_insights = analyze_result_set(df, question)
+            st.session_state.investigation_state = {
+                **empty_investigation_state(), "status": "skipped",
+                "summary": "The CSV demo calculates sales totals; causal investigation is not available.",
+            }
+            stream = st.session_state.streaming_workflow
+            stream["trace"] = st.session_state.workflow_trace
+            stream["telemetry"] = st.session_state.workflow_telemetry
+            stream["current_phase"] = "sales calculation"
+            stream.setdefault("assistant_streams", {})["insight"] = analysis.summary
+            st.session_state.streaming_workflow = stream
+        else:
+            stream_insight_narration(question, df, sql=sql, live_placeholder=live_placeholder)
         remember_analytics_turn(question, st.session_state.get("active_intent") or question, sql, df)
         st.session_state.messages.append(
             {
@@ -1403,6 +1472,14 @@ def run_query(question, live_placeholder=None):
             }
         )
         persist_workspace_snapshot(question, st.session_state.get("active_intent") or question, sql, df)
+    except CSVAnalysisError as exc:
+        st.warning(str(exc))
+        append_live_log("sales calculation", str(exc), status="warning")
+        stream = st.session_state.streaming_workflow
+        stream["status"] = "failed"
+        stream["completed_at"] = current_timestamp()
+        st.session_state.streaming_workflow = stream
+        sync_live_state_from_stream()
     except Exception as exc:
         st.error("Query failed. Try rephrasing.")
         st.code(str(exc))
@@ -1422,9 +1499,13 @@ def run_query(question, live_placeholder=None):
 
 def render_schema(schema_visible):
     if schema_visible:
-        ensure_schema_semantics()
-        with st.expander("Database Schema", expanded=False):
-            st.code(get_schema())
+        if "uploaded_df" in st.session_state:
+            with st.expander("CSV Columns", expanded=False):
+                st.dataframe(st.session_state.uploaded_df.dtypes.astype(str).rename("type"), width="stretch")
+        else:
+            ensure_schema_semantics()
+            with st.expander("Database Schema", expanded=False):
+                st.code(get_schema())
 
 
 def render_analytics_workspace(client, services):
@@ -1432,7 +1513,7 @@ def render_analytics_workspace(client, services):
     telemetry = st.session_state.workflow_telemetry
     exec_time = st.session_state.latest_exec_time
     history = st.session_state.history
-    active_mode = "CSV Workspace" if st.session_state.latest_mode == "csv" and df is not None else "Live SQL"
+    active_mode = "CSV Sales" if "uploaded_df" in st.session_state else "Example database"
     if df is None and not st.session_state.get("semantic_context"):
         ensure_schema_semantics()
 
@@ -1527,21 +1608,26 @@ def render_analytics_workspace(client, services):
                 chart_key=next_plotly_key("workflow_chart_summary"),
             )
 
+    # A failed/new query must never display the previous answer beside its question.
+    df = st.session_state.latest_df
+    for warning in (st.session_state.get("latest_csv_analysis") or {}).get("warnings", []):
+        st.warning(warning)
+
     if df is None:
         status_left, status_right = st.columns([1.45, 0.92], gap="medium")
         with status_left:
             system_metrics = [
-                {"label": "System Health", "value": "99.98%", "caption": "Service readiness across AI orchestration"},
-                {"label": "Active Agents", "value": "4", "caption": "Core agents on warm standby"},
-                {"label": "Avg Latency", "value": "842 ms", "caption": "Trailing control-plane estimate"},
-                {"label": "Signal Quality", "value": "96.4", "caption": "Composite confidence benchmark"},
+                {"label": "Analysis", "value": "Ready", "caption": "Choose a sample or upload sales data"},
+                {"label": "Completed Runs", "value": len(history), "caption": "Saved workspace history"},
+                {"label": "Latency", "value": "Not measured", "caption": "Available after an analysis"},
+                {"label": "AI usage", "value": "No model run", "caption": "CSV sales calculations run locally"},
             ]
             render_kpi_cards(system_metrics)
             st.markdown(
                 """
                 <div class="workspace-shell compact-shell">
-                    <div class="section-title">Operations Canvas</div>
-                    <div class="section-subtitle">Mock analytics view that keeps the workspace populated and operational between runs.</div>
+                    <div class="section-title">Example chart</div>
+                    <div class="section-subtitle">Illustrative sample only. Upload your sales data or load the retail demo to see calculated results.</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -1556,8 +1642,8 @@ def render_analytics_workspace(client, services):
             st.markdown(
                 render_response_card(
                     "Analytics Ready",
-                    "The workspace is preloaded with operational defaults until the next query executes.",
-                    '<div class="workspace-body-copy">Launch a sample prompt or ask your own question below. Until then, the dashboard stays populated with live-looking orchestration posture, health metrics, and recommendations.</div>',
+                    "Start with a small, verifiable sales question.",
+                    '<div class="workspace-body-copy">Load the retail demo for sales totals, product rankings, and monthly revenue. Database questions use the configured AI model.</div>',
                     tone="summary-module",
                 ),
                 unsafe_allow_html=True,
@@ -1576,12 +1662,12 @@ def render_analytics_workspace(client, services):
             st.markdown(
                 render_observability_card(
                     {
-                        "model": "gpt-4.1-mini",
-                        "total_tokens": 18240,
-                        "latency_ms": 842,
-                        "cost_usd": 0.021384,
+                        "model": "No model run",
+                        "total_tokens": 0,
+                        "latency_ms": 0,
+                        "cost_usd": 0.0,
                     },
-                    [{"step": "planner", "status": "success"}],
+                    [],
                 ),
                 unsafe_allow_html=True,
             )
@@ -1755,7 +1841,7 @@ def render_analytics_workspace(client, services):
             if explanation:
                 st.markdown(
                     render_response_card(
-                        "AI Insight Brief",
+                        "Sales Summary" if st.session_state.latest_mode == "csv" else "AI Insight Brief",
                         "Natural-language interpretation of the current result set.",
                         f'<div class="workspace-body-copy">{escape_html(explanation)}</div>',
                         tone="insight-module",
@@ -1838,9 +1924,9 @@ selected_nav = render_top_navigation(st.session_state.get("top_navigation", "Ove
 st.session_state.workspace_route = selected_nav
 sidebar_state = render_sidebar()
 configure_workspace_session(
-    sidebar_state["workspace_user"],
-    sidebar_state["workspace_team"],
-    sidebar_state["workspace_role"],
+    authenticated_identity["user_id"],
+    authenticated_identity["team_id"],
+    authenticated_identity["role"],
     workspace_scope=sidebar_state["workspace_scope"],
     display_name=authenticated_identity.get("display_name"),
 )
@@ -1858,13 +1944,57 @@ if sidebar_state["clear_chat"]:
     clear_session()
     st.rerun()
 
+if sidebar_state["load_demo"]:
+    clear_session()
+    st.session_state.uploaded_df = read_sales_csv(DEMO_PATH.read_bytes())
+    st.session_state.uploaded_name = "Synthetic retail sales (USD)"
+    st.session_state.uploaded_fingerprint = "retail-demo"
+    st.session_state.latest_mode = "csv"
+    profile_active_dataframe(st.session_state.uploaded_df, "Synthetic retail sales (USD)")
+    st.session_state.command_text = "Revenue by product"
+    st.session_state.command_input = "Revenue by product"
+    st.rerun()
+
+if sidebar_state["use_database"]:
+    clear_session()
+    st.rerun()
+
 if sidebar_state["uploaded_file"] is not None:
     uploaded_name = sidebar_state["uploaded_file"].name
-    st.session_state.uploaded_df = pd.read_csv(sidebar_state["uploaded_file"])
-    if st.session_state.uploaded_name != uploaded_name:
-        st.session_state.uploaded_name = uploaded_name
-        profile_active_dataframe(st.session_state.uploaded_df, f"Uploaded CSV: {uploaded_name}")
-        st.success("CSV uploaded successfully. The workspace is now using uploaded data.")
+    uploaded_bytes = sidebar_state["uploaded_file"].getvalue()
+    uploaded_fingerprint = hashlib.sha256(uploaded_bytes).hexdigest()
+    if st.session_state.get("uploaded_fingerprint") != uploaded_fingerprint:
+        clear_analysis_result()
+        st.session_state.analytics_memory = empty_analytics_memory()
+        st.session_state.latest_question = ""
+        try:
+            uploaded_df = read_sales_csv(uploaded_bytes)
+        except CSVAnalysisError as exc:
+            st.warning(str(exc))
+            st.session_state.pop("uploaded_df", None)
+            st.session_state.csv_upload_error = str(exc)
+            st.session_state.uploaded_name = None
+            st.session_state.uploaded_fingerprint = None
+        else:
+            st.session_state.uploaded_df = uploaded_df
+            st.session_state.uploaded_name = uploaded_name
+            st.session_state.uploaded_fingerprint = uploaded_fingerprint
+            st.session_state.csv_upload_error = ""
+            st.session_state.latest_mode = "csv"
+            st.session_state.latest_df = None
+            st.session_state.latest_sql = ""
+            st.session_state.latest_insight = ""
+            st.session_state.analytics_memory = empty_analytics_memory()
+            st.session_state.latest_csv_analysis = None
+            profile_active_dataframe(uploaded_df, f"Uploaded CSV: {uploaded_name}")
+            st.success("CSV uploaded successfully. The workspace is now using uploaded data.")
+
+if "uploaded_df" in st.session_state:
+    st.caption(f"Active data: {st.session_state.uploaded_name} · {len(st.session_state.uploaded_df):,} sales rows · Local calculations, no model calls.")
+elif st.session_state.get("csv_upload_error"):
+    st.warning("The uploaded CSV could not be read. Choose a valid sales file or another data source.")
+else:
+    st.caption("Active data: Chinook example database · Natural-language SQL requires an OpenAI API key.")
 
 render_schema(sidebar_state["show_schema"])
 

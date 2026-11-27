@@ -3,8 +3,6 @@ from __future__ import annotations
 import sys
 from types import SimpleNamespace
 
-from fastapi.testclient import TestClient
-
 from backend.connectors import (
     ConnectorRegistry,
     PostgresConnector,
@@ -12,7 +10,6 @@ from backend.connectors import (
     SQLiteConnector,
     SQLiteConnectorConfig,
 )
-from backend.main import app
 
 
 def test_sqlite_connector_validates_and_inspects_schema() -> None:
@@ -168,8 +165,8 @@ def test_connector_registry_diagnostics_include_safe_environment() -> None:
     assert "postgres_configured" in diagnostics["configuration"]
 
 
-def test_connector_api_endpoints() -> None:
-    client = TestClient(app)
+def test_connector_api_endpoints(authenticated_api_client) -> None:
+    client = authenticated_api_client
 
     connectors = client.get("/connectors").json()
     sqlite_health = client.get("/connectors/sqlite/health").json()

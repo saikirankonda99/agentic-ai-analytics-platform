@@ -19,15 +19,39 @@ This repository now separates local app behavior from production-oriented orches
 - `backend.workers` defines Redis-ready distributed worker queue abstractions.
 - `backend.runtime` remains the orchestration execution boundary.
 
-## Local Production Stack
+## Local Container Stack
 
 ```bash
 cp .env.example .env
+# Configure AUTH_USERS as described below before starting production-mode services.
 docker compose up --build
 ```
 
 Backend: `http://localhost:8000`  
 Streamlit: `http://localhost:8501`
+
+This stack is a development integration setup. PostgreSQL and Redis in this Compose file use local defaults; operating a customer deployment still requires infrastructure configuration, customer data isolation, and deployment testing. The current API execution endpoint simulates workflow stages. Redis workers and pgvector retrieval are not implemented.
+
+## Explicit production users
+
+Both services use `APP_ENV=production` in Compose. This mode disables the built-in demo accounts. Missing, malformed, or unhashed `AUTH_USERS` credentials fail startup validation.
+
+Generate a password hash locally without putting the password in shell history:
+
+```bash
+python -c 'from getpass import getpass; from backend.auth_sessions import hash_password; print(hash_password(getpass("Password: ")))'
+```
+
+Copy the resulting hash into an `AUTH_USERS` JSON object in your private `.env` file. Replace the placeholder below; do not commit the file:
+
+```dotenv
+APP_ENV=production
+AUTH_USERS='{"owner":{"password_hash":"PASTE_GENERATED_HASH_HERE","display_name":"Business Owner","team_id":"demo-business","role":"admin"}}'
+```
+
+Roles are `admin`, `analyst`, or `viewer`. User, team, and role come from the authenticated session. The Streamlit sidebar displays these values; changing a client header cannot grant another user's access. This authorization does not yet provide separate database connectors and retrieval histories for different customers.
+
+Use `POST /auth/login` to obtain a session token. Private routes accept `X-Session-Token` or `Authorization: Bearer <token>`. Diagnostics and connector endpoints require an admin. Workflow reads, streams, and workspace APIs also enforce ownership and write roles. Public health/readiness responses expose only service status. Endpoints that formerly exposed a global latest investigation now return an unavailable response until an explicit owned workflow is supplied where supported.
 
 ## Startup Validation
 
@@ -74,7 +98,7 @@ FastAPI also exposes:
 - `GET /readiness`
 - `GET /diagnostics`
 
-`/diagnostics` includes startup validation, auth posture, connector health, OpenAI runtime configuration, and execution policy.
+`/diagnostics` requires an admin session and includes startup validation, auth posture, connector health, OpenAI runtime configuration, and execution policy.
 
 ## CI/CD
 

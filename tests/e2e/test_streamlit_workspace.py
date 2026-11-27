@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import csv
 import os
+from pathlib import Path
 
 import pytest
 from playwright.sync_api import expect
@@ -61,10 +63,16 @@ def test_csv_analytics_workflow_exports_reports_and_saved_state(logged_in_page, 
     with page.expect_download() as csv_download:
         page.get_by_role("button", name="Download Full CSV").click()
     assert csv_download.value.suggested_filename == "analytics-result.csv"
+    with Path(csv_download.value.path()).open(newline="", encoding="utf-8") as source:
+        exported = list(csv.DictReader(source))
+    assert {row["country"]: float(row["revenue"]) for row in exported} == {"USA": 256, "Canada": 74, "Germany": 22}
 
     with page.expect_download() as report_download:
         page.get_by_role("button", name="Executive Summary").click()
     assert report_download.value.suggested_filename == "analytics-executive-summary.md"
+    report = Path(report_download.value.path()).read_text(encoding="utf-8")
+    assert "352.00" in report
+    assert "Source sales rows: 12" in report
 
     page.get_by_role("button", name="Bookmark Query").click()
     expect(page.get_by_text("Query bookmarked.")).to_be_visible()
@@ -147,7 +155,7 @@ def test_query_execution_sql_generation_and_bookmark_flow(logged_in_page) -> Non
     page = logged_in_page
 
     page.get_by_role("button", name="Revenue by Country").first.click()
-    page.get_by_text("SQL Generation", timeout=90_000).wait_for()
+    page.get_by_text("SQL Generation").wait_for(timeout=90_000)
     page.get_by_text("Result Explorer").wait_for()
     page.get_by_text("Observability").wait_for()
 

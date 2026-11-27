@@ -11,6 +11,7 @@ class E2ESettings:
     streamlit_port: int = 8521
     fastapi_port: int = 8021
     headless: bool = True
+    browser_executable: str | None = None
     action_timeout_ms: int = 15_000
     navigation_timeout_ms: int = 30_000
     output_dir: Path = Path("test-results") / "playwright"
@@ -35,6 +36,7 @@ def load_settings() -> E2ESettings:
         streamlit_port=int(os.getenv("E2E_STREAMLIT_PORT", "8521")),
         fastapi_port=int(os.getenv("E2E_FASTAPI_PORT", "8021")),
         headless=os.getenv("E2E_HEADLESS", "true").strip().lower() not in {"0", "false", "no"},
+        browser_executable=os.getenv("E2E_BROWSER_EXECUTABLE") or None,
         output_dir=Path(os.getenv("E2E_OUTPUT_DIR", "test-results/playwright")),
         admin_username=os.getenv("E2E_ADMIN_USERNAME", "admin"),
         admin_password=os.getenv("E2E_ADMIN_PASSWORD", os.getenv("AUTH_ADMIN_PASSWORD", "admin123")),

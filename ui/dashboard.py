@@ -7,6 +7,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from csv_analytics import DEMO_PATH, SUPPORTED_QUESTIONS
+
 
 STATUS_META = {
     "idle": {"label": "Idle", "color": "#64748b"},
@@ -20,6 +22,7 @@ STATUS_META = {
 }
 
 WORKFLOW_STEPS = [
+    "sales calculation",
     "planner",
     "schema retrieval",
     "memory retrieval",
@@ -35,6 +38,7 @@ WORKFLOW_STEPS = [
 ]
 
 STEP_META = {
+    "sales calculation": {"title": "Sales calculation", "caption": "Verified CSV totals"},
     "planner": {"title": "Planner", "caption": "Intent routing"},
     "schema retrieval": {"title": "Schema", "caption": "Context retrieval"},
     "memory retrieval": {"title": "Memory", "caption": "History recall"},
@@ -306,8 +310,8 @@ def render_sidebar() -> dict:
         markdown_html(
             """
             <div class="sidebar-brand">
-                <p class="sidebar-brand-title">GenAI SQL Assistant</p>
-                <div class="sidebar-brand-copy">Analytics operations cockpit for AI-native querying.</div>
+                <p class="sidebar-brand-title">Sales Analytics</p>
+                <div class="sidebar-brand-copy">Understand sales, compare products, and export results.</div>
             </div>
             """
         )
@@ -317,31 +321,38 @@ def render_sidebar() -> dict:
             show_schema = st.toggle("Show database schema", value=False)
 
         with st.expander("Workspace Context", expanded=True):
-            current_identity = st.session_state.get("user_identity") or {}
+            current_identity = st.session_state.get("auth_session") or {}
             workspace_scope = st.radio(
                 "Workspace scope",
                 ["Personal", "Shared team"],
                 index=1 if current_identity.get("workspace_scope") == "team" else 0,
                 horizontal=True,
+                key="workspace_scope_choice",
             )
-            workspace_user = st.text_input("User", value=current_identity.get("user_id", "local.user"))
-            workspace_team = st.text_input("Team", value=current_identity.get("team_id", "default-team"))
-            workspace_role = st.selectbox(
-                "Role",
-                ["admin", "analyst", "viewer"],
-                index=["admin", "analyst", "viewer"].index(current_identity.get("role", "admin"))
-                if current_identity.get("role", "admin") in ["admin", "analyst", "viewer"]
-                else 0,
-            )
+            workspace_user = current_identity.get("user_id", "")
+            workspace_team = current_identity.get("team_id", "")
+            workspace_role = current_identity.get("role", "viewer")
+            st.caption(f"User: {workspace_user}")
+            st.caption(f"Team: {workspace_team}")
+            st.caption(f"Role: {workspace_role}")
 
         with st.expander("Launch Templates", expanded=False):
             for query in SAMPLE_PROMPTS:
                 markdown_html(f'<div class="sample-query">{escape_html(query)}</div>')
 
-        with st.expander("Dataset Upload", expanded=False):
-            uploaded_file = st.file_uploader("Upload CSV", type=["csv"], label_visibility="collapsed")
+        with st.expander("Dataset Upload", expanded=True):
+            st.caption("Use revenue, or quantity and unit_price. Optional columns: product, date (YYYY-MM-DD), country, currency. Currency: USD, CAD, EUR, GBP, AUD, or NZD. Up to 10 MB / 50,000 rows.")
+            uploaded_file = st.file_uploader(
+                "Upload CSV", type=["csv"], label_visibility="collapsed",
+                key=f"sales_upload_{workspace_team}_{workspace_user}_{workspace_scope}_{st.session_state.get('upload_generation', 0)}",
+            )
+            load_demo = st.button("Load retail demo", width="stretch")
+            st.download_button("Download sample sales CSV", DEMO_PATH.read_bytes(), "retail-sales.csv", "text/csv", width="stretch")
+            use_database = st.button("Use example database", width="stretch")
+            st.caption("The retail demo contains synthetic sales. CSV calculations require no API key.")
 
         with st.expander("Scheduled Monitoring", expanded=False):
+            st.caption("These checks use the example Chinook database. They run when this page is active, not as background jobs.")
             monitoring_enabled = st.toggle(
                 "Enable scheduled checks",
                 value=st.session_state.get("monitoring_config", {}).get("enabled", False),
@@ -380,6 +391,8 @@ def render_sidebar() -> dict:
             "monitoring_targets": monitoring_targets,
             "monitoring_interval": monitoring_interval,
             "run_monitoring": run_monitoring,
+            "load_demo": load_demo,
+            "use_database": use_database,
         }
 
 
@@ -416,21 +429,29 @@ def render_prompt_launcher() -> str | None:
     return prompt
 
 
+def _set_command_prompt(prompt: str) -> None:
+    st.session_state.command_input = prompt
+    st.session_state.command_text = prompt
+
+
 def render_command_bar() -> str | None:
     markdown_html(
         section_header_html(
             "Command Workspace",
-            "Submit a question and keep orchestration anchored to the analytics workspace.",
+            "Ask about your sales and inspect the calculated answer.",
             class_name="workspace-shell compact-shell",
         )
     )
     prompt = None
+    csv_mode = "uploaded_df" in st.session_state
+    if csv_mode:
+        st.caption("Supported CSV questions: " + "; ".join(SUPPORTED_QUESTIONS) + ". Each answer uses the entire upload.")
     with st.form("command_bar_form", clear_on_submit=False):
         query_col, action_col = st.columns([6, 1.2], vertical_alignment="bottom")
         with query_col:
             question = st.text_input(
                 "Command",
-                value=st.session_state.get("command_text", ""),
+                key="command_input",
                 placeholder="Ask a revenue, customer, or product question...",
                 label_visibility="collapsed",
             )
@@ -438,12 +459,15 @@ def render_command_bar() -> str | None:
             submitted = st.form_submit_button("Run", width="stretch")
 
     c1, c2, c3 = st.columns(3)
-    if c1.button("Top Customers", width="stretch"):
-        prompt = "Top 10 customers by invoices"
-    if c2.button("Revenue by Country", width="stretch"):
-        prompt = "Revenue by country"
-    if c3.button("Top Tracks", width="stretch"):
-        prompt = "Top 10 tracks"
+    first_prompt = "Total revenue" if csv_mode else "Top 10 customers by invoices"
+    second_prompt = "Revenue by product" if csv_mode else "Revenue by country"
+    third_prompt = "Revenue by month" if csv_mode else "Top 10 tracks"
+    if c1.button("Total Revenue" if csv_mode else "Top Customers", width="stretch", on_click=_set_command_prompt, args=(first_prompt,)):
+        prompt = first_prompt
+    if c2.button("Revenue by Product" if csv_mode else "Revenue by Country", width="stretch", on_click=_set_command_prompt, args=(second_prompt,)):
+        prompt = second_prompt
+    if c3.button("Monthly Revenue" if csv_mode else "Top Tracks", width="stretch", on_click=_set_command_prompt, args=(third_prompt,)):
+        prompt = third_prompt
 
     if submitted and question.strip():
         st.session_state.command_text = question.strip()

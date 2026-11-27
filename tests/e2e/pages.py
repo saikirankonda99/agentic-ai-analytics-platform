@@ -35,7 +35,6 @@ def select_nav(page: Page, label: str) -> None:
 
 
 def upload_csv(page: Page, csv_path: Path) -> None:
-    page.get_by_text("Dataset Upload").click()
     page.locator("input[type=file]").set_input_files(str(csv_path))
     expect(page.get_by_text("CSV uploaded successfully.")).to_be_visible(timeout=20_000)
 

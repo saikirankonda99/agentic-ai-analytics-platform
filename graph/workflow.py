@@ -65,6 +65,7 @@ class StepTelemetry(TypedDict, total=False):
 
 class WorkflowState(TypedDict, total=False):
     question: str
+    model: str
     plan: dict[str, Any]
     schema: str
     memory_examples: list[dict[str, str]]
@@ -533,10 +534,13 @@ def sql_generation_node(
         generation_result = stream_sql_with_telemetry(
             _build_generation_prompt(state),
             state["schema"],
+            model=state.get("model", DEFAULT_SQL_MODEL),
             token_callback=on_token,
         )
     else:
-        generation_result = generate_sql_with_telemetry(_build_generation_prompt(state), state["schema"])
+        generation_result = generate_sql_with_telemetry(
+            _build_generation_prompt(state), state["schema"], model=state.get("model", DEFAULT_SQL_MODEL)
+        )
     sql = generation_result["sql"].strip()
     step_telemetry = _new_step_telemetry(step="sql generation", **generation_result["telemetry"])
     if not sql or sql.startswith("ERROR:"):
@@ -679,10 +683,13 @@ def reflection_node(
         reflection_result = stream_sql_with_telemetry(
             _build_reflection_prompt(state),
             state["schema"],
+            model=state.get("model", DEFAULT_SQL_MODEL),
             token_callback=on_token,
         )
     else:
-        reflection_result = generate_sql_with_telemetry(_build_reflection_prompt(state), state["schema"])
+        reflection_result = generate_sql_with_telemetry(
+            _build_reflection_prompt(state), state["schema"], model=state.get("model", DEFAULT_SQL_MODEL)
+        )
     corrected_sql = reflection_result["sql"].strip()
     step_telemetry = _new_step_telemetry(step="reflection", **reflection_result["telemetry"])
 
@@ -898,10 +905,13 @@ def _run_linear(
     semantic_context: dict[str, Any] | None = None,
     conversation_context: dict[str, Any] | None = None,
     workspace_context: dict[str, Any] | None = None,
+    *,
+    model: str = DEFAULT_SQL_MODEL,
 ) -> WorkflowState:
     correlation_id = new_correlation_id()
     state: WorkflowState = {
         "question": question,
+        "model": model,
         "error": None,
         "retry_count": 0,
         "last_error": None,
@@ -967,19 +977,21 @@ def _run_linear(
     if state.get("error"):
         return state
 
-    while True:
-        _emit_event(callback, "active", state, "sql generation", "Generating SQL candidate.")
-        state.update(sql_generation_node(state, callback=callback))
-        _emit_event(
-            callback,
-            "completed" if not state.get("error") else "warning",
-            state,
-            "sql generation",
-            state.get("trace", [{}])[-1].get("detail", "SQL generation finished."),
-        )
-        if state.get("error"):
-            return state
+    _emit_event(callback, "active", state, "sql generation", "Generating SQL candidate.")
+    state.update(sql_generation_node(state, callback=callback))
+    _emit_event(
+        callback,
+        "completed" if not state.get("error") else "warning",
+        state,
+        "sql generation",
+        state.get("trace", [{}])[-1].get("detail", "SQL generation finished."),
+    )
+    if state.get("error"):
+        return state
 
+    # A reflection produces the next candidate. Revalidate that candidate instead
+    # of generating a fresh query and discarding the repair on every retry.
+    while True:
         _emit_event(callback, "active", state, "validation", "Running SQL safety validation.")
         state.update(validation_node(state))
         _emit_event(
@@ -1046,10 +1058,13 @@ def run_workflow(
     semantic_context: dict[str, Any] | None = None,
     conversation_context: dict[str, Any] | None = None,
     workspace_context: dict[str, Any] | None = None,
+    *,
+    model: str = DEFAULT_SQL_MODEL,
 ) -> WorkflowState:
     correlation_id = new_correlation_id()
     initial_state: WorkflowState = {
         "question": question,
+        "model": model,
         "error": None,
         "retry_count": 0,
         "last_error": None,
@@ -1093,6 +1108,7 @@ def run_workflow(
             semantic_context=semantic_context,
             conversation_context=conversation_context,
             workspace_context=workspace_context,
+            model=model,
         )
 
     result = workflow.invoke(initial_state)

@@ -16,7 +16,8 @@ def _clean_name(value: object) -> str:
 
 
 def _matches_hint(name: str, hints: tuple[str, ...]) -> bool:
-    normalized = re.sub(r"[^a-z0-9]+", "_", name.lower())
+    words = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name)
+    normalized = re.sub(r"[^a-z0-9]+", "_", words.lower())
     return any(hint in normalized.split("_") or normalized.endswith(f"_{hint}") for hint in hints)
 
 
@@ -24,12 +25,18 @@ def infer_column_role(name: str, series: pd.Series | None = None, dtype: str | N
     lowered = name.lower()
     dtype_text = (dtype or str(series.dtype if series is not None else "")).lower()
 
-    if _matches_hint(lowered, TIME_HINTS) or "date" in dtype_text or "time" in dtype_text:
+    if _matches_hint(name, TIME_HINTS) or "date" in dtype_text or "time" in dtype_text:
         return "time"
-    if lowered == "id" or lowered.endswith("id") or _matches_hint(lowered, IDENTIFIER_HINTS):
+    if lowered == "id" or lowered.endswith("id") or _matches_hint(name, IDENTIFIER_HINTS):
         return "identifier"
     if series is not None:
+        if pd.api.types.is_bool_dtype(series):
+            return "categorical"
         if pd.api.types.is_numeric_dtype(series):
+            # Revenue, prices, quantities and costs remain measures even when
+            # every row happens to have a different integer value.
+            if _matches_hint(name, METRIC_HINTS):
+                return "metric"
             unique_ratio = series.nunique(dropna=True) / max(len(series), 1)
             if unique_ratio > 0.92 and ("int" in dtype_text or lowered.endswith("id")):
                 return "identifier"
@@ -40,7 +47,7 @@ def infer_column_role(name: str, series: pd.Series | None = None, dtype: str | N
             return "categorical"
         return "dimension"
     if any(token in dtype_text for token in ("int", "real", "numeric", "float", "double", "decimal")):
-        return "metric" if _matches_hint(lowered, METRIC_HINTS) else "identifier" if _matches_hint(lowered, IDENTIFIER_HINTS) else "metric"
+        return "metric" if _matches_hint(name, METRIC_HINTS) else "identifier" if _matches_hint(name, IDENTIFIER_HINTS) else "metric"
     if any(token in dtype_text for token in ("date", "time")):
         return "time"
     return "dimension"

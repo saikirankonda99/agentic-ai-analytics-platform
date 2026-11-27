@@ -68,6 +68,15 @@ class AuthSessionRepository(Protocol):
     def save_user(self, username: str, payload: dict[str, Any]) -> None:
         """Persist user metadata discovered from runtime auth configuration."""
 
+    def get_session(self, session_token: str) -> dict[str, Any] | None:
+        """Read one current session without modifying any tokens."""
+
+    def create_session(self, session_token: str, payload: dict[str, Any]) -> None:
+        """Insert a new session without replacing any existing session."""
+
+    def delete_session(self, session_token: str) -> bool:
+        """Atomically delete one session and report whether it existed."""
+
     def list_sessions(self) -> dict[str, dict[str, Any]]:
         """Load auth session payloads keyed by token."""
 
@@ -223,6 +232,37 @@ class SQLiteAuthSessionRepository(SQLitePlatformStore):
                 """,
                 (username, json.dumps(payload, sort_keys=True)),
             )
+
+    def get_session(self, session_token: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM auth_sessions WHERE session_token = ?", (session_token,)
+            ).fetchone()
+        return json.loads(row["payload_json"]) if row is not None else None
+
+    def create_session(self, session_token: str, payload: dict[str, Any]) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO auth_sessions (
+                    session_token, user_id, workspace_id, payload_json, expires_at, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_token,
+                    payload.get("user_id", ""),
+                    payload.get("workspace_id", ""),
+                    json.dumps(payload, sort_keys=True),
+                    payload.get("expires_at", ""),
+                    payload.get("created_at", ""),
+                ),
+            )
+
+    def delete_session(self, session_token: str) -> bool:
+        with self.connect() as connection:
+            cursor = connection.execute("DELETE FROM auth_sessions WHERE session_token = ?", (session_token,))
+            return cursor.rowcount > 0
 
     def list_sessions(self) -> dict[str, dict[str, Any]]:
         with self.connect() as connection:
@@ -402,6 +442,37 @@ class PostgreSQLAuthSessionRepository(PostgreSQLPlatformStore):
                 """,
                 (username, json.dumps(payload, sort_keys=True)),
             )
+
+    def get_session(self, session_token: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM auth_sessions WHERE session_token = %s", (session_token,)
+            ).fetchone()
+        return dict(row["payload_json"]) if row is not None else None
+
+    def create_session(self, session_token: str, payload: dict[str, Any]) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO auth_sessions (
+                    session_token, user_id, workspace_id, payload_json, expires_at, created_at
+                )
+                VALUES (%s, %s, %s, %s::jsonb, %s, %s)
+                """,
+                (
+                    session_token,
+                    payload.get("user_id", ""),
+                    payload.get("workspace_id", ""),
+                    json.dumps(payload, sort_keys=True),
+                    payload.get("expires_at", ""),
+                    payload.get("created_at", ""),
+                ),
+            )
+
+    def delete_session(self, session_token: str) -> bool:
+        with self.connect() as connection:
+            cursor = connection.execute("DELETE FROM auth_sessions WHERE session_token = %s", (session_token,))
+            return cursor.rowcount > 0
 
     def list_sessions(self) -> dict[str, dict[str, Any]]:
         with self.connect() as connection:

@@ -11,7 +11,8 @@ services:
       WORKFLOW_DATABASE_URL: postgresql://analytics:analytics@postgres:5432/analytics
       POSTGRES_URL: postgresql://analytics:analytics@postgres:5432/analytics
       REDIS_URL: redis://redis:6379/0
-      VECTOR_DATABASE_URL: postgresql://analytics:analytics@postgres:5432/analytics
+      # Vector retrieval currently uses process-local memory; pgvector is not implemented.
+      VECTOR_DATABASE_URL: ""
       STARTUP_VALIDATION_STRICT: "true"
     ports:
       - "8000:8000"
@@ -30,10 +31,12 @@ services:
     env_file:
       - .env
     environment:
+      APP_ENV: production
       BACKEND_HTTP_URL: http://backend:8000
       BACKEND_WS_URL: ws://backend:8000
       DATABASE_URL: postgresql://analytics:analytics@postgres:5432/analytics
       WORKFLOW_DATABASE_URL: postgresql://analytics:analytics@postgres:5432/analytics
+      VECTOR_DATABASE_URL: ""
       STARTUP_VALIDATION_STRICT: "true"
     ports:
       - "8501:8501"

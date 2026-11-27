@@ -26,10 +26,13 @@ def login() -> None:
 def logout() -> None:
     session = st.session_state.get("auth_session", {})
     revoke_session(session.get("session_token"))
-    for key in ("user", "auth_session", "user_identity", "workspace_memory", "workspace_loaded", "workspace_session_id"):
-        if key in st.session_state:
-            del st.session_state[key]
+    clear_authenticated_state()
     st.rerun()
+
+
+def clear_authenticated_state() -> None:
+    """Discard all uploaded data, results and cached identity when authentication ends."""
+    st.session_state.clear()
 
 
 def render_auth_controls() -> None:
@@ -49,11 +52,13 @@ def render_auth_controls() -> None:
 
 def require_login() -> dict:
     session = st.session_state.get("auth_session")
-    if session and validate_session_token(session.get("session_token")):
-        st.session_state.user_identity = session
-        return session
+    identity = validate_session_token(session.get("session_token")) if session else None
+    if identity:
+        st.session_state.auth_session = identity
+        st.session_state.user_identity = identity
+        return identity
     if session:
+        clear_authenticated_state()
         st.warning("Session expired. Please log in again.")
-        st.session_state.pop("auth_session", None)
     login()
     st.stop()

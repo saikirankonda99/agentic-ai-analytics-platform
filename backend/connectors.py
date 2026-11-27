@@ -3,12 +3,14 @@ from __future__ import annotations
 import os
 import sqlite3
 import time
+from contextlib import closing
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from backend.config import settings
+from guardrails import is_safe_sql
 
 
 ConnectorKind = Literal["sqlite", "postgresql"]
@@ -144,7 +146,7 @@ class SQLiteConnector:
     def validate_connection(self) -> ConnectorHealth:
         started = time.perf_counter()
         try:
-            with sqlite3.connect(self.database_path) as connection:
+            with closing(self._connect_read_only()) as connection:
                 connection.execute("SELECT 1").fetchone()
             return _health(self.config, "healthy", started, "SQLite connector validated.")
         except Exception as exc:
@@ -155,14 +157,15 @@ class SQLiteConnector:
 
     def inspect_schema(self) -> dict[str, Any]:
         started = time.perf_counter()
-        with sqlite3.connect(self.database_path) as connection:
+        with closing(self._connect_read_only()) as connection:
             cursor = connection.cursor()
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;")
             table_names = [row[0] for row in cursor.fetchall()]
             tables = []
             formatted = []
             for table_name in table_names:
-                cursor.execute(f'PRAGMA table_info("{table_name}");')
+                quoted_name = table_name.replace('"', '""')
+                cursor.execute(f'PRAGMA table_info("{quoted_name}");')
                 columns = [
                     {"name": row[1], "type": row[2], "nullable": not bool(row[3]), "primary_key": bool(row[5])}
                     for row in cursor.fetchall()
@@ -181,12 +184,25 @@ class SQLiteConnector:
         }
 
     def execute_read(self, sql: str) -> tuple[list[str], list[Any]]:
-        with sqlite3.connect(self.database_path) as connection:
+        _require_read_query(sql)
+        max_rows = _safe_int(os.getenv("SQL_MAX_ROWS"), 10_000)
+        timeout_seconds = _safe_int(os.getenv("SQL_QUERY_TIMEOUT_SECONDS"), 10)
+        deadline = time.monotonic() + timeout_seconds
+        with closing(self._connect_read_only()) as connection:
+            connection.set_authorizer(_sqlite_read_authorizer)
+            connection.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
             cursor = connection.cursor()
             cursor.execute(sql)
-            rows = cursor.fetchall()
+            rows = cursor.fetchmany(max_rows + 1)
+            if len(rows) > max_rows:
+                raise ValueError(f"Query exceeded the {max_rows} row limit; add a narrower filter or LIMIT.")
             columns = [description[0] for description in cursor.description or []]
         return columns, rows
+
+    def _connect_read_only(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.database_path.resolve().as_uri() + "?mode=ro", uri=True)
+        connection.execute("PRAGMA query_only=ON")
+        return connection
 
 
 class PostgresConnector:
@@ -269,10 +285,17 @@ class PostgresConnector:
         }
 
     def execute_read(self, sql: str) -> tuple[list[str], list[Any]]:
+        _require_read_query(sql)
+        max_rows = _safe_int(os.getenv("SQL_MAX_ROWS"), 10_000)
+        timeout_ms = _safe_int(os.getenv("SQL_QUERY_TIMEOUT_SECONDS"), 10) * 1000
         with self._connect() as connection:
+            connection.read_only = True
             with connection.cursor() as cursor:
+                cursor.execute("SELECT set_config('statement_timeout', %s, true)", (str(timeout_ms),))
                 cursor.execute(sql)
-                rows = cursor.fetchall()
+                rows = cursor.fetchmany(max_rows + 1)
+                if len(rows) > max_rows:
+                    raise ValueError(f"Query exceeded the {max_rows} row limit; add a narrower filter or LIMIT.")
                 columns = [description.name for description in cursor.description or []]
         return columns, rows
 
@@ -412,6 +435,18 @@ def _safe_int(value: str | None, default: int) -> int:
         return max(1, int(value or default))
     except ValueError:
         return default
+
+
+def _require_read_query(sql: str) -> None:
+    if not is_safe_sql(sql):
+        raise ValueError("Only one read-only SELECT or WITH query is allowed.")
+
+
+def _sqlite_read_authorizer(action: int, arg1: str | None, arg2: str | None, database: str | None, source: str | None) -> int:
+    allowed = {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_RECURSIVE}
+    if action == sqlite3.SQLITE_FUNCTION and (arg2 or "").lower() in {"load_extension", "writefile", "readfile"}:
+        return sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK if action in allowed else sqlite3.SQLITE_DENY
 
 
 connector_registry = ConnectorRegistry()

@@ -22,6 +22,7 @@ def render_onboarding_workspace_panel(services: ViewServices) -> None:
         st.success("Sample dataset is ready.")
     if c2.button("Try guided query", help="Loads a good first question into the command workspace.", width="stretch"):
         st.session_state.command_text = "Revenue by country"
+        st.session_state.command_input = "Revenue by country"
         memory = update_onboarding_step(st.session_state.get("workspace_memory", {}), "first_query")
         st.session_state.workspace_memory = memory
         services.persist_workspace_memory()

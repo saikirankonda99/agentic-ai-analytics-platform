@@ -7,9 +7,36 @@
 [![E2E](https://img.shields.io/badge/e2e-playwright-green.svg)](tests/e2e)
 [![License](https://img.shields.io/badge/license-not%20specified-lightgrey.svg)](#license)
 
-Agentic AI Analytics Platform is a production-oriented natural-language analytics workspace. It combines a Streamlit operator UI, a FastAPI control plane, safe SQL generation, workflow telemetry, workspace persistence, connector diagnostics, and browser-based regression testing.
+Agentic AI Analytics Platform is an in-development analytics workspace with a working sales CSV demo and a separate natural-language SQL workflow over the bundled Chinook database. It combines a Streamlit UI, a FastAPI control plane, SQL validation, workspace persistence, and automated tests.
 
 The project is intentionally scoped as an engineering reference implementation: it favors explicit orchestration, validation, diagnostics, and testability over opaque automation.
+
+## Small-business sales demo
+
+Load the included synthetic retail dataset, ask a supported sales question, inspect the answer, and export the result. **No API key is needed for CSV calculations.**
+
+1. Follow [Local Setup](#local-setup), then start Streamlit.
+2. For local development, sign in as `admin` with `admin123`, or the password configured in `AUTH_ADMIN_PASSWORD`.
+3. Click **Load retail demo** in the sidebar.
+4. Click **Revenue by Product**, **Monthly Revenue**, or **Total Revenue**.
+5. Download the full result CSV and executive summary from the result section.
+
+The 12 sample transactions total **352.00 USD**. Product totals are Coffee Beans **180.00**, Tea **100.00**, and Mug **72.00**. Monthly totals are January **144.00**, February **117.00**, and March **91.00**. These are synthetic demonstration results, not customer outcomes.
+
+Own-file uploads support total revenue, revenue by product/month/country, units sold by product, and a sales summary. Every row is included in the calculation. Unsupported questions receive a message instead of an unrelated answer. See [Sales Demo and Milestone Status](docs/small-business-milestone.md) for the CSV contract, validation, and remaining work.
+
+### Current implementation boundaries
+
+| Path | Current behavior |
+|---|---|
+| Sales CSV in Streamlit | Local deterministic aggregation, charts, result exports, and saved workspace metadata |
+| Database questions in Streamlit | Model-generated SQL against the bundled example database; requires an API key and live-model evaluation |
+| FastAPI `POST /execute` | Workflow lifecycle **simulation**, explicitly labeled in responses; does not run the SQL pipeline |
+| Monitoring | Example-database checks triggered while the app is active; no durable background scheduler |
+| Redis and pgvector | Integration scaffolding; no implemented worker consumer or pgvector retrieval |
+| Customer deployment | Not ready for shared customer data; per-customer database/memory isolation and deployment validation remain |
+
+Use synthetic data for the demo. Production mode requires explicit users with hashed passwords and refuses the development login defaults. See [Deployment](docs/deployment.md).
 
 ## Live Links
 
@@ -201,7 +228,9 @@ Use Python 3.11.
 git clone https://github.com/saikirankonda99/agentic-ai-analytics-platform.git
 cd agentic-ai-analytics-platform
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-lock.txt
 ```
 
 Configure environment:
@@ -234,9 +263,10 @@ Validate health:
 
 ```bash
 curl http://127.0.0.1:8000/health
-curl http://127.0.0.1:8000/diagnostics
 curl http://127.0.0.1:8501/_stcore/health
 ```
+
+Private API endpoints require a valid session from `POST /auth/login`. Send its token as `X-Session-Token` or `Authorization: Bearer ...`. Diagnostics and connector endpoints require an admin role; workspace endpoints check ownership and write permissions.
 
 ## Persistence Setup
 
