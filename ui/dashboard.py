@@ -439,7 +439,7 @@ def render_command_bar() -> str | None:
     csv_mode = "uploaded_df" in st.session_state
     available_questions = st.session_state.get("csv_import_available_questions", SUPPORTED_QUESTIONS)
     if csv_mode:
-        st.caption("Available CSV questions: " + "; ".join(available_questions) + ". Each answer uses the entire upload.")
+        st.caption("Choose a sales question below. Each answer uses every uploaded row.")
     with st.form("command_bar_form", clear_on_submit=False):
         query_col, action_col = st.columns([6, 1.2], vertical_alignment="bottom")
         with query_col:
@@ -452,18 +452,36 @@ def render_command_bar() -> str | None:
         with action_col:
             submitted = st.form_submit_button("Run", width="stretch")
 
-    c1, c2, c3 = st.columns(3)
-    first_prompt = "Total revenue" if csv_mode else "Top 10 customers by invoices"
-    second_prompt = "Revenue by product" if csv_mode else "Revenue by country"
-    third_prompt = "Revenue by month" if csv_mode else "Top 10 tracks"
-    if c1.button("Total Revenue" if csv_mode else "Top Customers", width="stretch", on_click=_set_command_prompt, args=(first_prompt,)):
-        prompt = first_prompt
-    if c2.button("Revenue by Product" if csv_mode else "Revenue by Country", width="stretch", on_click=_set_command_prompt, args=(second_prompt,),
-                 disabled=csv_mode and "Revenue by product" not in available_questions):
-        prompt = second_prompt
-    if c3.button("Monthly Revenue" if csv_mode else "Top Tracks", width="stretch", on_click=_set_command_prompt, args=(third_prompt,),
-                 disabled=csv_mode and "Revenue by month" not in available_questions):
-        prompt = third_prompt
+    if csv_mode:
+        actions = [
+            ("Total Revenue", "Total revenue", ()),
+            ("Revenue by Product", "Revenue by product", ("product",)),
+            ("Monthly Revenue", "Revenue by month", ("date",)),
+            ("Sales Summary", "Sales summary", ()),
+            ("Revenue by Country", "Revenue by country", ("country",)),
+            ("Units Sold by Product", "Units sold by product", ("product", "quantity")),
+        ]
+    else:
+        actions = [
+            ("Top Customers", "Top 10 customers by invoices", ()),
+            ("Revenue by Country", "Revenue by country", ()),
+            ("Top Tracks", "Top 10 tracks", ()),
+        ]
+    unavailable = []
+    for start in range(0, len(actions), 3):
+        for column, (label, action, required) in zip(st.columns(3), actions[start:start + 3]):
+            disabled = csv_mode and action not in available_questions
+            help_text = None
+            if disabled:
+                missing = [field for field in required if field not in st.session_state.uploaded_df.columns]
+                fields = ", ".join(missing or required)
+                help_text = f"Upload your file again and map {fields} during review to enable this question."
+                unavailable.append(f"{label} ({fields})")
+            if column.button(label, width="stretch", on_click=_set_command_prompt, args=(action,),
+                             disabled=disabled, help=help_text):
+                prompt = action
+    if unavailable:
+        st.caption("Unavailable questions: " + "; ".join(unavailable) + ". Upload your file again and map the listed columns to enable them.")
 
     if submitted and question.strip():
         st.session_state.command_text = question.strip()

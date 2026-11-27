@@ -1660,7 +1660,7 @@ def _render_analytics_results(services):
 
     if df is None:
         if csv_mode:
-            st.info("Your sales data is loaded. Choose Total Revenue, Revenue by Product, or Monthly Revenue above.")
+            st.info("Your sales data is loaded. Choose Total Revenue, Sales Summary, or another available question above.")
         else:
             st.info("Load the retail demo from the sidebar to try sales calculations, or ask a question about the example database.")
         return

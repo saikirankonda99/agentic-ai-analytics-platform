@@ -35,6 +35,21 @@ def test_sales_demo_results_failure_workspace_switch_and_logout(isolated_auth_co
     result = app.session_state["latest_df"]
     assert dict(zip(result["month"], result["revenue"])) == {"2026-01": 144.0, "2026-02": 117.0, "2026-03": 91.0}
 
+    _click(app, "Revenue by Country")
+    result = app.session_state["latest_df"]
+    assert dict(zip(result["country"], result["revenue"])) == {"USA": 256.0, "Canada": 74.0, "Germany": 22.0}
+    assert app.session_state["command_input"] == "Revenue by country"
+
+    _click(app, "Units Sold by Product")
+    result = app.session_state["latest_df"]
+    assert dict(zip(result["product"], result["units"])) == {"Coffee Beans": 12.0, "Tea": 10.0, "Mug": 6.0}
+    assert app.session_state["command_input"] == "Units sold by product"
+
+    _click(app, "Sales Summary")
+    assert app.session_state["latest_df"].to_dict("records") == [{"revenue": 352.0, "sales_rows": 12, "units": 28.0}]
+    assert app.session_state["command_input"] == "Sales summary"
+    assert app.session_state["workflow_telemetry"]["total_tokens"] == 0
+
     next(field for field in app.text_input if field.label == "Command").set_value("Predict sales next year as a line chart")
     _click(app, "Run")
     assert app.session_state["latest_df"] is None

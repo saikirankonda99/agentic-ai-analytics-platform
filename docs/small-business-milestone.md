@@ -16,6 +16,8 @@ python -m streamlit run app.py --server.port 8501
 
 In development mode, log in using `admin` and `admin123`, or your configured development password. Select **Load retail demo** in the sidebar, then **Revenue by Product**. The active data caption identifies the synthetic file and its row count. Select **Monthly Revenue** or **Total Revenue** to change the view. Download the full CSV and executive summary below the result.
 
+All six supported sales questions have buttons. The second row provides **Sales Summary**, **Revenue by Country**, and **Units Sold by Product**. Questions that require unmapped columns are disabled; the explanation below the buttons and their help text identify the missing fields. Upload the file again and select those columns during review to enable the question.
+
 The file `data/demo/retail_sales.csv` contains 12 synthetic transactions. Its expected answers are:
 
 | Question | Expected answer |
