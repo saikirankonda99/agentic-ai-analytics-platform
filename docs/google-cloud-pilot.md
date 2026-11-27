@@ -72,6 +72,8 @@ In the authenticated Google Cloud Console, open Secret Manager and add values pr
 
 Record the numeric version of each secret, not its value. Secret values must be a single line. The runtime helper requires explicit numeric versions so a new secret version cannot silently change the database password. Changing PostgreSQL's initialized password requires coordinated database and application rotation; replacing only its secret is insufficient.
 
+Alternatively, from a reviewed checkout in authenticated Cloud Shell, run `python3 scripts/gcp_seed_secrets.py --project "$ANALYTICS_PROJECT"` yourself in the terminal. The helper privately prompts for your existing OpenAI key and two different passwords of at least 16 characters, creating login names `admin` and `analyst` in team `pilot`. It hashes the login passwords, generates the database password in memory, and sends values to the three existing secrets through gcloud's standard input. Input is hidden; only secret names and numeric versions are printed. It refuses an unsuitable terminal or any secret that already has a version, including disabled/destroyed versions. Keep the login passwords in your password manager. Run only one setup at a time: the three writes are not transactional and do not coordinate concurrent operators. If interrupted or partially successful, inspect version metadata and resolve the partial setup; do not rerun to rotate passwords. No real credentials are included in this helper or its tests.
+
 ## 4. Prepare the VM and pinned application
 
 From Cloud Shell, connect with IAP:
