@@ -56,7 +56,7 @@ def select_csv_import_option(page: Page, label: str, option: str) -> None:
     control = page.get_by_test_id("stSelectbox").filter(has=page.get_by_text(label, exact=True))
     control.get_by_role("combobox").click()
     page.get_by_role("option", name=option, exact=True).click()
-    expect(control.get_by_text(option, exact=True)).to_be_visible()
+    expect(control.get_by_role("combobox")).to_have_value(option)
 
 
 def download_full_csv(page: Page) -> list[dict[str, str]]:

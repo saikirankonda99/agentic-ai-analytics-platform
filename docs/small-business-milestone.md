@@ -57,7 +57,7 @@ Limits are 10 MB, 50,000 rows, and 100 columns. Money is calculated from origina
 
 The selected revenue mode determines the calculation. Users should make clear whether their selected line amount includes discounts, tax, or shipping. The demo does not reconcile multiple amount definitions or automatically identify duplicate orders.
 
-The active dataset stays selected until a replacement is uploaded or another data source is selected. A new upload clears the current answer and must pass review before analysis resumes. Removing a pending file also cancels its review. Switching workspace, clearing the session, or logging out clears the uploaded data, pending review, and mapping choices. Unsupported or failed questions clear the previous answer so it is not displayed as the new result. Scheduled database checks are available when the example database is selected.
+The active dataset stays selected until a replacement is uploaded or another data source is selected. A new upload clears the current answer and must pass review before analysis resumes. Removing a file pauses the review until another file is selected or **Cancel upload** is used. Switching workspace, clearing the session, or logging out clears the uploaded data, pending review, and mapping choices. Unsupported or failed questions clear the previous answer so it is not displayed as the new result. Scheduled database checks are available when the example database is selected.
 
 ## Engineering corrections
 

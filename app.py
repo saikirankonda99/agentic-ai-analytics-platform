@@ -541,8 +541,8 @@ def clear_analysis_result():
         st.session_state[key] = value
 
 
-def stage_sales_upload(content, filename, fingerprint):
-    """Read a candidate file without making it available to analysis yet."""
+def begin_sales_upload(filename=None, fingerprint=None):
+    """Pause analysis without changing the uploader during an in-flight transfer."""
     clear_import_review()
     clear_analysis_result()
     st.session_state.pop("uploaded_df", None)
@@ -558,6 +558,12 @@ def stage_sales_upload(content, filename, fingerprint):
     st.session_state.csv_upload_error = ""
     st.session_state.csv_import_fingerprint = fingerprint
     st.session_state.csv_import_name = filename
+    st.session_state.csv_import_pending = True
+
+
+def stage_sales_upload(content, filename, fingerprint):
+    """Read a candidate file without making it available to analysis yet."""
+    begin_sales_upload(filename, fingerprint)
     try:
         frame = read_sales_csv(content)
     except CSVAnalysisError as exc:
@@ -566,6 +572,41 @@ def stage_sales_upload(content, filename, fingerprint):
     else:
         st.session_state.csv_import_raw = frame
         st.session_state.csv_import_pending = True
+
+
+def cancel_sales_upload():
+    """Run as a widget callback, before navigation controls are reconstructed."""
+    clear_session()
+    st.session_state.top_navigation = "Overview"
+    st.session_state.workspace_route = "Overview"
+
+
+def render_pending_sales_upload():
+    st.session_state.pending_monitoring_run = False
+    if st.session_state.get("csv_import_raw") is None:
+        st.info("Choose a CSV file to continue, or cancel this upload.")
+        st.button("Cancel upload", on_click=cancel_sales_upload)
+        return
+    review = render_sales_import_review(
+        st.session_state.csv_import_raw,
+        st.session_state.csv_import_name,
+        st.session_state.csv_import_fingerprint,
+    )
+    if st.session_state.get("csv_import_cancel_requested"):
+        clear_session()
+        st.rerun()
+    if review is not None:
+        st.session_state.uploaded_df = review.frame
+        st.session_state.uploaded_name = st.session_state.csv_import_name
+        st.session_state.uploaded_fingerprint = st.session_state.csv_import_fingerprint
+        st.session_state.csv_import_available_questions = review.available_questions
+        st.session_state.csv_import_pending = False
+        st.session_state.pop("csv_import_raw", None)
+        st.session_state.csv_import_applied_notice = True
+        st.session_state.csv_upload_error = ""
+        st.session_state.latest_mode = "csv"
+        profile_active_dataframe(review.frame, f"Uploaded CSV: {st.session_state.uploaded_name}")
+        st.rerun()
 
 
 def configure_workspace_session(user_id, team_id, role, workspace_scope="Personal", display_name=None):
@@ -1868,10 +1909,10 @@ if sidebar_state["uploaded_file"] is not None:
     uploaded_fingerprint = hashlib.sha256(uploaded_name.encode("utf-8") + b"\0" + uploaded_bytes).hexdigest()
     if st.session_state.get("csv_import_fingerprint") != uploaded_fingerprint:
         stage_sales_upload(uploaded_bytes, uploaded_name, uploaded_fingerprint)
-elif st.session_state.get("csv_import_pending") or st.session_state.get("csv_upload_error"):
-    # Removing a candidate from the uploader also discards its pending review.
-    clear_session()
-    st.rerun()
+elif st.session_state.get("csv_import_pending") or st.session_state.get("csv_upload_error") or st.session_state.get("csv_import_fingerprint"):
+    # Replacement uploads briefly return None while their bytes are transferred.
+    # Resetting the widget generation here would discard the incoming new file.
+    begin_sales_upload()
 else:
     st.session_state.csv_import_fingerprint = None
 
@@ -1879,7 +1920,10 @@ if st.session_state.pop("csv_import_applied_notice", False):
     st.success("CSV ready for analysis.")
 
 if st.session_state.get("csv_import_pending"):
-    st.caption(f"Pending data: {st.session_state.csv_import_name} · Review and apply the column choices below.")
+    if st.session_state.get("csv_import_raw") is not None:
+        st.caption(f"Pending data: {st.session_state.csv_import_name} · Review and apply the column choices below.")
+    else:
+        st.caption("Upload pending · Analysis will resume after a file is reviewed or the upload is canceled.")
 elif "uploaded_df" in st.session_state:
     st.caption(f"Active data: {st.session_state.uploaded_name} · {len(st.session_state.uploaded_df):,} sales rows · Local calculations, no model calls.")
 elif st.session_state.get("csv_upload_error"):
@@ -1914,32 +1958,10 @@ view_services = ViewServices(
 
 nav = st.session_state.get("workspace_route") or sidebar_state["nav"]
 if st.session_state.get("csv_import_pending"):
-    st.session_state.pending_monitoring_run = False
-    review = render_sales_import_review(
-        st.session_state.csv_import_raw,
-        st.session_state.csv_import_name,
-        st.session_state.csv_import_fingerprint,
-    )
-    if st.session_state.get("csv_import_cancel_requested"):
-        clear_session()
-        st.rerun()
-    if review is not None:
-        st.session_state.uploaded_df = review.frame
-        st.session_state.uploaded_name = st.session_state.csv_import_name
-        st.session_state.uploaded_fingerprint = st.session_state.csv_import_fingerprint
-        st.session_state.csv_import_available_questions = review.available_questions
-        st.session_state.csv_import_pending = False
-        st.session_state.pop("csv_import_raw", None)
-        st.session_state.csv_import_applied_notice = True
-        st.session_state.csv_upload_error = ""
-        st.session_state.latest_mode = "csv"
-        profile_active_dataframe(review.frame, f"Uploaded CSV: {st.session_state.uploaded_name}")
-        st.rerun()
+    render_pending_sales_upload()
 elif st.session_state.get("csv_upload_error"):
     st.info("Upload a valid sales CSV or choose another data source from the sidebar.")
-    if st.button("Cancel upload"):
-        clear_session()
-        st.rerun()
+    st.button("Cancel upload", on_click=cancel_sales_upload)
 elif nav == "Overview":
     render_analytics_workspace(client, view_services)
 elif nav == "Operations":
