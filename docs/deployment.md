@@ -57,6 +57,8 @@ All application processes need matching `AUTH_USERS`, `APP_ENV=production`, `STA
 
 For Render, use Docker web services for the frontend/API and a background worker for analytics; maintenance can be a supervised worker or a cron running `python -m backend.maintenance --once`. Review the account's current resource plan and secret configuration before creating services. Render's [Blueprint reference](https://render.com/docs/blueprint-spec) and [environment/secret documentation](https://render.com/docs/configure-environment-variables) describe those provider settings. This repository has not provisioned or updated the existing Render deployment.
 
+The root `render.yaml` and [Render release proposal](render-release.md) prepare a separate paid pilot stack, including its current cost estimate, private secret-entry steps, and preservation of the existing service's local data. Review and approve the provider's concrete plan before applying it.
+
 The default memory store uses ordinary PostgreSQL. To enable optional pgvector, install the extension administratively and set `VECTOR_DATABASE_URL` to that database. The application does not assume extension-install privileges.
 
 ## Verify the deployed revision
