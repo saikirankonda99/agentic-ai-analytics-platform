@@ -1,45 +1,56 @@
+x-app: &app
+  image: agentic-analytics-backend:latest
+  build:
+    context: .
+    dockerfile: Dockerfile.backend
+  env_file: [.env]
+  environment: &app-environment
+    APP_ENV: production
+    DATABASE_URL: postgresql://analytics:${POSTGRES_PASSWORD:?Set a URL-safe POSTGRES_PASSWORD in .env}@postgres:5432/analytics
+    WORKFLOW_DATABASE_URL: postgresql://analytics:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/analytics
+    POSTGRES_URL: ""
+    VECTOR_DATABASE_URL: ""
+    ANALYTICS_WORKER_MODE: external
+    STARTUP_VALIDATION_STRICT: "true"
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+
 services:
   backend:
-    build:
-      context: .
-      dockerfile: Dockerfile.backend
-    env_file:
-      - .env
-    environment:
-      APP_ENV: production
-      DATABASE_URL: postgresql://analytics:analytics@postgres:5432/analytics
-      WORKFLOW_DATABASE_URL: postgresql://analytics:analytics@postgres:5432/analytics
-      POSTGRES_URL: postgresql://analytics:analytics@postgres:5432/analytics
-      REDIS_URL: redis://redis:6379/0
-      # Vector retrieval currently uses process-local memory; pgvector is not implemented.
-      VECTOR_DATABASE_URL: ""
-      STARTUP_VALIDATION_STRICT: "true"
-    ports:
-      - "8000:8000"
-    volumes:
-      - workflow-data:/app/data
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+    <<: *app
+    ports: ["127.0.0.1:8000:8000"]
 
   frontend:
+    <<: *app
+    image: agentic-analytics-frontend:latest
     build:
       context: .
       dockerfile: Dockerfile.frontend
-    env_file:
-      - .env
     environment:
-      APP_ENV: production
+      <<: *app-environment
       BACKEND_HTTP_URL: http://backend:8000
       BACKEND_WS_URL: ws://backend:8000
-      DATABASE_URL: postgresql://analytics:analytics@postgres:5432/analytics
-      WORKFLOW_DATABASE_URL: postgresql://analytics:analytics@postgres:5432/analytics
-      VECTOR_DATABASE_URL: ""
-      STARTUP_VALIDATION_STRICT: "true"
-    ports:
-      - "8501:8501"
+    ports: ["127.0.0.1:8501:8501"]
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "backend.workers"]
+    healthcheck:
+      disable: true
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  maintenance:
+    <<: *app
+    command: ["python", "-m", "backend.maintenance", "--interval", "3600"]
+    healthcheck:
+      disable: true
     depends_on:
       backend:
         condition: service_healthy
@@ -48,32 +59,15 @@ services:
     image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: analytics
-      POSTGRES_PASSWORD: analytics
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
       POSTGRES_DB: analytics
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
+    volumes: ["postgres-data:/var/lib/postgresql/data"]
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U analytics -d analytics"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes"]
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      retries: 10
 
 volumes:
   postgres-data:
-  redis-data:
-  workflow-data:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import sqlite3
 import time
 from contextlib import closing
@@ -24,6 +25,9 @@ class ConnectorConfig:
     name: str
     enabled: bool = True
     metadata: dict[str, Any] = field(default_factory=dict)
+    organization_id: str | None = None
+    workspace_ids: tuple[str, ...] = ()
+    public_demo: bool = False
 
     def public_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -40,6 +44,9 @@ class SQLiteConnectorConfig(ConnectorConfig):
         database_path: str = "data/chinook.db",
         enabled: bool = True,
         metadata: dict[str, Any] | None = None,
+        organization_id: str | None = None,
+        workspace_ids: tuple[str, ...] = (),
+        public_demo: bool | None = None,
     ) -> None:
         object.__setattr__(self, "connector_id", connector_id)
         object.__setattr__(self, "kind", "sqlite")
@@ -47,6 +54,9 @@ class SQLiteConnectorConfig(ConnectorConfig):
         object.__setattr__(self, "enabled", enabled)
         object.__setattr__(self, "metadata", metadata or {})
         object.__setattr__(self, "database_path", database_path)
+        object.__setattr__(self, "organization_id", organization_id)
+        object.__setattr__(self, "workspace_ids", tuple(workspace_ids))
+        object.__setattr__(self, "public_demo", _is_bundled_database(database_path) if public_demo is None else public_demo)
 
 
 @dataclass(frozen=True)
@@ -66,6 +76,8 @@ class PostgresConnectorConfig(ConnectorConfig):
         sslmode: str | None = None,
         enabled: bool = True,
         metadata: dict[str, Any] | None = None,
+        organization_id: str | None = None,
+        workspace_ids: tuple[str, ...] = (),
     ) -> None:
         object.__setattr__(self, "connector_id", connector_id)
         object.__setattr__(self, "kind", "postgresql")
@@ -76,6 +88,9 @@ class PostgresConnectorConfig(ConnectorConfig):
         object.__setattr__(self, "schema", schema)
         object.__setattr__(self, "connect_timeout_seconds", connect_timeout_seconds)
         object.__setattr__(self, "sslmode", sslmode)
+        object.__setattr__(self, "organization_id", organization_id)
+        object.__setattr__(self, "workspace_ids", tuple(workspace_ids))
+        object.__setattr__(self, "public_demo", False)
 
     def public_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -220,7 +235,7 @@ class PostgresConnector:
                     cursor.fetchone()
             return _health(self.config, "healthy", started, "PostgreSQL connector validated.")
         except Exception as exc:
-            return _health(self.config, "unavailable", started, f"PostgreSQL validation failed: {type(exc).__name__}: {exc}")
+            return _health(self.config, "unavailable", started, f"PostgreSQL validation failed: {type(exc).__name__}.")
 
     def health_check(self) -> ConnectorHealth:
         return self.validate_connection()
@@ -312,16 +327,74 @@ class PostgresConnector:
 
 class ConnectorRegistry:
     def __init__(self, connectors: dict[str, DataConnector] | None = None) -> None:
-        self._connectors = connectors or default_connectors()
+        self._connectors = default_connectors() if connectors is None else connectors
 
     def list_connectors(self) -> list[dict[str, Any]]:
         return [connector.config.public_dict() for connector in self._connectors.values()]
 
     def get(self, connector_id: str = "sqlite") -> DataConnector:
+        """Administrative configuration access; customer execution must use get_for_workspace."""
         try:
             return self._connectors[connector_id]
         except KeyError as exc:
             raise ValueError(f"Unknown connector: {connector_id}") from exc
+
+    def get_for_workspace(
+        self, connector_id: str, *, organization_id: str, workspace_id: str,
+    ) -> DataConnector:
+        """Resolve a server-configured grant, never a caller-supplied DSN or tenant label."""
+        if not organization_id or not workspace_id:
+            raise PermissionError("An authenticated organization and workspace are required.")
+        connector = self.get(connector_id)
+        if not connector.config.enabled:
+            raise PermissionError("This connector is disabled.")
+        if _is_public_demo_connector(connector):
+            return connector
+        config = connector.config
+        if config.organization_id != organization_id or workspace_id not in config.workspace_ids:
+            raise PermissionError("This workspace is not authorized for the connector.")
+        return connector
+
+    def get_public_demo(self, connector_id: str = "sqlite") -> DataConnector:
+        connector = self.get(connector_id)
+        if not connector.config.enabled or not _is_public_demo_connector(connector):
+            raise PermissionError("Unscoped queries are restricted to the bundled example database.")
+        return connector
+
+    def list_for_workspace(self, *, organization_id: str, workspace_id: str) -> list[dict[str, Any]]:
+        if not organization_id or not workspace_id:
+            raise PermissionError("An authenticated organization and workspace are required.")
+        visible = []
+        for connector_id in self._connectors:
+            try:
+                connector = self.get_for_workspace(
+                    connector_id, organization_id=organization_id, workspace_id=workspace_id,
+                )
+            except PermissionError:
+                continue
+            visible.append(connector.config.public_dict())
+        return visible
+
+    def diagnostics_for_workspace(
+        self, *, organization_id: str, workspace_id: str, validate: bool = True,
+    ) -> dict[str, Any]:
+        connectors = self.list_for_workspace(organization_id=organization_id, workspace_id=workspace_id)
+        health = {}
+        if validate:
+            for item in connectors:
+                connector = self.get_for_workspace(
+                    item["connector_id"], organization_id=organization_id, workspace_id=workspace_id,
+                )
+                health[item["connector_id"]] = connector.health_check().as_dict()
+        return {
+            "connector_count": len(connectors), "connectors": connectors, "health": health,
+            "configuration": {
+                "scope": "workspace",
+                "postgres_configured": any(item["kind"] == "postgresql" for item in connectors),
+                "postgres_schema": ", ".join(item["schema"] for item in connectors if item["kind"] == "postgresql"),
+                "sqlite_database_path": ", ".join(item["database_path"] for item in connectors if item["kind"] == "sqlite"),
+            },
+        }
 
     def validate(self, connector_id: str) -> dict[str, Any]:
         return self.get(connector_id).validate_connection().as_dict()
@@ -352,8 +425,12 @@ def default_connectors() -> dict[str, DataConnector]:
     postgres_schema = os.getenv("POSTGRES_SCHEMA", "public")
     postgres_timeout = _safe_int(os.getenv("POSTGRES_CONNECT_TIMEOUT_SECONDS"), 5)
     postgres_sslmode = os.getenv("POSTGRES_SSLMODE")
-    return {
-        "sqlite": SQLiteConnector(SQLiteConnectorConfig(database_path=sqlite_path)),
+    connectors: dict[str, DataConnector] = {
+        "sqlite": SQLiteConnector(SQLiteConnectorConfig(
+            database_path=sqlite_path,
+            organization_id=os.getenv("SQLITE_ORGANIZATION_ID"),
+            workspace_ids=_workspace_ids(os.getenv("SQLITE_WORKSPACE_IDS", "[]")),
+        )),
         "postgresql": PostgresConnector(
             PostgresConnectorConfig(
                 dsn=settings.postgres_url or os.getenv("POSTGRES_URL"),
@@ -361,9 +438,47 @@ def default_connectors() -> dict[str, DataConnector]:
                 connect_timeout_seconds=postgres_timeout,
                 sslmode=postgres_sslmode,
                 enabled=bool(settings.postgres_url or os.getenv("POSTGRES_URL")),
+                organization_id=os.getenv("POSTGRES_ORGANIZATION_ID"),
+                workspace_ids=_workspace_ids(os.getenv("POSTGRES_WORKSPACE_IDS", "[]")),
             )
         ),
     }
+    # Only server configuration can add private connectors. Connection credentials
+    # are referenced through environment variable names, never supplied by API clients.
+    configured = os.getenv("ANALYTICS_CONNECTORS_JSON", "[]")
+    try:
+        definitions = json.loads(configured)
+        if not isinstance(definitions, list):
+            raise ValueError
+        for definition in definitions:
+            if not isinstance(definition, dict):
+                raise ValueError
+            connector_id = definition["connector_id"]
+            owner = definition["organization_id"]
+            workspaces = _workspace_ids(definition["workspace_ids"])
+            if not isinstance(connector_id, str) or not connector_id or connector_id in connectors:
+                raise ValueError
+            if not isinstance(owner, str) or not owner or not workspaces:
+                raise ValueError
+            common = {"connector_id": connector_id, "name": definition.get("name", connector_id),
+                      "organization_id": owner, "workspace_ids": workspaces}
+            if definition["kind"] == "sqlite":
+                connectors[connector_id] = SQLiteConnector(SQLiteConnectorConfig(
+                    **common, database_path=definition["database_path"], public_demo=False,
+                ))
+            elif definition["kind"] == "postgresql":
+                dsn_env = definition["dsn_env"]
+                if not isinstance(dsn_env, str) or not dsn_env:
+                    raise ValueError
+                dsn = os.getenv(dsn_env)
+                connectors[connector_id] = PostgresConnector(PostgresConnectorConfig(
+                    **common, dsn=dsn, schema=definition.get("schema", "public"), enabled=bool(dsn),
+                ))
+            else:
+                raise ValueError
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Invalid server analytics connector configuration.") from exc
+    return connectors
 
 
 def get_connector_registry() -> ConnectorRegistry:
@@ -423,11 +538,37 @@ def _telemetry(
 
 
 def _redact_dsn(dsn: str) -> str:
-    if "@" not in dsn:
-        return dsn
+    if "@" not in dsn or "://" not in dsn:
+        return "[configured]"
     prefix, suffix = dsn.rsplit("@", 1)
     scheme = prefix.split("://", 1)[0] if "://" in prefix else "postgresql"
-    return f"{scheme}://***:***@{suffix}"
+    return f"{scheme}://***:***@{suffix.split('?', 1)[0].split('#', 1)[0]}"
+
+
+def _workspace_ids(value: str | list[str] | tuple[str, ...]) -> tuple[str, ...]:
+    try:
+        items = json.loads(value) if isinstance(value, str) else value
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Workspace grants must be a JSON array of workspace IDs.") from exc
+    if not isinstance(items, (list, tuple)) or any(not isinstance(item, str) or not item.strip() for item in items):
+        raise ValueError("Workspace grants must be a JSON array of workspace IDs.")
+    return tuple(items)
+
+
+def _is_bundled_database(database_path: str) -> bool:
+    project = Path(__file__).resolve().parent.parent
+    path = Path(database_path)
+    if not path.is_absolute():
+        path = project / path
+    return path.resolve() == (project / "data" / "chinook.db").resolve()
+
+
+def _is_public_demo_connector(connector: DataConnector) -> bool:
+    return (
+        isinstance(connector, SQLiteConnector)
+        and connector.config.public_demo
+        and _is_bundled_database(connector.config.database_path)
+    )
 
 
 def _safe_int(value: str | None, default: int) -> int:

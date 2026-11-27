@@ -7,9 +7,9 @@
 [![E2E](https://img.shields.io/badge/e2e-playwright-green.svg)](tests/e2e)
 [![License](https://img.shields.io/badge/license-not%20specified-lightgrey.svg)](#license)
 
-Agentic AI Analytics Platform is an in-development analytics workspace with a working sales CSV demo and a separate natural-language SQL workflow over the bundled Chinook database. It combines a Streamlit UI, a FastAPI control plane, SQL validation, workspace persistence, and automated tests.
+Agentic AI Analytics Platform (Sales Studio) combines a customer sales dashboard, an administrator workspace, a real queued analytics API, and durable PostgreSQL/SQLite storage. Customers can review sales CSVs, check exact totals, explore charts, and download reports. The separate AI workflow generates validated, read-only SQL against an explicitly authorized database.
 
-The project is intentionally scoped as an engineering reference implementation: it favors explicit orchestration, validation, diagnostics, and testability over opaque automation.
+The repository is a release candidate with explicit validation gates. See [Release readiness](docs/release-readiness.md) for what is implemented, what automated checks cover, and the remaining live AI, hosted deployment, and business-data acceptance steps.
 
 ## Small-business sales demo
 
@@ -36,16 +36,17 @@ Own-file uploads support total revenue, revenue by product/month/country, units 
 | Sales CSV in Streamlit | Local deterministic aggregation, charts, result exports, and saved workspace metadata |
 | Optional CSV AI review | Explicit OpenAI request to prioritize verified aggregate facts and suggested checks; requires a server-side API key. No raw rows, arbitrary Q&A, causal claims, or automatic business actions |
 | Database questions in Streamlit | Model-generated SQL against the bundled example database; requires an API key and live-model evaluation |
-| FastAPI `POST /execute` | Workflow lifecycle **simulation**, explicitly labeled in responses; does not run the SQL pipeline |
+| FastAPI `POST /execute` | Authenticated, authorized real analytics queued durably; poll workflow status and `/result`. The lifecycle demo is separately labeled at `/execute/simulation` |
 | Monitoring | Example-database checks triggered while the app is active; no durable background scheduler |
-| Redis and pgvector | Integration scaffolding; no implemented worker consumer or pgvector retrieval |
-| Customer deployment | Not ready for shared customer data; per-customer database/memory isolation and deployment validation remain |
+| Background execution | SQL-backed worker with leases, retries, idempotency, and restart recovery; separate maintenance process enforces retention |
+| Memory | Persistent workspace/connector-scoped lexical retrieval in SQLite/PostgreSQL; optional implemented pgvector storage |
+| Customer data | Explicit connector grants, scoped saved records, deletion controls, backup/restore tooling, and fail-closed production storage; hosted acceptance remains a separate gate |
 
-Use synthetic data for the demo. Production mode requires explicit users with hashed passwords and refuses the development login defaults. See [Deployment](docs/deployment.md).
+Use synthetic data for the demo. Production mode requires explicit users with hashed passwords and refuses the development login defaults. See [Deployment](docs/deployment.md), [Actual analytics API](docs/actual-api.md), [Data isolation](docs/data-isolation.md), and [Operations and recovery](docs/operations.md).
 
 ## Live Links
 
-- Live deployment: https://agentic-ai-analytics-platform.onrender.com
+- Existing demo URL: https://agentic-ai-analytics-platform.onrender.com (the deployed revision must be verified separately)
 - Repository: https://github.com/saikirankonda99/agentic-ai-analytics-platform
 - Author: Sai Kiran Konda
 
@@ -308,7 +309,8 @@ The startup validator reports persistence backend, configuration source, and sch
 Local stack:
 
 ```bash
-docker compose up --build
+# Configure AUTH_USERS and a URL-safe POSTGRES_PASSWORD first; see Deployment.
+docker compose up --build --wait
 ```
 
 Individual image:
@@ -358,7 +360,8 @@ GitHub Actions runs:
 - `test`: pytest suite
 - `startup`: FastAPI and Streamlit startup probes
 - `e2e`: Playwright browser tests with artifacts
-- `docker`: backend/frontend image build validation
+- `docker`: backend/frontend image builds and complete stack authentication/worker checks
+- `persistence-services`: real PostgreSQL, pgvector, private read-only role, and backup/restore checks
 - `deployment-safety`: deployment file checks
 
 See [CI/CD Runtime Validation](docs/cicd-runtime-validation.md).

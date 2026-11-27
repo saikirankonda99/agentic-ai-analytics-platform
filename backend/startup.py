@@ -34,6 +34,7 @@ def run_startup_validation(*, strict: bool | None = None, validate_connectors: b
         _connector_check(validate_connectors=validate_connectors),
         _database_check(),
         _workflow_database_check(),
+        _durable_storage_check(),
         _auth_check(),
         _telemetry_check(),
         _orchestration_check(),
@@ -118,13 +119,29 @@ def _auth_check() -> StartupCheck:
 
 def _database_check() -> StartupCheck:
     diagnostics = validate_platform_database(settings.database_url)
-    status = "ok" if diagnostics.get("status") == "ok" else "warning"
+    status = "ok" if diagnostics.get("status") == "ok" else "error"
     return StartupCheck(
         name="database",
         status=status,
-        message="Platform persistence database validated." if status == "ok" else "Platform persistence is degraded; file fallback may be used.",
+        message="Platform persistence database validated." if status == "ok" else "Platform persistence is unavailable; production access is blocked.",
         metadata=diagnostics,
     )
+
+
+def _durable_storage_check() -> StartupCheck:
+    try:
+        from backend.memory import build_vector_memory_store
+        from backend.retention import retention_days
+        from backend.workers import get_worker_queue
+        get_worker_queue()
+        build_vector_memory_store()
+        history = retention_days("HISTORY_RETENTION_DAYS", 30)
+        saved = retention_days("SAVED_REPORT_RETENTION_DAYS", 90)
+    except Exception as exc:
+        return StartupCheck("durable_storage", "error", "Durable queue or memory storage is unavailable.",
+                            {"error_type": type(exc).__name__})
+    return StartupCheck("durable_storage", "ok", "Queue, memory, and retention configuration initialized.",
+                        {"history_retention_days": history, "saved_report_retention_days": saved})
 
 
 def _workflow_database_check() -> StartupCheck:

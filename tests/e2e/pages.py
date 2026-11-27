@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import os
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -94,13 +95,25 @@ def login_expect_error(page: Page, settings: E2ESettings, password: str) -> None
     expect(page.get_by_text("Invalid credentials")).to_be_visible()
 
 
+def login_customer(page: Page, settings: E2ESettings, *, navigate: bool = True) -> None:
+    """Sign in as a real non-admin; do not select or fall back to operator tools."""
+    if navigate:
+        page.goto(settings.streamlit_url)
+    page.get_by_role("textbox", name="Username", exact=True).fill("analyst")
+    page.get_by_role("textbox", name="Password", exact=True).fill(os.getenv("AUTH_ANALYST_PASSWORD", "analyst123"))
+    _run_and_wait(page, lambda: page.get_by_role("button", name="Login", exact=True).click())
+    expect(page.get_by_role("button", name="Try sample data", exact=True)).to_be_visible()
+    expect(page.get_by_label("Interface", exact=True)).to_have_count(0)
+    expect(page.get_by_label("Primary navigation", exact=True)).to_have_count(0)
+
+
 def select_nav(page: Page, label: str) -> None:
     page.get_by_label("Primary navigation").get_by_text(label, exact=True).click()
 
 
-def review_csv_upload(page: Page, csv_path: Path) -> None:
+def review_csv_upload(page: Page, csv_path: Path, *, customer: bool = False) -> None:
     _wait_for_streamlit_idle(page)
-    uploader = by_test_id(page, "stSidebarUserContent").locator(
+    uploader = by_test_id(page, "stMain" if customer else "stSidebarUserContent").locator(
         f'{_CURRENT_ELEMENT} [data-testid="stFileUploaderDropzoneInput"]',
     )
     expect(uploader).to_have_count(1)

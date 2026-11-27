@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, TypedDict
 
 from analytics_memory import contextualize_followup, memory_prompt_block
@@ -66,6 +66,10 @@ class StepTelemetry(TypedDict, total=False):
 class WorkflowState(TypedDict, total=False):
     question: str
     model: str
+    organization_id: str | None
+    workspace_id: str | None
+    connector_id: str
+    database_kind: str
     plan: dict[str, Any]
     schema: str
     memory_examples: list[dict[str, str]]
@@ -156,7 +160,7 @@ def _append_trace(
             "step": step,
             "status": status,
             "detail": detail,
-            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "phase": step,
         }
     )
@@ -259,7 +263,7 @@ def _emit_event(
         "status": phase,
         "step": step,
         "detail": detail,
-        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "perf_counter": time.perf_counter(),
     }
     snapshot = WorkflowState(state)
@@ -302,7 +306,7 @@ def _emit_token_event(
         "status": "streaming",
         "step": step,
         "detail": "Streaming assistant response.",
-        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "token": token,
         "content": accumulated,
         "telemetry": partial_telemetry,
@@ -359,12 +363,39 @@ def planner_node(state: WorkflowState) -> WorkflowState:
     }
 
 
+def _database_scope(state: WorkflowState) -> dict[str, Any]:
+    """A missing identity is permitted only for the explicit bundled example database."""
+    organization_id = state.get("organization_id")
+    workspace_id = state.get("workspace_id")
+    connector_id = state.get("connector_id", "sqlite")
+    if organization_id is None and workspace_id is None and connector_id == "sqlite":
+        return {}
+    return {
+        "organization_id": organization_id,
+        "workspace_id": workspace_id,
+        "connector_id": connector_id,
+    }
+
+
+def _history_scope(state: WorkflowState) -> dict[str, Any]:
+    return {
+        "organization_id": state.get("organization_id"),
+        "workspace_id": state.get("workspace_id"),
+        "connector_id": state.get("connector_id", "sqlite"),
+    }
+
+
 def schema_node(state: WorkflowState) -> WorkflowState:
     try:
-        schema = get_schema()
+        from backend.connectors import get_connector_registry
+        registry = get_connector_registry()
+        scope = _database_scope(state)
+        connector = registry.get_for_workspace(**scope) if scope else registry.get_public_demo("sqlite")
+        schema = get_schema(**scope)
         schema_intelligence = build_schema_intelligence(schema)
         return {
             "schema": schema,
+            "database_kind": connector.config.kind,
             "schema_intelligence": schema_intelligence,
             "stage_confidence": _stage_confidence_update(
                 state,
@@ -410,7 +441,9 @@ def schema_node(state: WorkflowState) -> WorkflowState:
 
 def memory_node(state: WorkflowState) -> WorkflowState:
     started = time.perf_counter()
-    examples = retrieve_similar_queries(state.get("effective_question") or state["question"], top_k=3)
+    examples = retrieve_similar_queries(
+        state.get("effective_question") or state["question"], top_k=3, **_history_scope(state)
+    )
     latency_ms = int((time.perf_counter() - started) * 1000)
     if examples:
         detail = f"Retrieved {len(examples)} similar example(s)."
@@ -423,7 +456,7 @@ def memory_node(state: WorkflowState) -> WorkflowState:
             state,
             _new_step_telemetry(
                 step="memory retrieval",
-                model="chromadb",
+                model="local-lexical-memory",
                 latency_ms=latency_ms,
                 usage_available=False,
             ),
@@ -451,6 +484,8 @@ def memory_node(state: WorkflowState) -> WorkflowState:
 
 def _build_generation_prompt(state: WorkflowState) -> str:
     question = state.get("effective_question") or state["question"]
+    dialect = "PostgreSQL" if state.get("database_kind") == "postgresql" else "SQLite"
+    question = f"{question}\n\nTarget SQL dialect: {dialect}. Use syntax supported by that database."
     memory_examples = state.get("memory_examples", [])
     memory_block = ""
     if memory_examples:
@@ -492,7 +527,8 @@ def _build_reflection_prompt(state: WorkflowState) -> str:
         )
         memory_block = f"\n\nSimilar successful examples:\n{formatted_examples}"
 
-    return f"""You are fixing a failed SQL query for a SQLite database.
+    dialect = "PostgreSQL" if state.get("database_kind") == "postgresql" else "SQLite"
+    return f"""You are fixing a failed SQL query for a {dialect} database.
 
 User question:
 {state.get('effective_question') or state['question']}
@@ -744,19 +780,20 @@ def reflection_node(
 def execution_node(state: WorkflowState) -> WorkflowState:
     started = time.perf_counter()
     try:
-        columns, rows = run_query(state["sql"])
+        columns, rows = run_query(state["sql"], **_database_scope(state))
         latency_ms = int((time.perf_counter() - started) * 1000)
         quality = analyze_result_quality(columns, rows)
         save_query_to_history(
             question=state["question"],
             sql=state["sql"],
             success=True,
+            **_history_scope(state),
         )
         telemetry = _record_telemetry(
             state,
             _new_step_telemetry(
                 step="execution",
-                model="sqlite",
+                model=state.get("connector_id", "sqlite"),
                 latency_ms=latency_ms,
                 usage_available=False,
                 sql_validation_status=state.get("sql_validation", {}).get("status"),
@@ -817,7 +854,7 @@ def execution_node(state: WorkflowState) -> WorkflowState:
                 state,
                 _new_step_telemetry(
                     step="execution",
-                    model="sqlite",
+                    model=state.get("connector_id", "sqlite"),
                     latency_ms=latency_ms,
                     usage_available=False,
                 ),
@@ -907,11 +944,17 @@ def _run_linear(
     workspace_context: dict[str, Any] | None = None,
     *,
     model: str = DEFAULT_SQL_MODEL,
+    organization_id: str | None = None,
+    workspace_id: str | None = None,
+    connector_id: str = "sqlite",
 ) -> WorkflowState:
     correlation_id = new_correlation_id()
     state: WorkflowState = {
         "question": question,
         "model": model,
+        "organization_id": organization_id,
+        "workspace_id": workspace_id,
+        "connector_id": connector_id,
         "error": None,
         "retry_count": 0,
         "last_error": None,
@@ -1060,11 +1103,17 @@ def run_workflow(
     workspace_context: dict[str, Any] | None = None,
     *,
     model: str = DEFAULT_SQL_MODEL,
+    organization_id: str | None = None,
+    workspace_id: str | None = None,
+    connector_id: str = "sqlite",
 ) -> WorkflowState:
     correlation_id = new_correlation_id()
     initial_state: WorkflowState = {
         "question": question,
         "model": model,
+        "organization_id": organization_id,
+        "workspace_id": workspace_id,
+        "connector_id": connector_id,
         "error": None,
         "retry_count": 0,
         "last_error": None,
@@ -1109,6 +1158,9 @@ def run_workflow(
             conversation_context=conversation_context,
             workspace_context=workspace_context,
             model=model,
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+            connector_id=connector_id,
         )
 
     result = workflow.invoke(initial_state)

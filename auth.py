@@ -1,6 +1,7 @@
 import streamlit as st
 
-from backend.auth_sessions import login_user, revoke_session, validate_session_token
+from backend.auth_sessions import login_user, revoke_session_checked as revoke_session, validate_session_token
+from backend.persistence import PersistenceError
 
 
 def login() -> None:
@@ -14,7 +15,11 @@ def login() -> None:
         submitted = st.form_submit_button("Login", width="stretch", type="primary")
 
     if submitted:
-        identity = login_user(username, password)
+        try:
+            identity = login_user(username, password)
+        except PersistenceError:
+            st.error("Sign-in is temporarily unavailable. Please retry when storage is restored.")
+            return
         if identity:
             st.session_state.user = identity["user_id"]
             st.session_state.auth_session = identity
@@ -28,8 +33,20 @@ def login() -> None:
 
 def logout() -> None:
     session = st.session_state.get("auth_session", {})
-    revoke_session(session.get("session_token"))
+    pending = st.session_state.get("pending_logout_token")
+    token = session.get("session_token") or pending
+    try:
+        revoke_session(token)
+    except PersistenceError:
+        # Keep only the token needed to retry revocation, never uploaded data or
+        # a usable authenticated identity. require_login blocks all work below.
+        clear_authenticated_state()
+        st.session_state["pending_logout_token"] = token
+        st.rerun()
+        return
     clear_authenticated_state()
+    if pending:
+        st.session_state["logout_confirmed_notice"] = True
     st.rerun()
 
 
@@ -55,6 +72,16 @@ def render_auth_controls(*, customer_mode: bool = False) -> None:
 
 
 def require_login() -> dict:
+    if st.session_state.get("pending_logout_token"):
+        st.warning(
+            "Your active data has been cleared. Server sign-out could not be confirmed because storage is unavailable. "
+            "Retry sign out before continuing."
+        )
+        if st.button("Retry sign out", type="primary"):
+            logout()
+        st.stop()
+    if st.session_state.pop("logout_confirmed_notice", False):
+        st.success("Sign-out confirmed.")
     session = st.session_state.get("auth_session")
     identity = validate_session_token(session.get("session_token")) if session else None
     if identity:

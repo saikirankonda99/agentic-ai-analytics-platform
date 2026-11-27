@@ -1,6 +1,7 @@
 .git
 .gitignore
-.env
+.env*
+!.env.example
 .venv
 venv
 __pycache__
@@ -12,6 +13,10 @@ __pycache__
 .ruff_cache
 .streamlit/secrets.toml
 data/cost_log.db
+data/platform_persistence.db
+data/platform_validation.db
+data/*.db-shm
+data/*.db-wal
 data/workflow_runtime.db
 data/auth_sessions.json
 data/workspaces
@@ -20,3 +25,6 @@ data/test-runtime
 test-results
 playwright-report
 .auth_test_runtime
+backups
+*.snapshot
+*.manifest.json

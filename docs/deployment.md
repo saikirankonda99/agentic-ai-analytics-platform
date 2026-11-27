@@ -1,116 +1,72 @@
-# Distributed Deployment Notes
+# Deployment
 
-This repository now separates local app behavior from production-oriented orchestration boundaries.
+The release stack contains a Streamlit frontend, FastAPI API, a durable analytics worker, a retention service, and PostgreSQL. The API worker runs actual authorized SQL analytics. PostgreSQL also stores customer-scoped query memory; pgvector is optional. Redis is not required for the durable query queue.
 
-## Services
+## Start the complete stack locally
 
-- `backend`: FastAPI orchestration API, REST/SSE/websocket endpoints.
-- `frontend`: Streamlit UI, unchanged runtime entrypoint.
-- `postgres`: PostgreSQL database for durable workspace, auth, report, telemetry, and workflow persistence.
-- `redis`: Pub/sub and queue coordination foundation for websocket fanout and workers.
-
-## Runtime Boundaries
-
-- `backend.config` centralizes environment-driven settings.
-- `backend.persistence` owns platform persistence, schema bootstrap, auth sessions, and workspace documents.
-- `backend.storage` owns workflow, event, telemetry, usage, account, and agent metadata repositories.
-- `backend.memory` defines vector-memory and embedding interfaces, with pgvector scaffolding.
-- `backend.messaging` defines Redis-ready event propagation.
-- `backend.workers` defines Redis-ready distributed worker queue abstractions.
-- `backend.runtime` remains the orchestration execution boundary.
-
-## Local Container Stack
+Install Docker Compose, copy the tracked example configuration to the private local environment file, and configure explicit production users plus a URL-safe `POSTGRES_PASSWORD`. The Compose file runs production mode and does not accept demo accounts.
 
 ```bash
 cp .env.example .env
-# Configure AUTH_USERS as described below before starting production-mode services.
-docker compose up --build
+docker compose up --build --wait
 ```
 
-Backend: `http://localhost:8000`  
-Streamlit: `http://localhost:8501`
+The frontend is at `http://localhost:8501`; the API is at `http://localhost:8000`. Ports bind only to the loopback interface. PostgreSQL has no host port. Use an HTTPS reverse proxy or your hosting provider's HTTPS endpoint when exposing the application.
 
-This stack is a development integration setup. PostgreSQL and Redis in this Compose file use local defaults; operating a customer deployment still requires infrastructure configuration, customer data isolation, and deployment testing. The current API execution endpoint simulates workflow stages. Redis workers and pgvector retrieval are not implemented.
+The backend initializes database schemas, queue and memory before it reports healthy. Frontend, worker and maintenance services depend on that readiness. PostgreSQL schema initialization is serialized across processes by an advisory lock.
 
-## Explicit production users
+The Compose file constructs internal database URLs from the URL-safe password. The platform database is not automatically granted as an analytical customer database. Configure any private customer connectors separately with a read-only role and explicit organization/workspace grants; see [Data isolation](data-isolation.md).
 
-Both services use `APP_ENV=production` in Compose. This mode disables the built-in demo accounts. Missing, malformed, or unhashed `AUTH_USERS` credentials fail startup validation.
+## Accounts
 
-Generate a password hash locally without putting the password in shell history:
+Generate a password hash interactively without placing the password in shell history:
 
 ```bash
 python -c 'from getpass import getpass; from backend.auth_sessions import hash_password; print(hash_password(getpass("Password: ")))'
 ```
 
-Copy the resulting hash into an `AUTH_USERS` JSON object in your private `.env` file. Replace the placeholder below; do not commit the file:
+Use the generated hash in the private environment configuration:
 
 ```dotenv
-APP_ENV=production
-AUTH_USERS='{"owner":{"password_hash":"PASTE_GENERATED_HASH_HERE","display_name":"Business Owner","team_id":"demo-business","role":"admin"}}'
+AUTH_USERS='{"owner":{"password_hash":"PASTE_GENERATED_HASH","display_name":"Business Owner","team_id":"my-business","role":"admin"},"analyst":{"password_hash":"ANOTHER_GENERATED_HASH","display_name":"Sales Analyst","team_id":"my-business","role":"analyst"}}'
 ```
 
-Roles are `admin`, `analyst`, or `viewer`. User, team, and role come from the authenticated session. The Streamlit sidebar displays these values; changing a client header cannot grant another user's access. This authorization does not yet provide separate database connectors and retrieval histories for different customers.
+Use a different password for each account. Roles are `admin`, `analyst`, and `viewer`. Account and team identifiers must be canonical, and personal/shared workspace names must not collide. The final username segment `shared` is reserved. Human-readable labels belong in `display_name`.
 
-Use `POST /auth/login` to obtain a session token. Private routes accept `X-Session-Token` or `Authorization: Bearer <token>`. Diagnostics and connector endpoints require an admin. Workflow reads, streams, and workspace APIs also enforce ownership and write roles. Public health/readiness responses expose only service status. Endpoints that formerly exposed a global latest investigation now return an unavailable response until an explicit owned workflow is supplied where supported.
+Existing sessions require a new login after this release if they lack the new configuration fingerprint. Removing an account or changing its password, team, role, or display name invalidates its earlier sessions. Login fails safely when storage is unavailable. A failed logout blocks the browser session behind a retry action until revocation can be confirmed.
 
-## Startup Validation
+## Secret configuration
 
-Both Docker service entrypoints run startup validation before launching the application process. Validation covers environment configuration, OpenAI runtime posture, connector registration, auth configuration, telemetry initialization, and orchestration initialization.
+Supply `OPENAI_API_KEY` only through the server environment or the hosting provider's secret settings. Secure key provisioning is a separate setup step; the repository contains no live key. Local configuration and Streamlit secrets are excluded from Git and Docker build contexts. Provider errors are redacted before logging or storing telemetry. No secret is required for deterministic CSV totals.
 
-Set strict startup validation when a deployment should fail fast on required runtime errors:
+The optional CSV AI review submits anonymous calculated statistics and chooses approved fact/action IDs. The SQL workflow sends the requested question and authorized database schema to the provider. Decide whether that use fits the customer's data agreement before enabling its connector.
 
-```bash
-STARTUP_VALIDATION_STRICT=true
-```
+## Hosted configuration
 
-Optional dependencies such as `OPENAI_API_KEY` and `POSTGRES_URL` report warnings in non-strict local deployments.
+Deploy the same tested source revision across these processes:
 
-## Persistence
+| Process | Image / command | Required durable storage |
+|---|---|---|
+| Frontend | `Dockerfile.frontend` | `DATABASE_URL`, `WORKFLOW_DATABASE_URL` |
+| API | `Dockerfile.backend` | Same URLs |
+| Analytics worker | Backend image, `python -m backend.workers` | Same URLs and authorized connector settings |
+| Maintenance | Backend image, `python -m backend.maintenance --interval 3600` | Same URLs and optional vector URL |
+| Database | PostgreSQL 16 or a compatible validated provider | Persistent provider storage and backups |
 
-Local development uses SQLite by default:
+All application processes need matching `AUTH_USERS`, `APP_ENV=production`, `STARTUP_VALIDATION_STRICT=true`, `ANALYTICS_WORKER_MODE=external`, and consistent connector configuration. Processes that perform model work need the server-side API key. Set both database URLs explicitly to the same PostgreSQL database unless you have intentionally arranged separate recovery procedures.
 
-```bash
-DATABASE_URL=sqlite:///data/platform_persistence.db
-WORKFLOW_DATABASE_URL=sqlite:///data/workflow_runtime.db
-```
+For Render, use Docker web services for the frontend/API and a background worker for analytics; maintenance can be a supervised worker or a cron running `python -m backend.maintenance --once`. Review the account's current resource plan and secret configuration before creating services. Render's [Blueprint reference](https://render.com/docs/blueprint-spec) and [environment/secret documentation](https://render.com/docs/configure-environment-variables) describe those provider settings. This repository has not provisioned or updated the existing Render deployment.
 
-Production deployments should set both persistence URLs to PostgreSQL:
+The default memory store uses ordinary PostgreSQL. To enable optional pgvector, install the extension administratively and set `VECTOR_DATABASE_URL` to that database. The application does not assume extension-install privileges.
 
-```bash
-DATABASE_URL=postgresql://app_user:password@postgres:5432/agentic_ai
-WORKFLOW_DATABASE_URL=postgresql://app_user:password@postgres:5432/agentic_ai
-```
+## Verify the deployed revision
 
-`DATABASE_URL` owns workspace/auth/report persistence. `WORKFLOW_DATABASE_URL` owns workflow history, events, telemetry, agents, and usage persistence. If `WORKFLOW_DATABASE_URL` is omitted, the runtime falls back to `DATABASE_URL` for compatibility and reports that fallback in startup diagnostics.
+1. Record the deployed commit SHA and verify `/health`, `/ready`, and the frontend's `/_stcore/health`.
+2. Log in as a non-admin and complete upload, mapping, exact answer, chart, and download. Verify admin controls are absent.
+3. Submit a real API question with a workspace-authorized connector, follow the durable workflow ID, and compare SQL/result/usage to the trusted answer. Repeating the same idempotency key must reuse the existing job.
+4. Restart the frontend/API/worker and verify saved records and queued work survive.
+5. Exercise provider failure and database unavailability without a false success response or legacy file fallback.
+6. Run a restore drill into a fresh database and record the result. Keep retention and backup storage scheduled and monitored.
+7. Check logs for failures and resource exhaustion, then approve the hosted release.
 
-Schema bootstrap is automatic and tracked in `schema_migrations`. See `docs/postgresql-persistence.md` for the detailed persistence guide.
-
-## Health Checks
-
-Container health checks probe application endpoints:
-
-- backend: `GET /health`
-- frontend: `GET /_stcore/health`
-
-FastAPI also exposes:
-
-- `GET /ready`
-- `GET /readiness`
-- `GET /diagnostics`
-
-`/diagnostics` requires an admin session and includes startup validation, auth posture, connector health, OpenAI runtime configuration, and execution policy.
-
-## CI/CD
-
-GitHub Actions runs lint, tests, startup probes, Docker build validation, and deployment-safety checks on pull requests and pushes to `main`. See `docs/cicd-runtime-validation.md` for the workflow contract.
-
-## Future Worker Paths
-
-The current runtime uses FastAPI background tasks. The queue abstractions are intentionally compatible with later Celery/RQ adoption for:
-
-- workflow execution workers
-- autonomous monitoring jobs
-- investigation workers
-- executive briefing generation
-
-Redis pub/sub is scaffolded for websocket scaling across multiple backend instances.
+Application tests, browser tests, container stack checks, and real PostgreSQL service tests are independent evidence. A green build does not prove a hosted site's deployed commit or live model quality. See [Release readiness](release-readiness.md) and [Operations](operations.md).

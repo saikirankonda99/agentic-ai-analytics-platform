@@ -12,6 +12,14 @@ import plotly.graph_objects as go
 import streamlit as st
 
 
+SALES_CALCULATION_NOTES = (
+    "All accepted rows are included. Negative amounts reduce the total; confirm how your export records refunds.",
+    "Exact duplicate rows are retained. Remove unintended duplicates in your source file before uploading again.",
+    "Amounts are used as supplied. Tax, discounts, and shipping are not added or removed.",
+    "Each row is rounded to two decimal places before summing. Currency conversion is not performed.",
+)
+
+
 def _html(value: object) -> str:
     return escape("" if value is None else str(value), quote=True)
 
@@ -163,6 +171,8 @@ def render_customer_answer(
         if source_name:
             rows = f" · {source_rows:,} source rows" if source_rows is not None else ""
             st.caption(f"Source: {source_name}{rows}.")
+        for note in SALES_CALCULATION_NOTES:
+            st.caption(note)
         st.caption(
             "AI selected relevant findings and suggested checks. The displayed figures were calculated from the accepted sales data."
             if ai_used else

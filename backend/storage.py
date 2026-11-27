@@ -167,6 +167,9 @@ def _storage_error(operation: str, exc: Exception) -> None:
 
 
 class WorkflowStorage(Protocol):
+    def create_if_absent(self, workflow: OrchestrationExecution) -> bool:
+        """Atomically insert initial state without resetting an existing workflow."""
+
     def save(self, workflow: OrchestrationExecution) -> None:
         """Persist workflow state."""
 
@@ -292,7 +295,8 @@ class InMemoryUsageStorage:
 
     def append(self, usage: UsageRecord) -> None:
         with self._lock:
-            self._usage.append(usage)
+            if not any(item.usage_id == usage.usage_id for item in self._usage):
+                self._usage.append(usage)
 
     def list(
         self,
@@ -314,6 +318,14 @@ class InMemoryWorkflowStorage:
         self._workflows: dict[str, OrchestrationExecution] = {}
         self._latest_workflow_id: str | None = None
         self._lock = RLock()
+
+    def create_if_absent(self, workflow: OrchestrationExecution) -> bool:
+        with self._lock:
+            if workflow.workflow_id in self._workflows:
+                return False
+            self._workflows[workflow.workflow_id] = workflow
+            self._latest_workflow_id = workflow.workflow_id
+            return True
 
     def save(self, workflow: OrchestrationExecution) -> None:
         with self._lock:
@@ -582,6 +594,19 @@ class SQLiteStore:
 
 
 class SQLiteWorkflowStorage(SQLiteStore):
+    def create_if_absent(self, workflow: OrchestrationExecution) -> bool:
+        with self._transaction("sqlite.workflow.create") as connection:
+            cursor = connection.execute(
+                """INSERT INTO workflows
+                (workflow_id, organization_id, workspace_id, user_id, question, status, created_at,
+                 current_stage, stage_progression_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (workflow_id) DO NOTHING""",
+                (workflow.workflow_id, workflow.organization_id, workflow.workspace_id, workflow.user_id,
+                 workflow.question, workflow.status, workflow.created_at, workflow.current_stage,
+                 _stage_progression_json(workflow.stage_progression)),
+            )
+            return cursor.rowcount == 1
+
     def save(self, workflow: OrchestrationExecution) -> None:
         stage_progression = _stage_progression_json(workflow.stage_progression)
         with self._transaction("sqlite.workflow.save") as connection:
@@ -884,6 +909,7 @@ class SQLiteUsageStorage(SQLiteStore):
                     estimated_cost_usd, timestamp, metadata_json
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (usage_id) DO NOTHING
                 """,
                 (
                     usage.usage_id,
@@ -951,6 +977,7 @@ class PostgreSQLStore:
 
     def _initialize(self) -> None:
         with self._transaction("postgres.initialize") as connection:
+            connection.execute("SELECT pg_advisory_xact_lock(846231905)")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS workflows (
@@ -1081,6 +1108,19 @@ class PostgreSQLStore:
 
 
 class PostgreSQLWorkflowStorage(PostgreSQLStore):
+    def create_if_absent(self, workflow: OrchestrationExecution) -> bool:
+        with self._transaction("postgres.workflow.create") as connection:
+            cursor = connection.execute(
+                """INSERT INTO workflows
+                (workflow_id, organization_id, workspace_id, user_id, question, status, created_at,
+                 current_stage, stage_progression_json)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb) ON CONFLICT (workflow_id) DO NOTHING""",
+                (workflow.workflow_id, workflow.organization_id, workflow.workspace_id, workflow.user_id,
+                 workflow.question, workflow.status, workflow.created_at, workflow.current_stage,
+                 _stage_progression_json(workflow.stage_progression)),
+            )
+            return cursor.rowcount == 1
+
     def save(self, workflow: OrchestrationExecution) -> None:
         stage_progression = _stage_progression_json(workflow.stage_progression)
         with self._transaction("postgres.workflow.save") as connection:
@@ -1361,6 +1401,7 @@ class PostgreSQLUsageStorage(PostgreSQLStore):
                     estimated_cost_usd, timestamp, metadata_json
                 )
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                ON CONFLICT (usage_id) DO NOTHING
                 """,
                 (
                     usage.usage_id,

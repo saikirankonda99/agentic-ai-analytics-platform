@@ -49,6 +49,14 @@ class OrchestrationRuntime:
         return workflow
 
     async def run(self, workflow_id: str) -> OrchestrationExecution:
+        from backend.workers import get_worker_queue
+        workflow = self.service.get_workflow(workflow_id)
+        if workflow is None:
+            raise ValueError("Workflow was removed before simulation could start.")
+        with get_worker_queue().workspace_activity(workflow.organization_id, workflow.workspace_id):
+            return await self._run(workflow_id)
+
+    async def _run(self, workflow_id: str) -> OrchestrationExecution:
         try:
             logger.info("workflow_run_started workflow_id=%s", workflow_id)
             workflow = self.service.start_workflow(workflow_id)

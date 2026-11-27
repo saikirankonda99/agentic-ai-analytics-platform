@@ -46,7 +46,7 @@ def test_incident_generation_scores_runtime_degradation() -> None:
 
 def test_enterprise_control_plane_endpoints(authenticated_api_client) -> None:
     client = authenticated_api_client
-    created = client.post("/execute", json={"question": "Show revenue anomalies"}).json()
+    created = client.post("/execute/simulation", json={"question": "Show revenue anomalies"}).json()
     workflow_id = created["workflow_id"]
 
     governance = client.get("/governance").json()

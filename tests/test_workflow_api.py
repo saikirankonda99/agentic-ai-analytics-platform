@@ -3,7 +3,7 @@ from __future__ import annotations
 def test_execute_and_fetch_workflow(authenticated_api_client) -> None:
     client = authenticated_api_client
 
-    created = client.post("/execute", json={"question": "Show revenue anomalies"}).json()
+    created = client.post("/execute/simulation", json={"question": "Show revenue anomalies"}).json()
     workflow_id = created["workflow_id"]
     fetched = client.get(f"/workflow/{workflow_id}").json()
     events = client.get(f"/workflow/{workflow_id}/events").json()

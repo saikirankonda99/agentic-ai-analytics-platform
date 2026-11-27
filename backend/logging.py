@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from backend.config import settings
+from backend.redaction import redact_text
 
 
 class JsonFormatter(logging.Formatter):
@@ -14,10 +15,10 @@ class JsonFormatter(logging.Formatter):
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": redact_text(record.getMessage()),
         }
         if record.exc_info:
-            payload["exception"] = self.formatException(record.exc_info)
+            payload["exception"] = redact_text(self.formatException(record.exc_info))
         return json.dumps(payload)
 
 
