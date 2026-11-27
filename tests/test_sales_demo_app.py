@@ -19,6 +19,7 @@ def test_sales_demo_results_failure_workspace_switch_and_logout(isolated_auth_co
     next(field for field in app.text_input if field.label == "Password").set_value(isolated_auth_config["admin"])
     _click(app, "Login")
     assert not any(field.label in {"User", "Team", "Role"} for field in app.text_input)
+    app.radio(key="interface_mode").set_value("Admin workspace").run()
 
     app.radio(key="top_navigation").set_value("Copilot").run()
     assert not app.exception

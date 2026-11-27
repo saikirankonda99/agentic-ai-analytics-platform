@@ -4,11 +4,14 @@ from backend.auth_sessions import login_user, revoke_session, validate_session_t
 
 
 def login() -> None:
-    st.sidebar.title("Login")
-    with st.sidebar.form("login_form"):
+    _, login_column, _ = st.columns([1, 1.4, 1])
+    with login_column:
+        st.markdown("### Welcome back")
+        st.caption("Sign in to your sales workspace. Your account determines which tools you can access.")
+    with login_column.form("login_form"):
         username = st.text_input("Username", value="admin")
         password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Login", width="stretch")
+        submitted = st.form_submit_button("Login", width="stretch", type="primary")
 
     if submitted:
         identity = login_user(username, password)
@@ -35,17 +38,18 @@ def clear_authenticated_state() -> None:
     st.session_state.clear()
 
 
-def render_auth_controls() -> None:
+def render_auth_controls(*, customer_mode: bool = False) -> None:
     identity = st.session_state.get("auth_session") or st.session_state.get("user_identity")
     if not identity:
         return
     memory = st.session_state.get("workspace_memory", {})
-    with st.sidebar.expander("Session", expanded=False):
+    with st.sidebar.expander("Account" if customer_mode else "Session", expanded=False):
         st.caption(f"{identity.get('display_name', identity.get('user_id', 'User'))}")
-        st.caption(f"Workspace: {identity.get('workspace_id', '')}")
-        st.caption(f"Saved SQL: {len(memory.get('query_history', []))}")
-        st.caption(f"Investigations: {len(memory.get('investigations', []))}")
-        st.caption(f"Recent activity: {len(memory.get('recent_activity', []))}")
+        if not customer_mode:
+            st.caption(f"Workspace: {identity.get('workspace_id', '')}")
+            st.caption(f"Saved SQL: {len(memory.get('query_history', []))}")
+            st.caption(f"Investigations: {len(memory.get('investigations', []))}")
+            st.caption(f"Recent activity: {len(memory.get('recent_activity', []))}")
         if st.button("Logout", width="stretch"):
             logout()
 

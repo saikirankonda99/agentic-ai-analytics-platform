@@ -22,6 +22,9 @@ def login(page: Page, settings: E2ESettings, password: str | None = None) -> Non
         page.get_by_role("button", name="Login").click()
     except (AssertionError, PlaywrightTimeoutError):
         pass
+    # Existing end-to-end scenarios exercise operator tools. Customer mode is
+    # now the default, and only authenticated admins can select this workspace.
+    page.get_by_label("Interface", exact=True).get_by_text("Admin workspace", exact=True).click()
     expect(page.get_by_text("Quick Actions")).to_be_visible(timeout=30_000)
 
 

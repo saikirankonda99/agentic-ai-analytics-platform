@@ -6,6 +6,7 @@ This directory contains architecture, deployment, testing, and operations notes 
 
 | Document | Purpose |
 |---|---|
+| [Customer and Administrator Experience](customer-admin-experience.md) | Separate role-based interfaces, exact screen copy, warm 3D design, bounded CSV AI review, and demo checks |
 | [Architecture Diagrams](architecture.md) | Mermaid diagrams for frontend/backend interaction, orchestration, SQL intelligence, persistence, collaboration, telemetry, and E2E flow |
 | [Demo Walkthrough](demo-walkthrough.md) | Concise demo script, timing, recommended datasets, and screenshot order |
 | [Collaboration Workflows](collaboration.md) | Personal/team workspace switching, shared resources, activity history, and lightweight permissions |

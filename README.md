@@ -17,9 +17,11 @@ Load the included synthetic retail dataset, ask a supported sales question, insp
 
 1. Follow [Local Setup](#local-setup), then start Streamlit.
 2. For local development, sign in as `admin` with `admin123`, or the password configured in `AUTH_ADMIN_PASSWORD`.
-3. Click **Load retail demo** in the sidebar.
-4. Click **Revenue by Product**, **Monthly Revenue**, or **Total Revenue**.
-5. Download the full result CSV and executive summary from the result section.
+3. In the default **Customer dashboard**, click **Try sample data**. An initial sales summary opens.
+4. Expand **Common questions**, then click **Revenue by Product**, **Monthly Revenue**, or **Total Revenue**.
+5. Choose **Download results CSV** or **Download summary** below the answer.
+
+The customer dashboard uses a three-step sales flow and warm ivory/plum styling with decorative CSS 3D artwork. Only authenticated administrators can open the separate **Admin workspace**. See [Customer and Administrator Experience](docs/customer-admin-experience.md) for exact screen text, component notes, and the demo checklist.
 
 The 12 sample transactions total **352.00 USD**. Product totals are Coffee Beans **180.00**, Tea **100.00**, and Mug **72.00**. Monthly totals are January **144.00**, February **117.00**, and March **91.00**. These are synthetic demonstration results, not customer outcomes.
 
@@ -32,6 +34,7 @@ Own-file uploads support total revenue, revenue by product/month/country, units 
 | Path | Current behavior |
 |---|---|
 | Sales CSV in Streamlit | Local deterministic aggregation, charts, result exports, and saved workspace metadata |
+| Optional CSV AI review | Explicit OpenAI request to prioritize verified aggregate facts and suggested checks; requires a server-side API key. No raw rows, arbitrary Q&A, causal claims, or automatic business actions |
 | Database questions in Streamlit | Model-generated SQL against the bundled example database; requires an API key and live-model evaluation |
 | FastAPI `POST /execute` | Workflow lifecycle **simulation**, explicitly labeled in responses; does not run the SQL pipeline |
 | Monitoring | Example-database checks triggered while the app is active; no durable background scheduler |
@@ -259,7 +262,7 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m streamlit run app.py --server.port 8501
 ```
 
-Open `http://localhost:8501`, sign in with the development credentials above, and choose **Load retail demo**. This CSV demo does not require an `.env` file, a separate FastAPI process, or an API key. The lock file excludes the optional `uvloop` dependency on Windows. Native Windows installation has not been exercised by the Linux CI jobs.
+Open `http://localhost:8501`, sign in with the development credentials above, and choose **Try sample data** in the customer dashboard. CSV calculations do not require an `.env` file, a separate FastAPI process, or an API key; the optional AI review does require a key. The lock file excludes the optional `uvloop` dependency on Windows. Native Windows installation has not been exercised by the Linux CI jobs.
 
 Start Streamlit:
 

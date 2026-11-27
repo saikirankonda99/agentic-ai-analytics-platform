@@ -58,8 +58,17 @@ from workspace import (
     workspace_memory_fingerprint,
 )
 from semantic import profile_dataframe, profile_schema, recommend_chart_fields, semantic_prompt_block
+from sales_copilot import explain_sales_report
 from styles.theme import get_theme_css
 from ui.views.common import ViewServices
+from ui.views.customer import (
+    render_customer_hero, render_customer_welcome, render_customer_answer,
+    render_data_source, render_ai_status,
+)
+from ui.views.customer_flow import (
+    render_customer_sidebar, render_customer_data_controls, render_step_progress,
+    render_customer_question, render_customer_downloads,
+)
 from ui.views.connectors import render_api_workspace
 from ui.views.data_import import render_sales_import_review
 from ui.views.investigations import render_investigations_workspace
@@ -394,6 +403,8 @@ def init_session_state():
         "uploaded_name": None,
         "uploaded_fingerprint": None,
         "latest_csv_analysis": None,
+        "customer_ai_explanation": None,
+        "customer_initial_report_pending": False,
         "csv_upload_error": "",
         "command_text": "",
         "command_input": "",
@@ -472,6 +483,8 @@ def clear_session():
     st.session_state.uploaded_name = None
     st.session_state.uploaded_fingerprint = None
     st.session_state.latest_csv_analysis = None
+    st.session_state.customer_ai_explanation = None
+    st.session_state.customer_initial_report_pending = False
     st.session_state.csv_upload_error = ""
     st.session_state.command_text = ""
     st.session_state.command_input = ""
@@ -530,6 +543,7 @@ def clear_analysis_result():
     """Keep the selected source, but discard outputs from the previous analysis."""
     for key, value in {
         "latest_df": None, "latest_sql": "", "latest_insight": "", "latest_exec_time": None,
+        "customer_ai_explanation": None,
         "latest_csv_analysis": None, "workflow_trace": [], "workflow_telemetry": {},
         "latest_execution_graph": {}, "latest_stage_confidence": {}, "latest_recovery": {},
         "latest_policy_decision": {}, "latest_schema_intelligence": {}, "latest_sql_validation": {},
@@ -605,6 +619,7 @@ def render_pending_sales_upload():
         st.session_state.csv_import_applied_notice = True
         st.session_state.csv_upload_error = ""
         st.session_state.latest_mode = "csv"
+        st.session_state.customer_initial_report_pending = st.session_state.get("interface_mode") == "Customer dashboard"
         profile_active_dataframe(review.frame, f"Uploaded CSV: {st.session_state.uploaded_name}")
         st.rerun()
 
@@ -1850,8 +1865,87 @@ def _render_analytics_results(services):
         render_report_exports(services, scope="analytics")
 
 
+def render_customer_workspace():
+    if "uploaded_df" not in st.session_state:
+        render_customer_welcome()
+        return
+    question = render_customer_question()
+    if st.session_state.pop("customer_initial_report_pending", False) and not question:
+        question = "Sales summary"
+    if question:
+        with st.spinner("Checking your sales data…"):
+            run_query(question)
+    frame = st.session_state.get("latest_df")
+    if frame is None:
+        st.caption("Your answer and download options will appear here.")
+        return
+    analysis = st.session_state.get("latest_csv_analysis") or {}
+    render_customer_answer(
+        st.session_state.get("latest_question", ""), frame,
+        st.session_state.get("latest_insight", ""),
+        currency=analysis.get("currency", ""),
+        source_name=st.session_state.get("uploaded_name") or "Sales CSV",
+        source_rows=analysis.get("source_rows"),
+        warnings=analysis.get("warnings", ()), ai_used=False,
+        chart_key=next_plotly_key("customer_sales"),
+    )
+    render_customer_ai_assistance(analysis, frame)
+    render_customer_downloads()
+
+
+def render_customer_ai_assistance(analysis, frame):
+    configured = bool(st.session_state.openai_runtime.get("api_key_configured"))
+    saved = st.session_state.get("customer_ai_explanation") or {}
+    status_area = st.empty()
+    with st.expander("AI help · What should I check next?", expanded=bool(saved.get("ai_used"))):
+        st.caption(
+            "AI can prioritize verified findings and suggest follow-up checks. "
+            "Only calculated statistics and data-quality flags are sent to OpenAI; "
+            "your CSV rows and product or customer names are not sent."
+        )
+        st.caption("AI reviews the report shown above. Open Revenue by Product or Monthly Revenue for those breakdowns.")
+        if not configured:
+            st.info("AI assistance is not connected. Your administrator can connect it; all sales reports still work.")
+        else:
+            st.caption("A configured connection is available to try. A successful response confirms it is working.")
+        focus_labels = {
+            "Overview": "overview", "Products": "products", "Monthly pattern": "trend", "Data checks": "data_quality",
+        }
+        focus = st.selectbox("What would you like help with?", list(focus_labels), key="customer_ai_focus")
+        if st.button("Explain this result with AI", disabled=not configured, width="stretch"):
+            with st.spinner("Reviewing the calculated findings…"):
+                saved = explain_sales_report(analysis, frame, focus=focus_labels[focus], enabled=True)
+            saved["review_focus"] = focus
+            if saved.get("ai_used"):
+                saved["text"] = "\n\n".join(
+                    part for part in [
+                        saved.get("headline", ""),
+                        "\n".join(saved.get("findings", [])),
+                        "Suggested checks:\n" + "\n".join(saved.get("next_steps", [])),
+                        "\n".join(saved.get("limitations", [])),
+                    ] if part
+                )
+            st.session_state.customer_ai_explanation = saved
+        if saved.get("ai_used"):
+            st.caption("Review focus: " + saved.get("review_focus", "Overview"))
+            st.markdown("#### " + saved.get("headline", "AI-assisted review"))
+            for finding in saved.get("findings", []):
+                st.write(finding)
+            if saved.get("next_steps"):
+                st.markdown("**Suggested checks**")
+                for action in saved["next_steps"]:
+                    st.write("• " + action)
+            for limitation in saved.get("limitations", []):
+                st.caption(limitation)
+            st.caption("AI assisted this review. Numerical facts come from the sales calculations above.")
+        elif saved:
+            st.warning(saved.get("headline") or "AI assistance is unavailable. Your calculated report is unchanged.")
+    with status_area.container():
+        render_ai_status(available=configured, used=bool(saved.get("ai_used")))
+
+
 st.set_page_config(
-    page_title="Agentic AI Analytics Platform",
+    page_title="Sales Studio · Your sales, made clear",
     layout="wide",
     page_icon=":bar_chart:",
 )
@@ -1859,14 +1953,26 @@ st.set_page_config(
 st.markdown(get_theme_css(), unsafe_allow_html=True)
 client = None
 init_session_state()
+if not st.session_state.get("auth_session"):
+    render_customer_hero()
 authenticated_identity = require_login()
 st.session_state.user_identity = authenticated_identity
 st.session_state.openai_runtime = validate_openai_runtime()
 
-render_hero()
-selected_nav = render_top_navigation(st.session_state.get("top_navigation", "Overview"))
-st.session_state.workspace_route = selected_nav
-sidebar_state = render_sidebar()
+with st.sidebar:
+    st.markdown("### Sales Studio")
+    if authenticated_identity.get("role") == "admin":
+        interface = st.radio(
+            "Interface", ["Customer dashboard", "Admin workspace"], key="interface_mode",
+            help="Administrators can preview the customer experience or manage the platform.",
+        )
+    else:
+        # Presentation choices never grant access to administrator views.
+        interface = "Customer dashboard"
+        st.session_state.interface_mode = interface
+        st.caption("Customer dashboard")
+customer_mode = interface == "Customer dashboard"
+sidebar_state = render_customer_sidebar() if customer_mode else render_sidebar()
 configure_workspace_session(
     authenticated_identity["user_id"],
     authenticated_identity["team_id"],
@@ -1874,7 +1980,19 @@ configure_workspace_session(
     workspace_scope=sidebar_state["workspace_scope"],
     display_name=authenticated_identity.get("display_name"),
 )
-render_auth_controls()
+render_auth_controls(customer_mode=customer_mode)
+if customer_mode:
+    render_customer_hero(has_data="uploaded_df" in st.session_state)
+    customer_progress = st.empty()
+    with customer_progress.container():
+        render_step_progress(2 if "uploaded_df" in st.session_state else 1)
+    sidebar_state.update(render_customer_data_controls(sidebar_state))
+    st.session_state.workspace_route = "Overview"
+else:
+    render_hero()
+    st.caption("Admin workspace · Platform settings, integrations, and diagnostics")
+    selected_nav = render_top_navigation(st.session_state.get("top_navigation", "Overview"))
+    st.session_state.workspace_route = selected_nav
 st.session_state.monitoring_config = {
     **st.session_state.get("monitoring_config", default_monitoring_config()),
     "enabled": sidebar_state["monitoring_enabled"],
@@ -1897,6 +2015,7 @@ if sidebar_state["load_demo"]:
     profile_active_dataframe(st.session_state.uploaded_df, "Synthetic retail sales (USD)")
     st.session_state.command_text = "Revenue by product"
     st.session_state.command_input = "Revenue by product"
+    st.session_state.customer_initial_report_pending = customer_mode
     st.rerun()
 
 if sidebar_state["use_database"]:
@@ -1925,10 +2044,16 @@ if st.session_state.get("csv_import_pending"):
     else:
         st.caption("Upload pending · Analysis will resume after a file is reviewed or the upload is canceled.")
 elif "uploaded_df" in st.session_state:
-    st.caption(f"Active data: {st.session_state.uploaded_name} · {len(st.session_state.uploaded_df):,} sales rows · Local calculations, no model calls.")
+    if customer_mode:
+        render_data_source(
+            st.session_state.uploaded_name, len(st.session_state.uploaded_df),
+            synthetic=st.session_state.get("uploaded_fingerprint") == "retail-demo",
+        )
+    else:
+        st.caption(f"Active data: {st.session_state.uploaded_name} · {len(st.session_state.uploaded_df):,} sales rows · Local calculations, no model calls.")
 elif st.session_state.get("csv_upload_error"):
     st.error(st.session_state.csv_upload_error)
-else:
+elif not customer_mode:
     st.caption("Active data: Chinook example database · Natural-language SQL requires an OpenAI API key.")
 
 render_schema(sidebar_state["show_schema"])
@@ -1960,8 +2085,10 @@ nav = st.session_state.get("workspace_route") or sidebar_state["nav"]
 if st.session_state.get("csv_import_pending"):
     render_pending_sales_upload()
 elif st.session_state.get("csv_upload_error"):
-    st.info("Upload a valid sales CSV or choose another data source from the sidebar.")
+    st.info("Upload a valid sales CSV or try the sample data.")
     st.button("Cancel upload", on_click=cancel_sales_upload)
+elif customer_mode:
+    render_customer_workspace()
 elif nav == "Overview":
     render_analytics_workspace(client, view_services)
 elif nav == "Operations":
@@ -1979,4 +2106,10 @@ elif nav == "API":
 else:
     render_workspace_history(view_services)
 
-render_footer()
+if customer_mode:
+    stage = 1 if st.session_state.get("csv_import_pending") or "uploaded_df" not in st.session_state else 3 if st.session_state.get("latest_df") is not None else 2
+    with customer_progress.container():
+        render_step_progress(stage)
+    st.markdown('<div class="footer-note">Sales Studio · Clear numbers. Thoughtful decisions.</div>', unsafe_allow_html=True)
+else:
+    render_footer()

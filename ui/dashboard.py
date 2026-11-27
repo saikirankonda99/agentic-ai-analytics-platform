@@ -11,14 +11,14 @@ from csv_analytics import DEMO_PATH, SUPPORTED_QUESTIONS
 
 
 STATUS_META = {
-    "idle": {"label": "Idle", "color": "#64748b"},
-    "active": {"label": "Active", "color": "#56ccf2"},
-    "success": {"label": "Success", "color": "#34d399"},
-    "warning": {"label": "Warning", "color": "#fbbf24"},
-    "error": {"label": "Error", "color": "#f87171"},
-    "retry": {"label": "Warning", "color": "#fbbf24"},
-    "skipped": {"label": "Skipped", "color": "#94a3b8"},
-    "pending": {"label": "Idle", "color": "#64748b"},
+    "idle": {"label": "Idle", "color": "#71606A"},
+    "active": {"label": "Active", "color": "#9D4937"},
+    "success": {"label": "Success", "color": "#3F6A51"},
+    "warning": {"label": "Warning", "color": "#956217"},
+    "error": {"label": "Error", "color": "#A13F42"},
+    "retry": {"label": "Warning", "color": "#956217"},
+    "skipped": {"label": "Skipped", "color": "#71606A"},
+    "pending": {"label": "Idle", "color": "#71606A"},
 }
 
 WORKFLOW_STEPS = [
@@ -582,16 +582,16 @@ def render_glass_widgets(widgets: list[dict]) -> None:
 def apply_chart_theme(fig: go.Figure, height: int = 410) -> go.Figure:
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(15,23,42,0.32)",
-        font=dict(color="#e2e8f0"),
+        plot_bgcolor="rgba(250,246,239,0.4)",
+        font=dict(color="#3D2939"),
         margin=dict(l=10, r=10, t=30, b=10),
         height=height,
         xaxis_title=None,
         yaxis_title=None,
         legend_title=None,
     )
-    fig.update_xaxes(showgrid=False, zeroline=False, color="#94a3b8")
-    fig.update_yaxes(gridcolor="rgba(148, 163, 184, 0.14)", zeroline=False, color="#94a3b8")
+    fig.update_xaxes(showgrid=False, zeroline=False, color="#71606A")
+    fig.update_yaxes(gridcolor="rgba(113, 96, 106, 0.15)", zeroline=False, color="#71606A")
     return fig
 
 
@@ -608,12 +608,12 @@ def build_plotly_figure(df: pd.DataFrame, x_col: str, y_col: str, chart_type: st
         if getattr(trace, "type", "") == "bar":
             trace.update(
                 marker=dict(
-                    color="#56ccf2",
-                    line=dict(color="rgba(86, 204, 242, 0.45)", width=1),
+                    color="#9D4937",
+                    line=dict(color="rgba(157, 73, 55, 0.45)", width=1),
                 )
             )
         else:
-            trace.update(marker=dict(color="#56ccf2"), line=dict(color="#56ccf2", width=3))
+            trace.update(marker=dict(color="#9D4937"), line=dict(color="#9D4937", width=3))
     return fig
 
 
@@ -632,10 +632,10 @@ def build_default_operations_figure() -> go.Figure:
             y=mock_df["Throughput"],
             mode="lines+markers",
             name="Workflow Throughput",
-            line=dict(color="#56ccf2", width=3),
+            line=dict(color="#9D4937", width=3),
             marker=dict(size=7),
             fill="tozeroy",
-            fillcolor="rgba(86, 204, 242, 0.12)",
+            fillcolor="rgba(157, 73, 55, 0.12)",
         )
     )
     fig.add_trace(
@@ -644,12 +644,12 @@ def build_default_operations_figure() -> go.Figure:
             y=mock_df["Quality"],
             mode="lines",
             name="Signal Quality",
-            line=dict(color="#34d399", width=2, dash="dot"),
+            line=dict(color="#3F6A51", width=2, dash="dot"),
         )
     )
     apply_chart_theme(fig, height=420)
     fig.update_layout(
-        plot_bgcolor="rgba(15,23,42,0.34)",
+        plot_bgcolor="rgba(250,246,239,0.4)",
         margin=dict(l=10, r=10, t=24, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
     )
@@ -897,9 +897,9 @@ def build_workflow_chart(status_values: list[str]) -> go.Figure:
                 marker=dict(
                     size=14,
                     color=[STATUS_META.get(status, STATUS_META["pending"])["color"] for status in status_values],
-                    line=dict(color="#0f172a", width=2),
+                    line=dict(color="#F0E5DA", width=2),
                 ),
-                line=dict(color="rgba(148, 163, 184, 0.22)", width=2),
+                line=dict(color="rgba(113, 96, 106, 0.22)", width=2),
                 hovertemplate="%{x}<extra></extra>",
             )
         ]
@@ -909,7 +909,7 @@ def build_workflow_chart(status_values: list[str]) -> go.Figure:
         margin=dict(l=10, r=10, t=0, b=0),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#e2e8f0"),
+        font=dict(color="#3D2939"),
         xaxis=dict(showgrid=False, zeroline=False, visible=False),
         yaxis=dict(showgrid=False, zeroline=False, visible=False),
     )
@@ -1501,7 +1501,7 @@ def history_card_html(item: dict) -> str:
     return (
         f'<div class="timeline-card">'
         f'<div class="timeline-step">Question</div>'
-        f'<div class="timeline-status" style="color:#f8fafc;">{escape_html(item["question"])}</div>'
+        f'<div class="timeline-status" style="color:#3D2939;">{escape_html(item["question"])}</div>'
         f'<div class="timeline-detail">Rows: {escape_html(item["rows"])}<br/>SQL: '
         f'<code>{escape_html(item["sql"] or "N/A")}</code></div>'
         f"</div>"
