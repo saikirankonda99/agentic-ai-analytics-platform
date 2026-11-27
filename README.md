@@ -11,6 +11,8 @@ Agentic AI Analytics Platform (Sales Studio) combines a customer sales dashboard
 
 The repository is a release candidate with explicit validation gates. See [Release readiness](docs/release-readiness.md) for what is implemented, what automated checks cover, and the remaining live AI, hosted deployment, and business-data acceptance steps.
 
+For the saved release revision, completed checks, hosting status, and next steps, see the [project checkpoint](docs/project-checkpoint.md).
+
 ## Small-business sales demo
 
 Load the included synthetic retail dataset, ask a supported sales question, inspect the answer, and export the result. **No API key is needed for CSV calculations.**
