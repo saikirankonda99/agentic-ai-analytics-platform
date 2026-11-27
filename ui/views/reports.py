@@ -115,7 +115,9 @@ def render_report_exports(services: ViewServices, scope: str = "analytics") -> N
             f"# {scope.title()} Summary",
             f"Question: {payload.get('question') or 'No active question'}",
             f"Rows: {payload.get('rows', 0)}",
+            f"Source sales rows: {payload['source_rows']}" if payload.get("source_rows") is not None else "",
             f"Insight: {payload.get('insight') or 'No insight generated yet.'}",
+            "Data notes: " + " ".join(payload["data_warnings"]) if payload.get("data_warnings") else "",
             f"SQL:\n{payload.get('sql') or 'No SQL generated.'}",
         ]
         if part

@@ -7,19 +7,22 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from csv_analytics import DEMO_PATH, SUPPORTED_QUESTIONS
+
 
 STATUS_META = {
-    "idle": {"label": "Idle", "color": "#64748b"},
-    "active": {"label": "Active", "color": "#56ccf2"},
-    "success": {"label": "Success", "color": "#34d399"},
-    "warning": {"label": "Warning", "color": "#fbbf24"},
-    "error": {"label": "Error", "color": "#f87171"},
-    "retry": {"label": "Warning", "color": "#fbbf24"},
-    "skipped": {"label": "Skipped", "color": "#94a3b8"},
-    "pending": {"label": "Idle", "color": "#64748b"},
+    "idle": {"label": "Idle", "color": "#71606A"},
+    "active": {"label": "Active", "color": "#9D4937"},
+    "success": {"label": "Success", "color": "#3F6A51"},
+    "warning": {"label": "Warning", "color": "#956217"},
+    "error": {"label": "Error", "color": "#A13F42"},
+    "retry": {"label": "Warning", "color": "#956217"},
+    "skipped": {"label": "Skipped", "color": "#71606A"},
+    "pending": {"label": "Idle", "color": "#71606A"},
 }
 
 WORKFLOW_STEPS = [
+    "sales calculation",
     "planner",
     "schema retrieval",
     "memory retrieval",
@@ -35,6 +38,7 @@ WORKFLOW_STEPS = [
 ]
 
 STEP_META = {
+    "sales calculation": {"title": "Sales calculation", "caption": "Verified CSV totals"},
     "planner": {"title": "Planner", "caption": "Intent routing"},
     "schema retrieval": {"title": "Schema", "caption": "Context retrieval"},
     "memory retrieval": {"title": "Memory", "caption": "History recall"},
@@ -256,20 +260,12 @@ def metric_grid_html(items: list[tuple[str, object]]) -> str:
 def render_hero() -> None:
     markdown_html(
         """
-        <div class="enterprise-hero">
+        <div class="enterprise-hero" data-testid="app-header">
             <div>
-                <div class="hero-eyebrow">Enterprise AI Analytics Workspace</div>
-                <h1 class="hero-title">Agentic analytics command center</h1>
+                <h1 class="hero-title">Agentic AI Analytics</h1>
                 <p class="hero-copy">
-                    Ask in natural language, inspect governed SQL, monitor orchestration, and publish executive-ready
-                    insights from one production workspace.
+                    Explore your sales, review the numbers, and export clear answers.
                 </p>
-            </div>
-            <div class="hero-badges">
-                <span class="hero-badge">Multi-agent</span>
-                <span class="hero-badge">Telemetry-ready</span>
-                <span class="hero-badge">RBAC-aware</span>
-                <span class="hero-badge">Workflow-native</span>
             </div>
         </div>
         """
@@ -281,16 +277,6 @@ def render_top_navigation(active_nav: str = "Overview") -> str:
     if active_nav not in nav_options:
         active_nav = "Overview"
 
-    markdown_html(
-        """
-        <div class="top-nav-shell">
-            <div>
-                <div class="top-nav-title">Analytics Operations Workspace</div>
-                <div class="top-nav-subtitle">Unified workspace for query execution, orchestration, monitoring, and audit trails.</div>
-            </div>
-        </div>
-        """
-    )
     return st.radio(
         "Primary navigation",
         nav_options,
@@ -301,13 +287,18 @@ def render_top_navigation(active_nav: str = "Overview") -> str:
     )
 
 
+def _open_overview() -> None:
+    st.session_state.top_navigation = "Overview"
+    st.session_state.workspace_route = "Overview"
+
+
 def render_sidebar() -> dict:
     with st.sidebar:
         markdown_html(
             """
             <div class="sidebar-brand">
-                <p class="sidebar-brand-title">GenAI SQL Assistant</p>
-                <div class="sidebar-brand-copy">Analytics operations cockpit for AI-native querying.</div>
+                <p class="sidebar-brand-title">Sales Analytics</p>
+                <div class="sidebar-brand-copy">Understand sales, compare products, and export results.</div>
             </div>
             """
         )
@@ -317,31 +308,40 @@ def render_sidebar() -> dict:
             show_schema = st.toggle("Show database schema", value=False)
 
         with st.expander("Workspace Context", expanded=True):
-            current_identity = st.session_state.get("user_identity") or {}
+            current_identity = st.session_state.get("auth_session") or {}
             workspace_scope = st.radio(
                 "Workspace scope",
                 ["Personal", "Shared team"],
                 index=1 if current_identity.get("workspace_scope") == "team" else 0,
                 horizontal=True,
+                key="workspace_scope_choice",
             )
-            workspace_user = st.text_input("User", value=current_identity.get("user_id", "local.user"))
-            workspace_team = st.text_input("Team", value=current_identity.get("team_id", "default-team"))
-            workspace_role = st.selectbox(
-                "Role",
-                ["admin", "analyst", "viewer"],
-                index=["admin", "analyst", "viewer"].index(current_identity.get("role", "admin"))
-                if current_identity.get("role", "admin") in ["admin", "analyst", "viewer"]
-                else 0,
-            )
+            workspace_user = current_identity.get("user_id", "")
+            workspace_team = current_identity.get("team_id", "")
+            workspace_role = current_identity.get("role", "viewer")
+            st.caption(f"User: {workspace_user}")
+            st.caption(f"Team: {workspace_team}")
+            st.caption(f"Role: {workspace_role}")
 
         with st.expander("Launch Templates", expanded=False):
             for query in SAMPLE_PROMPTS:
                 markdown_html(f'<div class="sample-query">{escape_html(query)}</div>')
 
-        with st.expander("Dataset Upload", expanded=False):
-            uploaded_file = st.file_uploader("Upload CSV", type=["csv"], label_visibility="collapsed")
+        with st.expander("Dataset Upload", expanded=True):
+            st.caption("Upload a sales CSV, preview its rows, and choose which columns to use. Use a revenue amount or quantity × unit price. Up to 10 MB / 50,000 rows.")
+            uploaded_file = st.file_uploader(
+                "Upload CSV", type=["csv"], label_visibility="collapsed",
+                max_upload_size=10,
+                key=f"sales_upload_{workspace_team}_{workspace_user}_{workspace_scope}_{st.session_state.get('upload_generation', 0)}",
+                on_change=_open_overview,
+            )
+            load_demo = st.button("Load retail demo", width="stretch", on_click=_open_overview)
+            st.download_button("Download sample sales CSV", DEMO_PATH.read_bytes(), "retail-sales.csv", "text/csv", width="stretch")
+            use_database = st.button("Use example database", width="stretch", on_click=_open_overview)
+            st.caption("The retail demo contains synthetic sales. CSV calculations require no API key.")
 
         with st.expander("Scheduled Monitoring", expanded=False):
+            st.caption("These checks use the example Chinook database. They run when this page is active, not as background jobs.")
             monitoring_enabled = st.toggle(
                 "Enable scheduled checks",
                 value=st.session_state.get("monitoring_config", {}).get("enabled", False),
@@ -365,7 +365,11 @@ def render_sidebar() -> dict:
                 ),
                 format_func=lambda value: f"{value} min" if value < 1440 else "Daily",
             )
-            run_monitoring = st.button("Run scheduled check", width="stretch")
+            run_monitoring = st.button(
+                "Run scheduled check", width="stretch",
+                disabled="uploaded_df" in st.session_state or bool(st.session_state.get("csv_import_pending") or st.session_state.get("csv_upload_error")),
+                help="Choose the example database to run scheduled database checks.",
+            )
 
         return {
             "nav": st.session_state.get("top_navigation", "Overview"),
@@ -380,6 +384,8 @@ def render_sidebar() -> dict:
             "monitoring_targets": monitoring_targets,
             "monitoring_interval": monitoring_interval,
             "run_monitoring": run_monitoring,
+            "load_demo": load_demo,
+            "use_database": use_database,
         }
 
 
@@ -416,34 +422,66 @@ def render_prompt_launcher() -> str | None:
     return prompt
 
 
+def _set_command_prompt(prompt: str) -> None:
+    st.session_state.command_input = prompt
+    st.session_state.command_text = prompt
+
+
 def render_command_bar() -> str | None:
     markdown_html(
         section_header_html(
             "Command Workspace",
-            "Submit a question and keep orchestration anchored to the analytics workspace.",
+            "Ask about your sales and inspect the calculated answer.",
             class_name="workspace-shell compact-shell",
         )
     )
     prompt = None
+    csv_mode = "uploaded_df" in st.session_state
+    available_questions = st.session_state.get("csv_import_available_questions", SUPPORTED_QUESTIONS)
+    if csv_mode:
+        st.caption("Choose a sales question below. Each answer uses every uploaded row.")
     with st.form("command_bar_form", clear_on_submit=False):
         query_col, action_col = st.columns([6, 1.2], vertical_alignment="bottom")
         with query_col:
             question = st.text_input(
                 "Command",
-                value=st.session_state.get("command_text", ""),
+                key="command_input",
                 placeholder="Ask a revenue, customer, or product question...",
                 label_visibility="collapsed",
             )
         with action_col:
             submitted = st.form_submit_button("Run", width="stretch")
 
-    c1, c2, c3 = st.columns(3)
-    if c1.button("Top Customers", width="stretch"):
-        prompt = "Top 10 customers by invoices"
-    if c2.button("Revenue by Country", width="stretch"):
-        prompt = "Revenue by country"
-    if c3.button("Top Tracks", width="stretch"):
-        prompt = "Top 10 tracks"
+    if csv_mode:
+        actions = [
+            ("Total Revenue", "Total revenue", ()),
+            ("Revenue by Product", "Revenue by product", ("product",)),
+            ("Monthly Revenue", "Revenue by month", ("date",)),
+            ("Sales Summary", "Sales summary", ()),
+            ("Revenue by Country", "Revenue by country", ("country",)),
+            ("Units Sold by Product", "Units sold by product", ("product", "quantity")),
+        ]
+    else:
+        actions = [
+            ("Top Customers", "Top 10 customers by invoices", ()),
+            ("Revenue by Country", "Revenue by country", ()),
+            ("Top Tracks", "Top 10 tracks", ()),
+        ]
+    unavailable = []
+    for start in range(0, len(actions), 3):
+        for column, (label, action, required) in zip(st.columns(3), actions[start:start + 3]):
+            disabled = csv_mode and action not in available_questions
+            help_text = None
+            if disabled:
+                missing = [field for field in required if field not in st.session_state.uploaded_df.columns]
+                fields = ", ".join(missing or required)
+                help_text = f"Upload your file again and map {fields} during review to enable this question."
+                unavailable.append(f"{label} ({fields})")
+            if column.button(label, width="stretch", on_click=_set_command_prompt, args=(action,),
+                             disabled=disabled, help=help_text):
+                prompt = action
+    if unavailable:
+        st.caption("Unavailable questions: " + "; ".join(unavailable) + ". Upload your file again and map the listed columns to enable them.")
 
     if submitted and question.strip():
         st.session_state.command_text = question.strip()
@@ -544,16 +582,16 @@ def render_glass_widgets(widgets: list[dict]) -> None:
 def apply_chart_theme(fig: go.Figure, height: int = 410) -> go.Figure:
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(15,23,42,0.32)",
-        font=dict(color="#e2e8f0"),
+        plot_bgcolor="rgba(250,246,239,0.4)",
+        font=dict(color="#3D2939"),
         margin=dict(l=10, r=10, t=30, b=10),
         height=height,
         xaxis_title=None,
         yaxis_title=None,
         legend_title=None,
     )
-    fig.update_xaxes(showgrid=False, zeroline=False, color="#94a3b8")
-    fig.update_yaxes(gridcolor="rgba(148, 163, 184, 0.14)", zeroline=False, color="#94a3b8")
+    fig.update_xaxes(showgrid=False, zeroline=False, color="#71606A")
+    fig.update_yaxes(gridcolor="rgba(113, 96, 106, 0.15)", zeroline=False, color="#71606A")
     return fig
 
 
@@ -570,12 +608,12 @@ def build_plotly_figure(df: pd.DataFrame, x_col: str, y_col: str, chart_type: st
         if getattr(trace, "type", "") == "bar":
             trace.update(
                 marker=dict(
-                    color="#56ccf2",
-                    line=dict(color="rgba(86, 204, 242, 0.45)", width=1),
+                    color="#9D4937",
+                    line=dict(color="rgba(157, 73, 55, 0.45)", width=1),
                 )
             )
         else:
-            trace.update(marker=dict(color="#56ccf2"), line=dict(color="#56ccf2", width=3))
+            trace.update(marker=dict(color="#9D4937"), line=dict(color="#9D4937", width=3))
     return fig
 
 
@@ -594,10 +632,10 @@ def build_default_operations_figure() -> go.Figure:
             y=mock_df["Throughput"],
             mode="lines+markers",
             name="Workflow Throughput",
-            line=dict(color="#56ccf2", width=3),
+            line=dict(color="#9D4937", width=3),
             marker=dict(size=7),
             fill="tozeroy",
-            fillcolor="rgba(86, 204, 242, 0.12)",
+            fillcolor="rgba(157, 73, 55, 0.12)",
         )
     )
     fig.add_trace(
@@ -606,12 +644,12 @@ def build_default_operations_figure() -> go.Figure:
             y=mock_df["Quality"],
             mode="lines",
             name="Signal Quality",
-            line=dict(color="#34d399", width=2, dash="dot"),
+            line=dict(color="#3F6A51", width=2, dash="dot"),
         )
     )
     apply_chart_theme(fig, height=420)
     fig.update_layout(
-        plot_bgcolor="rgba(15,23,42,0.34)",
+        plot_bgcolor="rgba(250,246,239,0.4)",
         margin=dict(l=10, r=10, t=24, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
     )
@@ -859,9 +897,9 @@ def build_workflow_chart(status_values: list[str]) -> go.Figure:
                 marker=dict(
                     size=14,
                     color=[STATUS_META.get(status, STATUS_META["pending"])["color"] for status in status_values],
-                    line=dict(color="#0f172a", width=2),
+                    line=dict(color="#F0E5DA", width=2),
                 ),
-                line=dict(color="rgba(148, 163, 184, 0.22)", width=2),
+                line=dict(color="rgba(113, 96, 106, 0.22)", width=2),
                 hovertemplate="%{x}<extra></extra>",
             )
         ]
@@ -871,7 +909,7 @@ def build_workflow_chart(status_values: list[str]) -> go.Figure:
         margin=dict(l=10, r=10, t=0, b=0),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#e2e8f0"),
+        font=dict(color="#3D2939"),
         xaxis=dict(showgrid=False, zeroline=False, visible=False),
         yaxis=dict(showgrid=False, zeroline=False, visible=False),
     )
@@ -1463,7 +1501,7 @@ def history_card_html(item: dict) -> str:
     return (
         f'<div class="timeline-card">'
         f'<div class="timeline-step">Question</div>'
-        f'<div class="timeline-status" style="color:#f8fafc;">{escape_html(item["question"])}</div>'
+        f'<div class="timeline-status" style="color:#3D2939;">{escape_html(item["question"])}</div>'
         f'<div class="timeline-detail">Rows: {escape_html(item["rows"])}<br/>SQL: '
         f'<code>{escape_html(item["sql"] or "N/A")}</code></div>'
         f"</div>"

@@ -16,4 +16,7 @@ data/workflow_runtime.db
 data/auth_sessions.json
 data/workspaces
 data/history_store
+data/test-runtime
+test-results
+playwright-report
 .auth_test_runtime

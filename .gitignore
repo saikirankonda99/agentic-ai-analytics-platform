@@ -4,7 +4,8 @@
 !.env.example
 
 # Streamlit local secrets/config
-.streamlit/
+.streamlit/*
+!.streamlit/config.toml
 
 # Python and tool caches
 __pycache__/

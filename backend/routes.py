@@ -9,11 +9,11 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, 
 from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse
 
-from backend.auth_context import get_request_session
+from backend.auth_context import get_request_session, session_from_token
 from backend.auth_sessions import login_user, revoke_session, validate_session_token
 from backend.diagnostics import runtime_diagnostics
 from backend.logging import get_logger
-from backend.models import DEFAULT_ORGANIZATION_ID, DEFAULT_USER_ID, DEFAULT_WORKSPACE_ID, RequestSession
+from backend.models import RequestSession
 from backend.runtime import orchestration_runtime
 from backend.services import (
     AgentCoordinationTrace,
@@ -37,6 +37,7 @@ from workspace import (
     save_sql_history_record,
     save_workspace_memory,
     save_workspace_preferences,
+    user_can,
 )
 
 logger = get_logger(__name__)
@@ -85,6 +86,12 @@ WorkflowStreamUpdateType = Literal[
 router = APIRouter(tags=["system"])
 
 
+def require_admin(session: RequestSession = Depends(get_request_session)) -> RequestSession:
+    if "workspace:admin" not in session.roles:
+        raise HTTPException(status_code=403, detail="Administrator access required")
+    return session
+
+
 class ExecuteRequest(BaseModel):
     question: str = Field(..., min_length=1)
 
@@ -96,6 +103,7 @@ class TokenUsageResponse(BaseModel):
 
 
 class WorkflowTelemetryResponse(BaseModel):
+    usage_source: Literal["synthetic"] = "synthetic"
     started_at: str | None
     completed_at: str | None
     latency_ms: int | None
@@ -143,6 +151,7 @@ class WorkflowStreamUpdateResponse(BaseModel):
 
 
 class ExecuteResponse(BaseModel):
+    execution_mode: Literal["simulation"] = "simulation"
     workflow_id: str
     question: str
     status: WorkflowStatus
@@ -155,6 +164,7 @@ class ExecuteResponse(BaseModel):
 
 
 class WorkflowStatusResponse(BaseModel):
+    execution_mode: Literal["simulation"] = "simulation"
     workflow_id: str
     question: str
     status: WorkflowStatus
@@ -244,13 +254,13 @@ def readiness_alias() -> dict[str, str]:
     return orchestration_service.readiness()
 
 
-@router.get("/diagnostics")
+@router.get("/diagnostics", dependencies=[Depends(require_admin)])
 def diagnostics() -> dict[str, object]:
     ready = orchestration_service.readiness()
     return runtime_diagnostics(ready)
 
 
-@router.get("/operations/summary", response_model=OperationsSummaryResponse)
+@router.get("/operations/summary", response_model=OperationsSummaryResponse, dependencies=[Depends(get_request_session)])
 def operations_summary_endpoint() -> OperationsSummaryResponse:
     ready = orchestration_service.readiness()
     return OperationsSummaryResponse(
@@ -305,34 +315,34 @@ def scheduler_center(session: RequestSession = Depends(get_request_session)) -> 
 
 
 @router.get("/incidents")
-def incident_center(workflow_id: str = "workflow:latest") -> dict[str, object]:
-    telemetry = backend_service.telemetry(workflow_id)
+def incident_center(workflow_id: str, session: RequestSession = Depends(get_request_session)) -> dict[str, object]:
+    telemetry = _authorized_workflow_telemetry(session, workflow_id)
     return backend_service.incidents(telemetry, workflow_id=workflow_id)
 
 
 @router.get("/executive/report")
-def executive_report(workflow_id: str = "workflow:latest", session: RequestSession = Depends(get_request_session)) -> dict[str, object]:
+def executive_report(workflow_id: str, session: RequestSession = Depends(get_request_session)) -> dict[str, object]:
     return backend_service.executive_report(
         workspace_id=session.workspace_id,
-        telemetry=backend_service.telemetry(workflow_id),
+        telemetry=_authorized_workflow_telemetry(session, workflow_id),
     )
 
 
 @router.get("/audit/timeline")
-def audit_timeline(workflow_id: str = "workflow:latest", session: RequestSession = Depends(get_request_session)) -> dict[str, object]:
+def audit_timeline(workflow_id: str, session: RequestSession = Depends(get_request_session)) -> dict[str, object]:
     return backend_service.operational_timeline(
         workspace_id=session.workspace_id,
         workflow_id=workflow_id,
-        telemetry=backend_service.telemetry(workflow_id),
+        telemetry=_authorized_workflow_telemetry(session, workflow_id),
     )
 
 
-@router.get("/connectors")
+@router.get("/connectors", dependencies=[Depends(require_admin)])
 def list_connectors() -> dict[str, object]:
     return backend_service.connectors()
 
 
-@router.get("/connectors/{connector_id}/health")
+@router.get("/connectors/{connector_id}/health", dependencies=[Depends(require_admin)])
 def connector_health(connector_id: str) -> dict[str, object]:
     try:
         return backend_service.connector_health(connector_id)
@@ -340,7 +350,7 @@ def connector_health(connector_id: str) -> dict[str, object]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.get("/connectors/{connector_id}/schema")
+@router.get("/connectors/{connector_id}/schema", dependencies=[Depends(require_admin)])
 def connector_schema(connector_id: str) -> dict[str, object]:
     try:
         return backend_service.connector_schema(connector_id)
@@ -348,7 +358,7 @@ def connector_schema(connector_id: str) -> dict[str, object]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.post("/connectors/validate")
+@router.post("/connectors/validate", dependencies=[Depends(require_admin)])
 def validate_connector(payload: ConnectorValidationRequest) -> dict[str, object]:
     try:
         return backend_service.validate_connector(payload.connector_id)
@@ -356,7 +366,7 @@ def validate_connector(payload: ConnectorValidationRequest) -> dict[str, object]
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.post("/connectors/{connector_id}/validate")
+@router.post("/connectors/{connector_id}/validate", dependencies=[Depends(require_admin)])
 def validate_connector_by_id(connector_id: str) -> dict[str, object]:
     try:
         return backend_service.validate_connector(connector_id)
@@ -364,7 +374,7 @@ def validate_connector_by_id(connector_id: str) -> dict[str, object]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.post("/execute", response_model=ExecuteResponse)
+@router.post("/execute", response_model=ExecuteResponse, description="Simulate orchestration stages. This endpoint does not generate or execute SQL; token and cost values are synthetic.")
 def execute(
     payload: ExecuteRequest,
     background_tasks: BackgroundTasks,
@@ -396,11 +406,8 @@ def execute(
 
 
 @router.get("/workflow/{workflow_id}", response_model=WorkflowStatusResponse)
-def get_workflow(workflow_id: str) -> WorkflowStatusResponse:
-    workflow = orchestration_service.get_workflow(workflow_id)
-    if workflow is None:
-        logger.info("workflow_not_found workflow_id=%s", workflow_id)
-        raise HTTPException(status_code=404, detail="Workflow not found")
+def get_workflow(workflow_id: str, session: RequestSession = Depends(get_request_session)) -> WorkflowStatusResponse:
+    workflow = _authorized_workflow(session, workflow_id)
 
     return WorkflowStatusResponse(
         workflow_id=workflow.workflow_id,
@@ -416,7 +423,8 @@ def get_workflow(workflow_id: str) -> WorkflowStatusResponse:
 
 
 @router.get("/workflow/{workflow_id}/events", response_model=WorkflowEventsResponse)
-def get_workflow_events(workflow_id: str) -> WorkflowEventsResponse:
+def get_workflow_events(workflow_id: str, session: RequestSession = Depends(get_request_session)) -> WorkflowEventsResponse:
+    _authorized_workflow(session, workflow_id)
     events = orchestration_service.get_events(workflow_id)
     if events is None:
         raise HTTPException(status_code=404, detail="Workflow not found")
@@ -428,15 +436,14 @@ def get_workflow_events(workflow_id: str) -> WorkflowEventsResponse:
 
 
 @router.get("/workflow/{workflow_id}/telemetry", response_model=WorkflowTelemetryResponse)
-def get_workflow_telemetry(workflow_id: str) -> WorkflowTelemetryResponse:
-    workflow = orchestration_service.get_workflow(workflow_id)
-    if workflow is None:
-        raise HTTPException(status_code=404, detail="Workflow not found")
+def get_workflow_telemetry(workflow_id: str, session: RequestSession = Depends(get_request_session)) -> WorkflowTelemetryResponse:
+    workflow = _authorized_workflow(session, workflow_id)
     return _telemetry_response(workflow.telemetry)
 
 
 @router.get("/workflow/{workflow_id}/replay", response_model=WorkflowReplayResponse)
-def replay_workflow(workflow_id: str) -> WorkflowReplayResponse:
+def replay_workflow(workflow_id: str, session: RequestSession = Depends(get_request_session)) -> WorkflowReplayResponse:
+    _authorized_workflow(session, workflow_id)
     updates = orchestration_service.get_stream_updates(workflow_id)
     if updates is None:
         raise HTTPException(status_code=404, detail="Workflow not found")
@@ -447,14 +454,15 @@ def replay_workflow(workflow_id: str) -> WorkflowReplayResponse:
 
 
 @router.get("/workflow/{workflow_id}/execution-graph", response_model=WorkflowExecutionGraphResponse)
-def get_workflow_execution_graph(workflow_id: str) -> WorkflowExecutionGraphResponse:
+def get_workflow_execution_graph(workflow_id: str, session: RequestSession = Depends(get_request_session)) -> WorkflowExecutionGraphResponse:
+    _authorized_workflow(session, workflow_id)
     graph = orchestration_service.get_execution_graph(workflow_id)
     if graph is None:
         raise HTTPException(status_code=404, detail="Workflow not found")
     return WorkflowExecutionGraphResponse(**graph)
 
 
-@router.get("/telemetry/schema")
+@router.get("/telemetry/schema", dependencies=[Depends(get_request_session)])
 def telemetry_schema() -> dict[str, object]:
     return {
         "schema_version": TELEMETRY_SCHEMA_VERSION,
@@ -463,7 +471,8 @@ def telemetry_schema() -> dict[str, object]:
 
 
 @router.get("/workflow/{workflow_id}/telemetry/events")
-def workflow_telemetry_events(workflow_id: str, q: str = "", phase: str = "", status: str = "") -> dict[str, object]:
+def workflow_telemetry_events(workflow_id: str, q: str = "", phase: str = "", status: str = "", session: RequestSession = Depends(get_request_session)) -> dict[str, object]:
+    _authorized_workflow(session, workflow_id)
     updates = orchestration_service.get_stream_updates(workflow_id)
     if updates is None:
         raise HTTPException(status_code=404, detail="Workflow not found")
@@ -481,7 +490,8 @@ def workflow_telemetry_events(workflow_id: str, q: str = "", phase: str = "", st
 
 
 @router.get("/workflow/{workflow_id}/telemetry/aggregate")
-def workflow_telemetry_aggregate(workflow_id: str) -> dict[str, object]:
+def workflow_telemetry_aggregate(workflow_id: str, session: RequestSession = Depends(get_request_session)) -> dict[str, object]:
+    _authorized_workflow(session, workflow_id)
     updates = orchestration_service.get_stream_updates(workflow_id)
     if updates is None:
         raise HTTPException(status_code=404, detail="Workflow not found")
@@ -502,16 +512,14 @@ def workflow_telemetry_aggregate(workflow_id: str) -> dict[str, object]:
     return {"workflow_id": workflow_id, "aggregate": telemetry_aggregate(events)}
 
 
-@router.get("/investigations/latest")
+@router.get("/investigations/latest", dependencies=[Depends(get_request_session)])
 def latest_investigation() -> dict[str, object]:
-    return backend_service.cache.get("investigation:latest") or {
-        "status": "empty",
-        "summary": "No investigation has been persisted in the current backend process.",
-    }
+    raise HTTPException(status_code=503, detail="Latest investigation access is unavailable until workspace-scoped storage is implemented.")
 
 
 @router.get("/workspace/{workspace_id}/inspection")
-def inspect_workspace(workspace_id: str) -> dict[str, object]:
+def inspect_workspace(workspace_id: str, session: RequestSession = Depends(get_request_session)) -> dict[str, object]:
+    _ensure_workspace_access(session, workspace_id)
     memory = load_workspace_memory_by_id(workspace_id)
     return workspace_summary(memory)
 
@@ -528,9 +536,7 @@ def save_workspace_sql_history(
     payload: SavedSQLRequest,
     session: RequestSession = Depends(get_request_session),
 ) -> dict[str, object]:
-    _ensure_workspace_access(session, workspace_id)
-    identity = build_user_session(session.user_id, session.workspace_id.split(".", 1)[0], "admin", session.user.display_name)
-    identity["workspace_id"] = workspace_id
+    identity = _workspace_writer(session, workspace_id, "query")
     memory = load_workspace_memory(identity)
     memory = save_sql_history_record(
         memory,
@@ -549,9 +555,7 @@ def save_workspace_investigation(
     payload: SavedInvestigationRequest,
     session: RequestSession = Depends(get_request_session),
 ) -> dict[str, object]:
-    _ensure_workspace_access(session, workspace_id)
-    identity = build_user_session(session.user_id, session.workspace_id.split(".", 1)[0], "admin", session.user.display_name)
-    identity["workspace_id"] = workspace_id
+    identity = _workspace_writer(session, workspace_id, "investigate")
     memory = load_workspace_memory(identity)
     memory = save_investigation_record(memory, dict(payload.investigation), note=payload.note, identity=identity, visibility=payload.visibility)
     memory = save_workspace_memory(identity, memory)
@@ -564,9 +568,7 @@ def save_workspace_preferences_endpoint(
     payload: WorkspacePreferencesRequest,
     session: RequestSession = Depends(get_request_session),
 ) -> dict[str, object]:
-    _ensure_workspace_access(session, workspace_id)
-    identity = build_user_session(session.user_id, session.workspace_id.split(".", 1)[0], "admin", session.user.display_name)
-    identity["workspace_id"] = workspace_id
+    identity = _workspace_writer(session, workspace_id, "manage_workspace" if workspace_id.endswith(".shared") else "query")
     memory = load_workspace_memory(identity)
     memory = save_workspace_preferences(memory, dict(payload.preferences))
     memory = save_workspace_memory(identity, memory)
@@ -579,9 +581,7 @@ def save_workspace_report(
     payload: SavedReportRequest,
     session: RequestSession = Depends(get_request_session),
 ) -> dict[str, object]:
-    _ensure_workspace_access(session, workspace_id)
-    identity = build_user_session(session.user_id, session.workspace_id.split(".", 1)[0], "admin", session.user.display_name)
-    identity["workspace_id"] = workspace_id
+    identity = _workspace_writer(session, workspace_id, "query")
     memory = load_workspace_memory(identity)
     memory = save_report_view(
         memory,
@@ -594,7 +594,8 @@ def save_workspace_report(
 
 
 @router.get("/workspace/{workspace_id}/transcripts")
-def export_workspace_transcripts(workspace_id: str, session_id: str = "") -> dict[str, object]:
+def export_workspace_transcripts(workspace_id: str, session_id: str = "", session: RequestSession = Depends(get_request_session)) -> dict[str, object]:
+    _ensure_workspace_access(session, workspace_id)
     memory = load_workspace_memory_by_id(workspace_id)
     return {
         "workspace_id": memory.get("workspace_id", workspace_id),
@@ -604,7 +605,8 @@ def export_workspace_transcripts(workspace_id: str, session_id: str = "") -> dic
 
 
 @router.get("/workspace/{workspace_id}/sql-history")
-def export_workspace_sql_history(workspace_id: str, limit: int = 25) -> dict[str, object]:
+def export_workspace_sql_history(workspace_id: str, limit: int = 25, session: RequestSession = Depends(get_request_session)) -> dict[str, object]:
+    _ensure_workspace_access(session, workspace_id)
     memory = load_workspace_memory_by_id(workspace_id)
     return {
         "workspace_id": memory.get("workspace_id", workspace_id),
@@ -613,7 +615,8 @@ def export_workspace_sql_history(workspace_id: str, limit: int = 25) -> dict[str
 
 
 @router.get("/workflow/{workflow_id}/stream")
-def stream_workflow_updates(workflow_id: str) -> StreamingResponse:
+def stream_workflow_updates(workflow_id: str, session: RequestSession = Depends(get_request_session)) -> StreamingResponse:
+    _authorized_workflow(session, workflow_id)
     updates = orchestration_service.get_stream_updates(workflow_id)
     if updates is None:
         raise HTTPException(status_code=404, detail="Workflow not found")
@@ -627,21 +630,17 @@ def stream_workflow_updates(workflow_id: str) -> StreamingResponse:
 
 @router.websocket("/workflow/{workflow_id}/ws")
 async def websocket_workflow_updates(websocket: WebSocket, workflow_id: str) -> None:
-    workflow = orchestration_service.get_workflow(workflow_id)
-    if workflow is None:
+    authorization = websocket.headers.get("authorization", "")
+    token = websocket.headers.get("x-session-token") or (
+        authorization.removeprefix("Bearer ").strip() if authorization.startswith("Bearer ") else None
+    )
+    try:
+        session = session_from_token(token)
+        workflow = _authorized_workflow(session, workflow_id)
+    except HTTPException:
         await websocket.close(code=1008)
         return
-
-    organization_id = websocket.headers.get("x-organization-id") or DEFAULT_ORGANIZATION_ID
-    workspace_id = websocket.headers.get("x-workspace-id") or DEFAULT_WORKSPACE_ID
-    if workflow.organization_id != organization_id:
-        await websocket.close(code=1008)
-        return
-    if workflow.workspace_id != workspace_id:
-        await websocket.close(code=1008)
-        return
-
-    channel = workflow_channel(workflow_id, workspace_id, organization_id)
+    channel = workflow_channel(workflow_id, workflow.workspace_id, workflow.organization_id)
     await websocket_manager.connect(websocket, channel)
     try:
         for update in orchestration_service.get_stream_updates(workflow_id) or ():
@@ -669,12 +668,44 @@ def _telemetry_response(telemetry: WorkflowTelemetry) -> WorkflowTelemetryRespon
 
 
 def _ensure_workspace_access(session: RequestSession, workspace_id: str) -> None:
-    if session.user_id == DEFAULT_USER_ID:
-        raise HTTPException(status_code=401, detail="Authentication required")
-    session_team = session.workspace_id.split(".", 1)[0]
+    session_team = session.organization.name
     allowed = {session.workspace_id, f"{session_team}.shared"}
     if workspace_id not in allowed:
         raise HTTPException(status_code=403, detail="Workspace access denied")
+
+
+def _workspace_writer(session: RequestSession, workspace_id: str, capability: str) -> dict:
+    _ensure_workspace_access(session, workspace_id)
+    role = next((role for role in ("admin", "analyst", "viewer") if f"workspace:{role}" in session.roles), "viewer")
+    identity = build_user_session(session.user_id, session.organization.name, role, session.user.display_name)
+    if role == "viewer" or not user_can(identity, capability):
+        raise HTTPException(status_code=403, detail="Your role cannot modify this workspace")
+    if workspace_id.endswith(".shared") and not user_can(identity, "share"):
+        raise HTTPException(status_code=403, detail="Sharing permission required")
+    identity["workspace_id"] = workspace_id
+    return identity
+
+
+def _authorized_workflow(session: RequestSession, workflow_id: str):
+    if workflow_id == "workflow:latest":
+        raise HTTPException(status_code=400, detail="An explicit workflow ID is required")
+    workflow = orchestration_service.get_workflow(workflow_id)
+    if workflow is None:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    if workflow.organization_id != session.organization_id:
+        raise HTTPException(status_code=403, detail="Workflow access denied")
+    _ensure_workspace_access(session, workflow.workspace_id)
+    return workflow
+
+
+def _authorized_workflow_telemetry(session: RequestSession, workflow_id: str) -> dict:
+    workflow = _authorized_workflow(session, workflow_id)
+    telemetry = workflow.telemetry
+    return {
+        "latency_ms": telemetry.latency_ms or 0,
+        "cost_usd": telemetry.estimated_cost_usd,
+        "total_tokens": telemetry.token_usage.total_tokens,
+    }
 
 
 def _stage_progression_response(

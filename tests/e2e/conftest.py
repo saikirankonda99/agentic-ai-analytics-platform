@@ -197,7 +197,9 @@ def playwright_instance():
 
 @pytest.fixture()
 def browser_context(playwright_instance, running_services: E2ESettings, request: pytest.FixtureRequest):
-    browser = playwright_instance.chromium.launch(headless=running_services.headless)
+    browser = playwright_instance.chromium.launch(
+        headless=running_services.headless, executable_path=running_services.browser_executable
+    )
     context = browser.new_context(accept_downloads=True, base_url=running_services.streamlit_url)
     context.set_default_timeout(running_services.action_timeout_ms)
     context.set_default_navigation_timeout(running_services.navigation_timeout_ms)
@@ -236,19 +238,23 @@ def logged_in_page(page, running_services: E2ESettings):
 def sample_csv(e2e_settings: E2ESettings) -> Path:
     path = e2e_settings.output_dir / "fixtures" / "sample-revenue.csv"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "country,revenue,orders\n"
-        "USA,1200,12\n"
-        "Canada,700,8\n"
-        "Germany,450,5\n",
-        encoding="utf-8",
-    )
+    shutil.copyfile(Path("data/demo/retail_sales.csv"), path)
     return path
 
 
 @pytest.fixture()
 def api_request(playwright_instance, running_services: E2ESettings):
     request_context = playwright_instance.request.new_context(base_url=running_services.fastapi_url)
+    login_response = request_context.post(
+        "/auth/login",
+        data={"username": running_services.admin_username, "password": running_services.admin_password},
+    )
+    assert login_response.ok
+    token = login_response.json()["session"]["session_token"]
+    request_context.dispose()
+    request_context = playwright_instance.request.new_context(
+        base_url=running_services.fastapi_url, extra_http_headers={"X-Session-Token": token}
+    )
     try:
         yield request_context
     finally:

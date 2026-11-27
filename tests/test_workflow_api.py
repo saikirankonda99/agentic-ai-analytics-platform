@@ -1,12 +1,7 @@
 from __future__ import annotations
 
-from fastapi.testclient import TestClient
-
-from backend.main import app
-
-
-def test_execute_and_fetch_workflow() -> None:
-    client = TestClient(app)
+def test_execute_and_fetch_workflow(authenticated_api_client) -> None:
+    client = authenticated_api_client
 
     created = client.post("/execute", json={"question": "Show revenue anomalies"}).json()
     workflow_id = created["workflow_id"]
@@ -19,6 +14,8 @@ def test_execute_and_fetch_workflow() -> None:
     telemetry_aggregate = client.get(f"/workflow/{workflow_id}/telemetry/aggregate").json()
 
     assert created["status"] == "queued"
+    assert created["execution_mode"] == "simulation"
+    assert created["telemetry"]["usage_source"] == "synthetic"
     assert fetched["status"] == "completed"
     assert fetched["telemetry"]["latency_ms"] is not None
     assert len(fetched["agent_executions"]) >= 6
@@ -32,8 +29,8 @@ def test_execute_and_fetch_workflow() -> None:
     assert telemetry_aggregate["aggregate"]["event_count"] >= 1
 
 
-def test_health_and_readiness() -> None:
-    client = TestClient(app)
+def test_health_and_readiness(authenticated_api_client) -> None:
+    client = authenticated_api_client
 
     assert client.get("/health").json()["status"] == "ok"
     readiness = client.get("/ready").json()
@@ -46,17 +43,17 @@ def test_health_and_readiness() -> None:
     assert "execution_policy" in diagnostics
     assert client.get("/telemetry/schema").json()["schema_version"]
     assert client.get("/operations/summary").json()["telemetry_schema_version"]
-    assert client.get("/investigations/latest").json()["status"] in {"empty", "idle", "running", "completed", "failed"}
+    assert client.get("/investigations/latest").status_code == 503
 
 
-def test_workspace_inspection_api() -> None:
-    client = TestClient(app)
+def test_workspace_inspection_api(authenticated_api_client) -> None:
+    client = authenticated_api_client
 
-    inspection = client.get("/workspace/default-team.local.user/inspection").json()
-    transcripts = client.get("/workspace/default-team.local.user/transcripts").json()
-    sql_history = client.get("/workspace/default-team.local.user/sql-history").json()
+    inspection = client.get("/workspace/default-team.admin/inspection").json()
+    transcripts = client.get("/workspace/default-team.admin/transcripts").json()
+    sql_history = client.get("/workspace/default-team.admin/sql-history").json()
 
-    assert inspection["workspace_id"] == "default-team.local.user"
+    assert inspection["workspace_id"] == "default-team.admin"
     assert "telemetry" in inspection
-    assert transcripts["workspace_id"] == "default-team.local.user"
+    assert transcripts["workspace_id"] == "default-team.admin"
     assert "items" in sql_history

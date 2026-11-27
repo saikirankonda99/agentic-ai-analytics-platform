@@ -7,9 +7,41 @@
 [![E2E](https://img.shields.io/badge/e2e-playwright-green.svg)](tests/e2e)
 [![License](https://img.shields.io/badge/license-not%20specified-lightgrey.svg)](#license)
 
-Agentic AI Analytics Platform is a production-oriented natural-language analytics workspace. It combines a Streamlit operator UI, a FastAPI control plane, safe SQL generation, workflow telemetry, workspace persistence, connector diagnostics, and browser-based regression testing.
+Agentic AI Analytics Platform is an in-development analytics workspace with a working sales CSV demo and a separate natural-language SQL workflow over the bundled Chinook database. It combines a Streamlit UI, a FastAPI control plane, SQL validation, workspace persistence, and automated tests.
 
 The project is intentionally scoped as an engineering reference implementation: it favors explicit orchestration, validation, diagnostics, and testability over opaque automation.
+
+## Small-business sales demo
+
+Load the included synthetic retail dataset, ask a supported sales question, inspect the answer, and export the result. **No API key is needed for CSV calculations.**
+
+1. Follow [Local Setup](#local-setup), then start Streamlit.
+2. For local development, sign in as `admin` with `admin123`, or the password configured in `AUTH_ADMIN_PASSWORD`.
+3. In the default **Customer dashboard**, click **Try sample data**. An initial sales summary opens.
+4. Expand **Common questions**, then click **Revenue by Product**, **Monthly Revenue**, or **Total Revenue**.
+5. Choose **Download results CSV** or **Download summary** below the answer.
+
+The customer dashboard uses a three-step sales flow and warm ivory/plum styling with decorative CSS 3D artwork. Only authenticated administrators can open the separate **Admin workspace**. See [Customer and Administrator Experience](docs/customer-admin-experience.md) for exact screen text, component notes, and the demo checklist.
+
+The 12 sample transactions total **352.00 USD**. Product totals are Coffee Beans **180.00**, Tea **100.00**, and Mug **72.00**. Monthly totals are January **144.00**, February **117.00**, and March **91.00**. These are synthetic demonstration results, not customer outcomes.
+
+For your own CSV, choose **Upload**, preview the first 10 rows, match the sales fields to your columns, and choose **Use this data** after reviewing the checks and total. Choose whether revenue comes from a line-amount column or quantity × unit price, and select the date format and currency when needed. The entire upload is validated before it becomes active.
+
+Own-file uploads support total revenue, revenue by product/month/country, units sold by product, and a sales summary, depending on the columns selected. Every row is included in the calculation. Unsupported questions receive a message instead of an unrelated answer. See [Sales Demo and Milestone Status](docs/small-business-milestone.md) for the CSV contract, validation, and remaining work.
+
+### Current implementation boundaries
+
+| Path | Current behavior |
+|---|---|
+| Sales CSV in Streamlit | Local deterministic aggregation, charts, result exports, and saved workspace metadata |
+| Optional CSV AI review | Explicit OpenAI request to prioritize verified aggregate facts and suggested checks; requires a server-side API key. No raw rows, arbitrary Q&A, causal claims, or automatic business actions |
+| Database questions in Streamlit | Model-generated SQL against the bundled example database; requires an API key and live-model evaluation |
+| FastAPI `POST /execute` | Workflow lifecycle **simulation**, explicitly labeled in responses; does not run the SQL pipeline |
+| Monitoring | Example-database checks triggered while the app is active; no durable background scheduler |
+| Redis and pgvector | Integration scaffolding; no implemented worker consumer or pgvector retrieval |
+| Customer deployment | Not ready for shared customer data; per-customer database/memory isolation and deployment validation remain |
+
+Use synthetic data for the demo. Production mode requires explicit users with hashed passwords and refuses the development login defaults. See [Deployment](docs/deployment.md).
 
 ## Live Links
 
@@ -201,7 +233,9 @@ Use Python 3.11.
 git clone https://github.com/saikirankonda99/agentic-ai-analytics-platform.git
 cd agentic-ai-analytics-platform
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-lock.txt
 ```
 
 Configure environment:
@@ -217,6 +251,18 @@ OPENAI_API_KEY=your_api_key_here
 ```
 
 The app can still run without an API key for diagnostics, onboarding, CSV-backed workflows, and most local tests.
+
+### Windows PowerShell: retail demo
+
+From the repository folder, use the Python 3.11 launcher and the virtual environment's interpreter directly. No PowerShell activation-policy change is needed:
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
+.\.venv\Scripts\python.exe -m streamlit run app.py --server.port 8501
+```
+
+Open `http://localhost:8501`, sign in with the development credentials above, and choose **Try sample data** in the customer dashboard. CSV calculations do not require an `.env` file, a separate FastAPI process, or an API key; the optional AI review does require a key. The lock file excludes the optional `uvloop` dependency on Windows. Native Windows installation has not been exercised by the Linux CI jobs.
 
 Start Streamlit:
 
@@ -234,9 +280,10 @@ Validate health:
 
 ```bash
 curl http://127.0.0.1:8000/health
-curl http://127.0.0.1:8000/diagnostics
 curl http://127.0.0.1:8501/_stcore/health
 ```
+
+Private API endpoints require a valid session from `POST /auth/login`. Send its token as `X-Session-Token` or `Authorization: Bearer ...`. Diagnostics and connector endpoints require an admin role; workspace endpoints check ownership and write permissions.
 
 ## Persistence Setup
 

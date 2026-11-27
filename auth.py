@@ -4,11 +4,14 @@ from backend.auth_sessions import login_user, revoke_session, validate_session_t
 
 
 def login() -> None:
-    st.sidebar.title("Login")
-    with st.sidebar.form("login_form"):
+    _, login_column, _ = st.columns([1, 1.4, 1])
+    with login_column:
+        st.markdown("### Welcome back")
+        st.caption("Sign in to your sales workspace. Your account determines which tools you can access.")
+    with login_column.form("login_form"):
         username = st.text_input("Username", value="admin")
         password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Login", width="stretch")
+        submitted = st.form_submit_button("Login", width="stretch", type="primary")
 
     if submitted:
         identity = login_user(username, password)
@@ -26,34 +29,40 @@ def login() -> None:
 def logout() -> None:
     session = st.session_state.get("auth_session", {})
     revoke_session(session.get("session_token"))
-    for key in ("user", "auth_session", "user_identity", "workspace_memory", "workspace_loaded", "workspace_session_id"):
-        if key in st.session_state:
-            del st.session_state[key]
+    clear_authenticated_state()
     st.rerun()
 
 
-def render_auth_controls() -> None:
+def clear_authenticated_state() -> None:
+    """Discard all uploaded data, results and cached identity when authentication ends."""
+    st.session_state.clear()
+
+
+def render_auth_controls(*, customer_mode: bool = False) -> None:
     identity = st.session_state.get("auth_session") or st.session_state.get("user_identity")
     if not identity:
         return
     memory = st.session_state.get("workspace_memory", {})
-    with st.sidebar.expander("Session", expanded=False):
+    with st.sidebar.expander("Account" if customer_mode else "Session", expanded=False):
         st.caption(f"{identity.get('display_name', identity.get('user_id', 'User'))}")
-        st.caption(f"Workspace: {identity.get('workspace_id', '')}")
-        st.caption(f"Saved SQL: {len(memory.get('query_history', []))}")
-        st.caption(f"Investigations: {len(memory.get('investigations', []))}")
-        st.caption(f"Recent activity: {len(memory.get('recent_activity', []))}")
+        if not customer_mode:
+            st.caption(f"Workspace: {identity.get('workspace_id', '')}")
+            st.caption(f"Saved SQL: {len(memory.get('query_history', []))}")
+            st.caption(f"Investigations: {len(memory.get('investigations', []))}")
+            st.caption(f"Recent activity: {len(memory.get('recent_activity', []))}")
         if st.button("Logout", width="stretch"):
             logout()
 
 
 def require_login() -> dict:
     session = st.session_state.get("auth_session")
-    if session and validate_session_token(session.get("session_token")):
-        st.session_state.user_identity = session
-        return session
+    identity = validate_session_token(session.get("session_token")) if session else None
+    if identity:
+        st.session_state.auth_session = identity
+        st.session_state.user_identity = identity
+        return identity
     if session:
+        clear_authenticated_state()
         st.warning("Session expired. Please log in again.")
-        st.session_state.pop("auth_session", None)
     login()
     st.stop()

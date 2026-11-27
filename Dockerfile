@@ -10,10 +10,10 @@ ENV STREAMLIT_SERVER_HEADLESS=true
 ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
 ENV STREAMLIT_SERVER_PORT=8501
 
-COPY requirements.txt .
+COPY requirements.txt requirements-lock.txt ./
 
 RUN python -m pip install --upgrade pip \
-    && python -m pip install -r requirements.txt \
+    && python -m pip install -r requirements-lock.txt \
     && adduser --disabled-password --gecos "" appuser \
     && mkdir -p /app/data \
     && chown -R appuser:appuser /app

@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import shutil
+import json
+import threading
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 import backend.auth_sessions as auth_sessions
 import workspace
 from backend.auth_context import get_request_session
 from backend.main import app
+from backend.persistence import PersistenceError, build_auth_session_repository
 
 
 def _runtime_dir() -> Path:
@@ -18,12 +22,12 @@ def _runtime_dir() -> Path:
     return path
 
 
-def test_auth_session_lifecycle_uses_file_backed_tokens(monkeypatch) -> None:
+def test_auth_session_lifecycle_uses_file_backed_tokens(monkeypatch, isolated_auth_config) -> None:
     runtime_dir = _runtime_dir()
     monkeypatch.setattr(auth_sessions, "AUTH_SESSION_PATH", runtime_dir / "auth_sessions.json")
 
     try:
-        identity = auth_sessions.login_user("admin", "admin123")
+        identity = auth_sessions.login_user("admin", isolated_auth_config["admin"])
 
         assert identity is not None
         assert identity["authenticated"] is True
@@ -34,7 +38,7 @@ def test_auth_session_lifecycle_uses_file_backed_tokens(monkeypatch) -> None:
         shutil.rmtree(runtime_dir.parent, ignore_errors=True)
 
 
-def test_password_hashing_and_invalid_credentials(monkeypatch) -> None:
+def test_password_hashing_and_invalid_credentials(monkeypatch, isolated_auth_config) -> None:
     runtime_dir = _runtime_dir()
     monkeypatch.setattr(auth_sessions, "AUTH_SESSION_PATH", runtime_dir / "auth_sessions.json")
     try:
@@ -48,11 +52,11 @@ def test_password_hashing_and_invalid_credentials(monkeypatch) -> None:
         shutil.rmtree(runtime_dir.parent, ignore_errors=True)
 
 
-def test_fastapi_auth_headers_resolve_request_session(monkeypatch) -> None:
+def test_fastapi_auth_headers_resolve_request_session(monkeypatch, isolated_auth_config) -> None:
     runtime_dir = _runtime_dir()
     monkeypatch.setattr(auth_sessions, "AUTH_SESSION_PATH", runtime_dir / "auth_sessions.json")
     try:
-        identity = auth_sessions.login_user("analyst", "analyst123")
+        identity = auth_sessions.login_user("analyst", isolated_auth_config["analyst"])
 
         session = get_request_session(x_session_token=identity["session_token"])
 
@@ -63,7 +67,7 @@ def test_fastapi_auth_headers_resolve_request_session(monkeypatch) -> None:
         shutil.rmtree(runtime_dir.parent, ignore_errors=True)
 
 
-def test_auth_config_validation_reports_hash_support(monkeypatch) -> None:
+def test_auth_config_validation_reports_hash_support(monkeypatch, isolated_auth_config) -> None:
     runtime_dir = _runtime_dir()
     monkeypatch.setattr(auth_sessions, "AUTH_SESSION_PATH", runtime_dir / "auth_sessions.json")
     try:
@@ -76,14 +80,16 @@ def test_auth_config_validation_reports_hash_support(monkeypatch) -> None:
         shutil.rmtree(runtime_dir.parent, ignore_errors=True)
 
 
-def test_auth_and_workspace_persistence_api(monkeypatch) -> None:
+def test_auth_and_workspace_persistence_api(monkeypatch, isolated_auth_config) -> None:
     runtime_dir = _runtime_dir()
     monkeypatch.setattr(auth_sessions, "AUTH_SESSION_PATH", runtime_dir / "auth_sessions.json")
     monkeypatch.setattr(workspace, "WORKSPACE_DIR", runtime_dir / "workspaces")
     try:
         client = TestClient(app)
 
-        login = client.post("/auth/login", json={"username": "admin", "password": "admin123"}).json()
+        login = client.post(
+            "/auth/login", json={"username": "admin", "password": isolated_auth_config["admin"]}
+        ).json()
         token = login["session"]["session_token"]
         headers = {"X-Session-Token": token}
         workspace_id = login["session"]["workspace_id"]
@@ -138,3 +144,82 @@ def test_auth_and_workspace_persistence_api(monkeypatch) -> None:
         assert logout["revoked"] is True
     finally:
         shutil.rmtree(runtime_dir.parent, ignore_errors=True)
+
+
+def test_stale_session_validation_cannot_restore_a_revoked_token(monkeypatch, isolated_auth_config):
+    identity = auth_sessions.login_user("admin", isolated_auth_config["admin"])
+    token = identity["session_token"]
+    repository = build_auth_session_repository()
+    original_get = repository.get_session
+    original_list = repository.list_sessions
+    captured = threading.Event()
+    resume = threading.Event()
+    errors = []
+
+    def pause_validation(snapshot):
+        if threading.current_thread().name == "stale-session-validation":
+            captured.set()
+            if not resume.wait(5):
+                raise RuntimeError("Controlled validation did not resume")
+        return snapshot
+
+    def validate():
+        try:
+            auth_sessions.validate_session_token(token)
+        except Exception as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(repository, "get_session", lambda value: pause_validation(original_get(value)))
+    # Also intercept the old bulk path so the regression catches its stale-snapshot write.
+    monkeypatch.setattr(repository, "list_sessions", lambda: pause_validation(original_list()))
+    monkeypatch.setattr(auth_sessions, "build_auth_session_repository", lambda: repository)
+    checker = threading.Thread(target=validate, name="stale-session-validation")
+    checker.start()
+    try:
+        assert captured.wait(5), "Validation did not read its snapshot"
+        assert auth_sessions.revoke_session(token) is True
+        assert original_get(token) is None
+    finally:
+        resume.set()
+        checker.join(5)
+    assert not checker.is_alive()
+    assert not errors
+    assert original_get(token) is None
+    assert auth_sessions.validate_session_token(token) is None
+
+
+@pytest.mark.parametrize("environment", ["test", "production"])
+def test_auth_storage_failure_never_falls_back_to_stale_json(monkeypatch, isolated_auth_config, environment):
+    identity = auth_sessions.login_user("admin", isolated_auth_config["admin"])
+    token = identity["session_token"]
+    payload = build_auth_session_repository().get_session(token)
+    stale_contents = json.dumps({token: payload})
+    auth_sessions.AUTH_SESSION_PATH.write_text(stale_contents)
+    assert auth_sessions.revoke_session(token) is True
+    monkeypatch.setenv("APP_ENV", environment)
+
+    def unavailable_repository():
+        raise PersistenceError("Storage unavailable")
+
+    monkeypatch.setattr(auth_sessions, "build_auth_session_repository", unavailable_repository)
+    assert auth_sessions.validate_session_token(token) is None
+    assert auth_sessions.revoke_session(token) is False
+    with pytest.raises(PersistenceError, match="could not be persisted"):
+        auth_sessions.login_user("admin", isolated_auth_config["admin"])
+    assert auth_sessions.AUTH_SESSION_PATH.read_text() == stale_contents
+
+
+@pytest.mark.parametrize("expires_at", ["2000-01-01T00:00:00+00:00", "2099-01-01T00:00:00", "not-a-date"])
+def test_expired_or_malformed_expiry_cannot_authenticate(isolated_auth_config, expires_at):
+    token = "invalid-expiry-session"
+    build_auth_session_repository().create_session(token, {
+        "session_token": token,
+        "user_id": "admin",
+        "display_name": "Test Admin",
+        "team_id": "default-team",
+        "workspace_id": "default-team.admin",
+        "role": "admin",
+        "created_at": "2000-01-01T00:00:00+00:00",
+        "expires_at": expires_at,
+    })
+    assert auth_sessions.validate_session_token(token) is None

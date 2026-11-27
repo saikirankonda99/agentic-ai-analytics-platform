@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
-
-from backend.main import app
 from backend.config import AppSettings, get_settings, validate_settings
 from backend.startup import run_startup_validation
 
@@ -33,8 +30,8 @@ def test_strict_startup_raises_for_required_connector_failure(monkeypatch) -> No
         run_startup_validation(strict=True)
 
 
-def test_health_readiness_and_diagnostics_endpoints_include_runtime_validation() -> None:
-    client = TestClient(app)
+def test_health_readiness_and_diagnostics_endpoints_include_runtime_validation(authenticated_api_client) -> None:
+    client = authenticated_api_client
 
     health = client.get("/health").json()
     readiness = client.get("/readiness").json()
